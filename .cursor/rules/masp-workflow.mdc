@@ -1,0 +1,240 @@
+---
+description: Development workflow for Solana MASP
+globs:
+alwaysApply: true
+---
+
+# Solana MASP Workflow
+
+## Before Starting Any Work
+
+1. **Read `tasks.md`** - Current phase, open tasks
+2. **Read `knowledge.md`** - Learnings, decisions, open questions
+3. Check if Surfpool is running (if needed for testing)
+
+---
+
+## Development Workflows
+
+### Circuit Development
+
+**Manual Steps:**
+
+```bash
+# 1. Edit circuit
+vim circuits/masp/src/main.nr
+
+# 2. Test locally
+cd circuits/masp
+nargo test                # Run circuit tests
+
+# 3. Compile
+nargo compile             # → target/masp.json
+
+# 4. Generate witness (if you have test inputs)
+nargo execute witness     # Uses Prover.toml inputs
+
+# 5. Generate proof artifacts
+bb OLD_API write_vk -b target/masp.json -o vk.bin
+bb OLD_API prove -b target/masp.json -w target/witness.gz -o proof.bin
+
+# 6. Verify proof locally
+bb OLD_API verify -p ./proof.bin -k ./vk.bin
+```
+
+**Via Script:**
+
+```bash
+./scripts/build.sh        # Compiles circuit + generates VK + builds program
+```
+
+### Solana Program Development
+
+**Manual Steps:**
+
+```bash
+# 1. Edit program
+vim programs/solana-masp/src/lib.rs
+
+# 2. Check formatting and lints
+cd programs/solana-masp
+cargo fmt
+cargo clippy
+
+# 3. Run unit tests
+cargo test
+
+# 4. Build for Solana
+cargo build-sbf           # → target/deploy/solana_masp.so
+
+# 5. Deploy to Surfpool (must be running separately)
+solana program deploy target/deploy/solana_masp.so --url http://127.0.0.1:8899
+```
+
+**Via Script:**
+
+```bash
+cd programs/solana-masp && cargo build-sbf
+./scripts/deploy.sh       # Deploys to Surfpool
+```
+
+### Client Development
+
+**Manual Steps:**
+
+```bash
+cd client
+cargo fmt
+cargo clippy
+cargo test
+cargo build
+```
+
+### End-to-End Testing
+
+**Prerequisites:**
+
+-   Surfpool running (start manually via MCP `start_surfnet`)
+-   Program deployed
+
+**Manual Steps:**
+
+```bash
+# 1. Check Surfpool is running
+curl http://127.0.0.1:8899 -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+
+# 2. Deploy if needed
+./scripts/deploy.sh
+
+# 3. Get program ID from deploy output, then run tests
+cd scripts
+npm install
+PROGRAM_ID=<pubkey> node test_e2e.mjs
+```
+
+**Via Script:**
+
+```bash
+# After deploy, note the program ID
+PROGRAM_ID=<pubkey> node scripts/test_e2e.mjs
+```
+
+---
+
+## Surfpool (Run Manually)
+
+Surfpool is started manually by the user, not via mcp or scripts.
+
+```
+# In Cursor, use MCP tool: start_surfnet
+
+# Or if running outside Cursor:
+surfpool start
+```
+
+Once running, RPC is at `http://127.0.0.1:8899`.
+
+---
+
+## Documentation Updates
+
+**After completing work or learning something new:**
+
+1. **Update `tasks.md`**
+
+    - Check off completed tasks
+    - Add new tasks discovered
+    - Update status if phase changes
+
+2. **Update `knowledge.md`**
+
+    - Add learnings and discoveries
+    - Record design decisions with rationale
+    - Update open questions
+
+3. **Update `README.md`**
+
+    - If project structure changes
+    - If commands change
+
+4. **Update cursor rules if workflow changes**
+    - New scripts added → update this file
+    - New references discovered → update `masp-references.mdc`
+
+---
+
+## Build Commands Reference
+
+| Task               | Manual Command                                          | Script                |
+| ------------------ | ------------------------------------------------------- | --------------------- |
+| Compile circuit    | `cd circuits/masp && nargo compile`                     | `./scripts/build.sh`  |
+| Generate VK        | `bb OLD_API write_vk -b target/masp.json -o vk.bin`     | `./scripts/build.sh`  |
+| Build program      | `cd programs/solana-masp && cargo build-sbf`            | `./scripts/build.sh`  |
+| Deploy to Surfpool | `solana program deploy ... --url http://127.0.0.1:8899` | `./scripts/deploy.sh` |
+| Run E2E tests      | `PROGRAM_ID=<pubkey> node scripts/test_e2e.mjs`         | -                     |
+
+---
+
+## Debugging
+
+### Circuit Issues
+
+```bash
+nargo compile --show-ssa    # Verbose compilation
+nargo test --show-output    # Test with output
+bb OLD_API verify -p ./proof.bin -k ./vk.bin  # Verify proof locally
+```
+
+### Solana Program Issues
+
+```bash
+# View program logs
+solana logs --url http://127.0.0.1:8899
+
+# Simulate transaction
+solana simulate <TX_BASE58> --url http://127.0.0.1:8899
+
+# Check account
+solana account <PUBKEY> --url http://127.0.0.1:8899
+```
+
+### E2E Issues
+
+```bash
+# Verbose output
+DEBUG=* node scripts/test_e2e.mjs
+
+# Check program is deployed
+solana program show <PROGRAM_ID> --url http://127.0.0.1:8899
+```
+
+---
+
+## Project Files
+
+```
+solana-masp/
+├── tasks.md               # ← Track progress here
+├── knowledge.md           # ← Record learnings here
+├── README.md              # Project overview
+├── .cursor/rules/         # These rules
+│   ├── masp-development.mdc
+│   ├── masp-references.mdc
+│   └── masp-workflow.mdc
+├── circuits/masp/
+│   ├── src/main.nr        # Circuit code
+│   ├── Nargo.toml
+│   └── Prover.toml        # Test inputs
+├── programs/solana-masp/
+│   ├── src/lib.rs         # Program entry
+│   └── Cargo.toml
+├── client/
+│   ├── src/lib.rs
+│   └── Cargo.toml
+└── scripts/
+    ├── build.sh           # Full build
+    ├── deploy.sh          # Deploy to Surfpool
+    ├── test_e2e.mjs       # E2E tests
+    └── package.json
+```

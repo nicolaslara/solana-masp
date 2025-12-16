@@ -1,0 +1,188 @@
+---
+description: External references and resources for MASP implementation
+globs:
+alwaysApply: true
+---
+
+# MASP References
+
+## Internal References
+
+### Knowledge Base (Update This!)
+
+-   **Path:** `./knowledge.md`
+-   Captures learnings, decisions, open questions
+-   **Update as you learn new things**
+
+### Local Sapling-Groth16 Spike
+
+-   **Path:** `../sapling-groth16/`
+-   Circom implementation of Sapling Spend circuit
+-   Key learnings:
+    -   Poseidon hash is 70-100x cheaper than BLAKE2s in ZK
+    -   Domain separation via constant field elements
+    -   Baby JubJub for embedded curve operations
+    -   ~41K constraints (vs ~100K in original MASP)
+-   **Read:** `../sapling-groth16/sapling-tasks.md` for detailed analysis
+
+### UltraPlonk Verifier (Library)
+
+-   **Path:** `../solana-ultraplonk-verifier/`
+-   Used for proof verification on Solana
+-   Single-TX verification (~500K-1M CUs)
+-   Reference for BN254 syscall patterns
+
+---
+
+## Protocol Specifications
+
+### Zcash Orchard Protocol
+
+-   **Spec:** https://zips.z.cash/protocol/protocol.pdf (Section 5)
+-   **ZIP-224:** https://zips.z.cash/zip-0224 (Orchard Shielded Protocol)
+-   **Implementation:** https://github.com/zcash/orchard
+-   Modern design with unified "Action" transfers
+
+### Zcash Sapling Protocol
+
+-   **Spec:** https://zips.z.cash/protocol/protocol.pdf (Section 4)
+-   **ZIP-32:** https://zips.z.cash/zip-0032 (Key Derivation)
+-   **Implementation:** https://github.com/zcash/librustzcash
+-   Proven design, separate Spend/Output descriptions
+
+### Namada MASP
+
+-   **Docs:** https://docs.namada.net/users/shielded-transfers
+-   **Implementation:** https://github.com/anoma/masp
+-   **Spec:** https://specs.namada.net/modules/masp
+-   Multi-asset shielded pool architecture
+
+### Tachyon (Zcash Upgrade)
+
+-   **Blog:** https://seanbowe.com/blog/tachyon-scaling-zcash-oblivious-synchronization/
+-   **Author:** Sean Bowe (Electric Coin Company)
+-   Key concepts:
+    -   Oblivious synchronization (clients sync without revealing addresses)
+    -   Privacy-preserving throughput improvements
+
+---
+
+## Solana Infrastructure
+
+### Light Protocol (ZK Compression)
+
+-   **Docs:** https://www.zkcompression.com/
+-   **Whitepaper:** https://www.zkcompression.com/introduction
+-   **GitHub:** https://github.com/Lightprotocol/light-protocol
+-   State compression using Merkle trees
+-   200x cheaper account creation
+-   **Potential use:** Commitment tree storage
+
+Key features:
+
+-   Compressed accounts (rent-free)
+-   Merkle proofs for state verification
+-   Interoperable with SPL tokens
+
+### Helius (ZK Compression API)
+
+-   **Docs:** https://www.helius.dev/docs/api-reference/zk-compression/overview
+-   **Get Compressed Account:** https://www.helius.dev/docs/api-reference/zk-compression/getcompressedaccount
+-   RPC methods for compressed state
+-   **Use when:** Integrating with Light Protocol
+
+Key endpoints:
+
+-   `getCompressedAccount` - Fetch compressed account by address/hash
+-   `getCompressedAccountProof` - Get Merkle proof
+-   `getCompressedAccountsByOwner` - List accounts
+
+### groth16-solana
+
+-   **GitHub:** https://github.com/Lightprotocol/groth16-solana
+-   Reference for BN254 syscall patterns
+-   ~81K CU Groth16 verification
+
+### Solana BN254 Syscalls
+
+-   `solana-bn254` crate
+-   Operations: addition, multiplication, pairing
+-   All operations use big-endian bytes
+-   Active on mainnet since Solana 1.18.x
+
+---
+
+## Academic Papers
+
+### Core Theory
+
+1. **Zerocash** - "Decentralized Anonymous Payments from Bitcoin"
+
+    - https://ieeexplore.ieee.org/document/6956581
+    - Foundation for shielded transfer protocols
+
+2. **PLONK** - "Permutations over Lagrange-bases for Oecumenical Noninteractive arguments of Knowledge"
+
+    - https://eprint.iacr.org/2019/953
+    - Base for UltraPlonk
+
+3. **Poseidon** - "Poseidon: A New Hash Function for Zero-Knowledge Proof Systems"
+    - https://eprint.iacr.org/2019/458.pdf
+    - ZK-native hash function (~200 constraints)
+
+### Zcash Specifications
+
+1. **Sapling Protocol** - Section 4 of Zcash Protocol Spec
+2. **Orchard Protocol** - Section 5 of Zcash Protocol Spec
+3. **ZIP-32** - Key derivation
+4. **ZIP-224** - Orchard transaction format
+
+---
+
+## Toolchain
+
+### Noir + UltraPlonk
+
+```bash
+# Install (UltraPlonk-compatible versions)
+noirup -v v1.0.0-beta.3
+bbup  # bb 0.82.2
+
+# UltraPlonk commands (note: OLD_API)
+bb OLD_API prove -b target/circuit.json -w target/witness.gz -o proof.bin
+bb OLD_API write_vk -b target/circuit.json -o vk.bin
+bb OLD_API verify -p ./proof.bin -k ./vk.bin
+```
+
+### Solana
+
+```bash
+# Build program
+cd programs/solana-masp
+cargo build-sbf
+
+# Deploy
+solana program deploy target/deploy/solana_masp.so --url http://127.0.0.1:8899
+```
+
+### Circom (for reference, used in sapling-groth16)
+
+```bash
+# The sapling-groth16 spike uses Circom + snarkjs/rapidsnark
+# See ../sapling-groth16/README.md for setup
+```
+
+---
+
+## Cross-Reference Lookup
+
+| Topic                      | Where to Look                                                     |
+| -------------------------- | ----------------------------------------------------------------- |
+| Current tasks              | `./tasks.md`                                                      |
+| Learnings & decisions      | `./knowledge.md`                                                  |
+| Poseidon vs BLAKE2s        | `../sapling-groth16/sapling-tasks.md`                             |
+| Domain separation          | `../sapling-groth16/docs/domain_tags.md`                          |
+| UltraPlonk verification    | `../solana-ultraplonk-verifier/`                                  |
+| BN254 syscall patterns     | `../solana-ultraplonk-verifier/crates/ultraplonk-core/src/ops.rs` |
+| Light Protocol usage       | https://www.zkcompression.com/                                    |
+| Compressed account queries | https://www.helius.dev/docs/api-reference/zk-compression/         |

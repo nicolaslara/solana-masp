@@ -1,0 +1,8 @@
+{
+  "name": "masp-scripts",
+  "type": "module",
+  "dependencies": {
+    "@solana/web3.js": "^1.95.0"
+  }
+}
+

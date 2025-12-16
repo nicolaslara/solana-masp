@@ -1,0 +1,203 @@
+---
+description: Development rules for Solana MASP (Multi-Asset Shielded Pool)
+globs:
+alwaysApply: true
+---
+
+# MASP Development Rules
+
+## Before Starting Work
+
+1. **Read `tasks.md`** - Current status and open questions
+2. **Read `knowledge.md`** - Learnings and design decisions
+3. **Update both** as you make progress
+
+## Project Structure
+
+```
+solana-masp/
+├── circuits/masp/          # Noir circuits (UltraPlonk)
+├── programs/solana-masp/   # Solana program
+├── client/                 # Client library
+├── scripts/                # Build and test automation
+├── tests/                  # Test resources
+├── tasks.md                # Implementation tracking
+└── knowledge.md            # Learnings and decisions
+```
+
+---
+
+## Best Practices (2025)
+
+### Noir Circuit Development
+
+```noir
+// Use explicit types for clarity
+fn main(
+    commitment: pub Field,
+    nullifier: pub Field,
+    value: Field,
+    path: [Field; 32],
+) {
+    // Use domain separation for all hashes
+    let DOMAIN_NULLIFIER: Field = 2;
+
+    // Prefer std library functions
+    use std::hash::poseidon2::Poseidon2;
+
+    // Document constraints
+    // This enforces: nullifier = H(DOMAIN || nk || rho)
+    assert(nullifier == poseidon2([domain, nk, rho]));
+}
+```
+
+**Noir Best Practices:**
+
+-   Use Poseidon2 for hashing (BN254-native, ~200 constraints vs ~21K for BLAKE2s)
+-   Domain separation: prepend constant to hash inputs
+-   Prefer `Field` over `u64` when possible (native to ZK)
+-   Document expected constraints per component
+-   Test with `nargo test` before generating proofs
+
+### Rust Development
+
+```rust
+// Prefer Result over panic
+pub fn parse_proof(data: &[u8]) -> Result<Proof, Error> {
+    if data.len() < PROOF_SIZE {
+        return Err(Error::InvalidLength);
+    }
+    // ...
+}
+
+// Use const generics for fixed-size data
+pub struct Commitment([u8; 32]);
+
+// Zero-copy where practical
+pub fn verify<'a>(proof: &'a [u8], vk: &VerificationKey) -> Result<bool, Error> {
+    // Work with references, avoid cloning
+}
+
+// Document invariants
+/// Nullifier must be 32 bytes, big-endian.
+/// Returns Error::AlreadySpent if nullifier exists.
+pub fn record_nullifier(nullifier: &[u8; 32]) -> Result<(), Error>;
+```
+
+**Rust Best Practices:**
+
+-   Use `thiserror` for custom errors (not string errors)
+-   Prefer `&[u8]` over `Vec<u8>` for inputs
+-   Use `#[derive(Debug, Clone, PartialEq)]` liberally
+-   Add `#[cfg(test)]` unit tests alongside code
+-   Use `cargo clippy` and `cargo fmt` before committing
+
+### Solana Program Development
+
+```rust
+// Use custom errors, not ProgramError::Custom(n)
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum MaspError {
+    #[error("Nullifier already spent")]
+    DoubleSpend,
+    #[error("Invalid Merkle proof")]
+    InvalidMerkleProof,
+    #[error("Proof verification failed")]
+    VerificationFailed,
+}
+
+// Log important values for debugging
+msg!("MASP: Processing shield, commitment={:?}", &commitment[..8]);
+
+// Validate all inputs
+if accounts.len() < REQUIRED_ACCOUNTS {
+    return Err(ProgramError::NotEnoughAccountKeys);
+}
+
+// Use borsh for serialization
+#[derive(BorshSerialize, BorshDeserialize)]
+pub struct TreeState {
+    pub root: [u8; 32],
+    pub leaf_count: u64,
+}
+```
+
+**Solana Best Practices:**
+
+-   Target <1.4M CU per transaction (hard limit)
+-   Use `solana-program` 3.x (latest stable)
+-   Never allocate unbounded `Vec` on-chain (use fixed arrays or accounts)
+-   Stack limit is 4KB - use heap for large structures
+-   Use `msg!` for debugging, but remove in production (costs CU)
+-   Test with `solana-program-test` before Surfpool
+
+### Testing
+
+```bash
+# Unit tests (fast, run frequently)
+cargo test                    # Rust
+nargo test                    # Noir
+
+# Integration tests (slower, run before commits)
+cargo test --features test-sbf  # Solana program test
+
+# E2E tests (slowest, run before PRs)
+# Requires Surfpool running
+node scripts/test_e2e.mjs
+```
+
+---
+
+## Key Constraints
+
+### UltraPlonk Verification
+
+-   Use `../solana-ultraplonk-verifier/` as a library
+-   Single-TX verification (~500K-1M CUs)
+-   Toolchain: Noir v1.0.0-beta.3 + bb 0.82.2
+-   Use `bb OLD_API` for UltraPlonk (not `bb prove`)
+
+### Solana BN254 Syscalls
+
+```rust
+// Available via solana-bn254 crate
+alt_bn128_addition       // G1 addition
+alt_bn128_multiplication // G1 scalar mul
+alt_bn128_pairing        // Pairing check
+```
+
+-   **Never** use arkworks pairing on-chain (exceeds CU)
+-   All operations use big-endian bytes
+
+### Cryptographic Choices (from sapling-groth16 learnings)
+
+-   **Hash function:** Poseidon (70-100x cheaper than BLAKE2s in ZK)
+-   **Embedded curve:** Baby JubJub (for BN254)
+-   **Domain separation:** Constant field element prepended to inputs
+
+---
+
+## Code Quality Checklist
+
+Before committing:
+
+-   [ ] `cargo fmt` (Rust)
+-   [ ] `cargo clippy` (Rust)
+-   [ ] `nargo fmt` (Noir, if available)
+-   [ ] `cargo test` passes
+-   [ ] `nargo test` passes (if circuit changed)
+-   [ ] Updated `tasks.md` if completing tasks
+-   [ ] Updated `knowledge.md` if learned something new
+
+---
+
+## no_std Compatibility
+
+For on-chain Rust code:
+
+```rust
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+use alloc::vec::Vec;
+```

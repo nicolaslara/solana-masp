@@ -1,0 +1,52 @@
+---
+description: MASP knowledge base - learnings and decisions
+globs:
+alwaysApply: true
+---
+
+# MASP Knowledge Base
+
+**Always read and update `knowledge.md` as you work.**
+
+## Quick Reference
+
+Current knowledge file: `./knowledge.md`
+
+## Key Learnings (Summary)
+
+### From Sapling-Groth16 Spike
+
+-   **Poseidon** is 70-100x cheaper than BLAKE2s in ZK circuits
+-   Use **domain separation** (constant prepended to hash inputs)
+-   **Baby JubJub** is the embedded curve for BN254
+-   BN254 has ~100-bit security (acceptable for most apps)
+
+### Toolchain
+
+-   Noir v1.0.0-beta.3 + bb 0.82.2
+-   Use `bb OLD_API` for UltraPlonk commands
+-   Solana BN254 syscalls for on-chain verification
+
+### State Management Options
+
+-   Standard Solana accounts
+-   **Light Protocol** for compressed state (200x cheaper)
+-   Query via **Helius** RPC
+
+## When to Update knowledge.md
+
+Update the knowledge file when you:
+
+-   Discover something about the protocol
+-   Make an architecture decision
+-   Find a useful pattern or technique
+-   Encounter a gotcha or limitation
+-   Answer an open question
+-   Add a new open question
+
+## File Location
+
+```
+solana-masp/
+└── knowledge.md    # ← Keep this updated!
+```
