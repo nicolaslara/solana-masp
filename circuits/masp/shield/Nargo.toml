@@ -2,6 +2,5 @@
 name = "masp_shield"
 type = "bin"
 authors = [""]
-compiler_version = ">=1.0.0-beta.3"
 
 [dependencies]

@@ -70,6 +70,9 @@ pub enum ClientError {
 
     #[error("Commitment not found on chain")]
     CommitmentNotFound,
+
+    #[error("Proof error: {0}")]
+    ProofError(#[from] crate::traits::ProofSystemError),
 }
 
 /// MASP client - manages keys, notes, and builds transactions
@@ -97,6 +100,9 @@ where
 
     /// Chain (transaction submission)
     chain: Arc<C>,
+
+    /// Spend prover backend (off-chain)
+    prover: Arc<dyn crate::traits::SpendProver>,
 }
 
 impl<I: ?Sized, C: ?Sized> MaspClient<I, C>
@@ -105,7 +111,12 @@ where
     C: Chain,
 {
     /// Create a new client with the given spending key
-    pub fn new(spending_key: SpendingKey, indexer: Arc<I>, chain: Arc<C>) -> Self {
+    pub fn new(
+        spending_key: SpendingKey,
+        indexer: Arc<I>,
+        chain: Arc<C>,
+        prover: Arc<dyn crate::traits::SpendProver>,
+    ) -> Self {
         let fvk = spending_key.to_full_viewing_key();
         Self {
             spending_key,
@@ -113,6 +124,7 @@ where
             notes: Vec::new(),
             indexer,
             chain,
+            prover,
         }
     }
 
@@ -397,7 +409,12 @@ where
         }
 
         // 4. Submit to chain
-        let request = transfer_data.to_request_with_outputs(ProofBytes::new(vec![]), outputs);
+        let (public, private) = transfer_data.spend_proof_inputs(self.fvk.nk_field());
+        let spend_proof = self
+            .prover
+            .prove(&crate::traits::ProofPublicInputs::Transfer(public), &private)?;
+
+        let request = transfer_data.to_request_with_outputs(spend_proof, outputs);
         let result = self.chain.transfer(request).await?;
 
         // 5. Update local state
@@ -451,22 +468,47 @@ where
             });
         }
 
-        // 4. Build unshield request
+        // 4. Prove unshield (real ZK when prover backend supports it)
+        use ark_ff::PrimeField;
+        let public = crate::traits::UnshieldPublicInputs {
+            anchor: witness.root(),
+            nullifier,
+            public_amount: amount,
+            // Stage-0: interpret the 32-byte recipient as a field element mod p.
+            // In production this must match the circuit/program recipient encoding decision.
+            public_recipient: Fr::from_be_bytes_mod_order(&recipient),
+            public_asset_id: asset_id,
+        };
+        let private = crate::traits::SpendPrivateInputs {
+            note_asset_id: owned.note.asset_id,
+            note_amount: owned.note.amount,
+            note_recipient: owned.note.recipient,
+            note_nullifier_nonce: owned.note.nullifier_nonce,
+            note_randomness: owned.note.note_randomness,
+            nk: self.fvk.nk_field(),
+            membership_witness: witness.clone(),
+        };
+        let spend_proof = self
+            .prover
+            .prove(&crate::traits::ProofPublicInputs::Unshield(public), &private)?
+            .into_bytes();
+
+        // 5. Build unshield request
         let request = UnshieldRequest {
             anchor: witness.root(),
             input_commitment: spend_commitment,
             membership_witness: witness,
             nullifier,
-            spend_proof: vec![], // TODO: real ZK proof
+            spend_proof,
             recipient,
             amount,
             token_address,
         };
 
-        // 5. Submit to chain
+        // 6. Submit to chain
         let result = self.chain.unshield(request).await?;
 
-        // 6. Update local state
+        // 7. Update local state
         self.mark_spent(spend_commitment);
 
         Ok(result)
@@ -809,7 +851,12 @@ mod tests {
         let acc = Arc::new(MockNoteStore::new(8));
         let chain = Arc::new(MockChain::new(acc.clone(), 10));
         let sk = SpendingKey::from_bytes(&[42u8; 32]);
-        let client = MaspClient::new(sk, acc.clone(), chain.clone());
+        let client = MaspClient::new(
+            sk,
+            acc.clone(),
+            chain.clone(),
+            Arc::new(crate::proofs::MockSpendProver),
+        );
         (client, acc, chain)
     }
 

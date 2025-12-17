@@ -309,6 +309,11 @@ Pick the easiest first (likely UltraPlonk):
   - `../solana-ultraplonk-verifier/WORKFLOW.md`
   - `../mobile-solana-e2e/solana-groth16-verifier/` scripts
   - Goal: newcomers can run “prove → verify” with 1–2 commands
+- [ ] Document and prototype **programmatic witness generation** (mobile requirement):
+  - Inputs encoded via Noir ABI (no `Prover.toml` in production)
+  - ACVM execution to solve witness in-memory
+  - Prover backend produces proof bytes (UltraPlonk/Groth16)
+  - Reference: `../mobile-solana-e2e/src/noir.rs`
 
 ### 0.14.3 Add Groth16 as Second Backend (After UltraPlonk Works)
 

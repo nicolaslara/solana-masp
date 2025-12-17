@@ -20,7 +20,7 @@
 
 use crate::proofs::{MockProofVerifier, MockSpendProver};
 use crate::traits::{
-    ProofBytes, ProofSystemError, ProofVerifier, SpendPrivateInputs, SpendProver, SpendPublicInputs,
+    ProofBytes, ProofPublicInputs, ProofSystemError, ProofVerifier, SpendPrivateInputs, SpendProver,
 };
 use async_trait::async_trait;
 
@@ -43,7 +43,7 @@ impl Default for UltraPlonkProverScaffold {
 impl SpendProver for UltraPlonkProverScaffold {
     fn prove(
         &self,
-        public_inputs: &SpendPublicInputs,
+        public_inputs: &ProofPublicInputs,
         private_inputs: &SpendPrivateInputs,
     ) -> Result<ProofBytes, ProofSystemError> {
         // TODO: integrate Noir + bb proving flow
@@ -71,7 +71,7 @@ impl Default for Groth16ProverScaffold {
 impl SpendProver for Groth16ProverScaffold {
     fn prove(
         &self,
-        public_inputs: &SpendPublicInputs,
+        public_inputs: &ProofPublicInputs,
         private_inputs: &SpendPrivateInputs,
     ) -> Result<ProofBytes, ProofSystemError> {
         // TODO: integrate Noir Groth16 proving flow
@@ -100,7 +100,7 @@ impl Default for UltraPlonkVerifierScaffold {
 impl ProofVerifier for UltraPlonkVerifierScaffold {
     async fn verify_local(
         &self,
-        public_inputs: &SpendPublicInputs,
+        public_inputs: &ProofPublicInputs,
         proof: &ProofBytes,
     ) -> Result<bool, ProofSystemError> {
         // TODO: integrate local verifier against vk + proof
@@ -109,7 +109,7 @@ impl ProofVerifier for UltraPlonkVerifierScaffold {
 
     async fn verify_on_chain(
         &self,
-        public_inputs: &SpendPublicInputs,
+        public_inputs: &ProofPublicInputs,
         proof: &ProofBytes,
     ) -> Result<bool, ProofSystemError> {
         // Scaffold: pretend we call a Solana program / CPI.
@@ -121,6 +121,11 @@ impl ProofVerifier for UltraPlonkVerifierScaffold {
         "ultraplonk(scaffold)"
     }
 }
+
+/// UltraPlonk verifier (local via ultraplonk-core, uses cached bb vk from prover).
+/// Feature-gated separately from the prover to avoid dependency conflicts.
+#[cfg(feature = "ultraplonk-verifier")]
+pub type UltraPlonkVerifierNoirRs = crate::backends::ultraplonk_verifier::NoirRsUltraPlonkVerifier;
 
 /// Groth16 verifier scaffold (delegates to mock today)
 pub struct Groth16VerifierScaffold {
@@ -139,7 +144,7 @@ impl Default for Groth16VerifierScaffold {
 impl ProofVerifier for Groth16VerifierScaffold {
     async fn verify_local(
         &self,
-        public_inputs: &SpendPublicInputs,
+        public_inputs: &ProofPublicInputs,
         proof: &ProofBytes,
     ) -> Result<bool, ProofSystemError> {
         // TODO: integrate local groth16 verification
@@ -148,7 +153,7 @@ impl ProofVerifier for Groth16VerifierScaffold {
 
     async fn verify_on_chain(
         &self,
-        public_inputs: &SpendPublicInputs,
+        public_inputs: &ProofPublicInputs,
         proof: &ProofBytes,
     ) -> Result<bool, ProofSystemError> {
         // Scaffold: pretend we call a Solana program / CPI.

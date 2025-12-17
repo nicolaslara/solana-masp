@@ -8,6 +8,11 @@
 //! 2. Transfer - Move value between shielded notes  
 //! 3. Unshield - Withdraw to transparent address
 
+// Solana's `entrypoint!` macro expands to cfg checks that trigger `unexpected_cfgs`
+// warnings on newer Rust toolchains when building in a non-Solana context (e.g. `cargo test`).
+// This is scaffolding code; we silence these warnings to keep test output clean.
+#![allow(unexpected_cfgs)]
+
 use solana_program::{
     account_info::AccountInfo, entrypoint, entrypoint::ProgramResult, msg,
     program_error::ProgramError, pubkey::Pubkey,

@@ -6,3 +6,8 @@ members = ["client", "programs/solana-masp"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

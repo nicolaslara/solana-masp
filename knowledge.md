@@ -29,10 +29,36 @@ This file captures learnings, design decisions, and discoveries as we develop th
 **Decision:** Keep the `Indexer` trait read-only, but add an optional `wait_for_update(tx_sig)` hook with a **default no-op** implementation.
 
 **Rationale:**
+
 - In production, the indexer is an external observer (RPC/Helius/Light) and “waiting” is not a protocol requirement.
 - In tests and demos, modeling indexing lag makes flows more realistic (submit → wait → scan) without building a full indexer.
 
 **Client helper:** `MaspClient::wait_for_indexer_update()` forwards to the configured indexer.
+
+### Witness & Proof Generation (Production: Mobile Prover)
+
+**Decision:** In production, the wallet (mobile) must generate witnesses and proofs **programmatically in-process**, not by shelling out to `nargo`/`bb`.
+
+**Why:**
+
+- Mobile apps cannot rely on external CLI tooling.
+- We need a stable, testable prover interface that works on device (FFI).
+
+**Reference spike:** `../mobile-solana-e2e/` demonstrates the intended model:
+
+- Parse Noir artifact JSON (contains ABI + ACIR bytecode)
+- Build an initial witness from structured inputs via the ABI encoder
+- Run **ACVM execution** (`execute`) to solve the full witness
+- Produce proof bytes using the selected proving system:
+  - **UltraPlonk**: Barretenberg ACIR proof generation
+  - **Groth16**: ACVM → R1CS → Groth16 backend
+
+**Implementation plan in this repo:**
+
+- Keep the `SpendProver` trait as the protocol boundary.
+- Provide two categories of implementations:
+  - **Dev/CI (CLI)**: `nargo execute` + `bb OLD_API prove` (useful for fast bringup, not production)
+  - **Mobile (library/FFI)**: embed ACVM + prover libs (no files; inputs passed as typed structs/bytes)
 
 ### Note Structure: Orchard-style Actions
 

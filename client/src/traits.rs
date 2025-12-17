@@ -192,6 +192,36 @@ pub struct SpendPublicInputs {
     pub tx_binding: Fr,
 }
 
+/// Public inputs for unshield proof
+///
+/// This follows `docs/circuit-security-requirements.md` (Unshield Circuit public inputs).
+#[derive(Debug, Clone)]
+pub struct UnshieldPublicInputs {
+    /// Anchor (commitment tree root)
+    pub anchor: Anchor,
+
+    /// Nullifier being revealed
+    pub nullifier: Nullifier,
+
+    /// Amount being withdrawn (public)
+    pub public_amount: u64,
+
+    /// Transparent recipient address (public, encoded as a field element)
+    pub public_recipient: Fr,
+
+    /// Asset id (public)
+    pub public_asset_id: Fr,
+}
+
+/// Public inputs for MASP proofs (per-circuit).
+#[derive(Debug, Clone)]
+pub enum ProofPublicInputs {
+    /// Transfer (shielded spend + output commitments)
+    Transfer(SpendPublicInputs),
+    /// Unshield (shielded spend + public withdrawal)
+    Unshield(UnshieldPublicInputs),
+}
+
 /// Private inputs for spend proof
 #[derive(Debug, Clone)]
 pub struct SpendPrivateInputs {
@@ -240,7 +270,7 @@ pub trait SpendProver: Send + Sync {
     /// Generate a spend proof
     fn prove(
         &self,
-        public_inputs: &SpendPublicInputs,
+        public_inputs: &ProofPublicInputs,
         private_inputs: &SpendPrivateInputs,
     ) -> Result<ProofBytes, ProofSystemError>;
 
@@ -270,7 +300,7 @@ pub trait ProofVerifier: Send + Sync {
     /// Verify a spend proof locally (off-chain)
     async fn verify_local(
         &self,
-        public_inputs: &SpendPublicInputs,
+        public_inputs: &ProofPublicInputs,
         proof: &ProofBytes,
     ) -> Result<bool, ProofSystemError>;
 
@@ -279,7 +309,7 @@ pub trait ProofVerifier: Send + Sync {
     /// Default: fall back to local verification (useful for scaffolds).
     async fn verify_on_chain(
         &self,
-        public_inputs: &SpendPublicInputs,
+        public_inputs: &ProofPublicInputs,
         proof: &ProofBytes,
     ) -> Result<bool, ProofSystemError> {
         self.verify_local(public_inputs, proof).await

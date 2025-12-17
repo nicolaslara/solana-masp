@@ -20,6 +20,7 @@ light-poseidon = "0.4.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 hex = "0.4"
+num-bigint = "0.4"
 
 # Error handling
 thiserror = "2.0.17"
@@ -34,9 +35,17 @@ async-trait = "0.1"
 # Encryption (AEAD)
 chacha20poly1305 = "0.10"
 
+[dependencies.ultraplonk-core]
+path = "../../solana-ultraplonk-verifier/crates/ultraplonk-core"
+optional = true
+
+[features]
+default = []
+
+# Local UltraPlonk verification via ultraplonk-core (uses solana-bn254 in native mode).
+# Use this for: local proof verification in tests.
+ultraplonk-verifier = ["dep:ultraplonk-core"]
+
 [dev-dependencies]
 rand = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-
-# Local UltraPlonk verifier library (used for proof-system integration smoke tests)
-ultraplonk-core = { path = "../../solana-ultraplonk-verifier/crates/ultraplonk-core" }

@@ -25,9 +25,9 @@ use crate::proofs::MembershipWitness;
 use crate::proofs::MockProofVerifier;
 use crate::traits::{
     Chain, ChainError, Indexer, IndexerError, InsertCommitmentResult, NoteCommitmentStore,
-    NullifierError, NullifierSet, OutputCiphertext, ProofBytes, ProofVerifier, ShieldRequest,
-    ShieldResult, SpendPublicInputs, StoreError, TransferRequest, TransferResult, UnshieldRequest,
-    UnshieldResult,
+    NullifierError, NullifierSet, OutputCiphertext, ProofBytes, ProofPublicInputs, ProofVerifier,
+    ShieldRequest, ShieldResult, SpendPublicInputs, StoreError, TransferRequest, TransferResult,
+    UnshieldPublicInputs, UnshieldRequest, UnshieldResult,
 };
 use crate::types::{Anchor, Commitment, Fr, Nullifier};
 use async_trait::async_trait;
@@ -509,12 +509,12 @@ impl Chain for MockChain {
         let ok = match self.verify_mode {
             crate::backends::config::ProofVerificationMode::Local => self
                 .verifier
-                .verify_local(&public_inputs, &proof)
+                .verify_local(&ProofPublicInputs::Transfer(public_inputs), &proof)
                 .await
                 .map_err(|e| ChainError::TransactionFailed(e.to_string()))?,
             crate::backends::config::ProofVerificationMode::OnChain => self
                 .verifier
-                .verify_on_chain(&public_inputs, &proof)
+                .verify_on_chain(&ProofPublicInputs::Transfer(public_inputs), &proof)
                 .await
                 .map_err(|e| ChainError::TransactionFailed(e.to_string()))?,
         };
@@ -582,23 +582,26 @@ impl Chain for MockChain {
             return Err(ChainError::InvalidProof);
         }
 
-        // Verify spend proof (scaffold)
-        let public_inputs = SpendPublicInputs {
+        // Verify unshield proof
+        use ark_ff::PrimeField;
+        let public_inputs = UnshieldPublicInputs {
             anchor: request.anchor,
             nullifier: request.nullifier,
-            output_commitments: vec![],
-            tx_binding: Fr::from(0u64),
+            public_amount: request.amount,
+            // Stage-0 encoding: interpret 32-byte recipient as a field element mod p.
+            public_recipient: Fr::from_be_bytes_mod_order(&request.recipient),
+            public_asset_id: crate::note::compute_asset_id(&request.token_address),
         };
         let proof = ProofBytes::new(request.spend_proof.clone());
         let ok = match self.verify_mode {
             crate::backends::config::ProofVerificationMode::Local => self
                 .verifier
-                .verify_local(&public_inputs, &proof)
+                .verify_local(&ProofPublicInputs::Unshield(public_inputs), &proof)
                 .await
                 .map_err(|e| ChainError::TransactionFailed(e.to_string()))?,
             crate::backends::config::ProofVerificationMode::OnChain => self
                 .verifier
-                .verify_on_chain(&public_inputs, &proof)
+                .verify_on_chain(&ProofPublicInputs::Unshield(public_inputs), &proof)
                 .await
                 .map_err(|e| ChainError::TransactionFailed(e.to_string()))?,
         };

@@ -15,7 +15,5 @@ solana-program = "2.0"
 default = []
 no-entrypoint = []
 
-[profile.release]
-overflow-checks = true
-lto = "fat"
-codegen-units = 1
+## NOTE:
+## Profile settings must live at the workspace root `Cargo.toml`.

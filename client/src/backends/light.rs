@@ -45,7 +45,7 @@ use std::sync::Arc;
 /// Uses MockNoteStore internally. Will be replaced with Helius client.
 pub struct LightIndexer {
     /// Helius API key (for future use)
-    api_key: Option<String>,
+    _api_key: Option<String>,
     /// Internal mock (temporary - will be replaced with real client)
     inner: Arc<MockNoteStore>,
 }
@@ -65,7 +65,7 @@ impl LightIndexer {
         println!("   ⚠️  Using MockNoteStore internally until real implementation");
 
         Self {
-            api_key: api_key.map(String::from),
+            _api_key: api_key.map(String::from),
             inner,
         }
     }

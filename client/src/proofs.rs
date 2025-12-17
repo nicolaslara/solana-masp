@@ -182,7 +182,7 @@ impl StoreId {
 // ============================================================================
 
 use crate::traits::{
-    ProofBytes, ProofSystemError, ProofVerifier, SpendPrivateInputs, SpendProver, SpendPublicInputs,
+    ProofBytes, ProofPublicInputs, ProofSystemError, ProofVerifier, SpendPrivateInputs, SpendProver,
 };
 use async_trait::async_trait;
 
@@ -192,7 +192,7 @@ pub struct MockSpendProver;
 impl SpendProver for MockSpendProver {
     fn prove(
         &self,
-        _public_inputs: &SpendPublicInputs,
+        _public_inputs: &ProofPublicInputs,
         _private_inputs: &SpendPrivateInputs,
     ) -> Result<ProofBytes, ProofSystemError> {
         // Return a placeholder proof
@@ -211,7 +211,7 @@ pub struct MockProofVerifier;
 impl ProofVerifier for MockProofVerifier {
     async fn verify_local(
         &self,
-        _public_inputs: &SpendPublicInputs,
+        _public_inputs: &ProofPublicInputs,
         _proof: &ProofBytes,
     ) -> Result<bool, ProofSystemError> {
         Ok(true)
@@ -229,6 +229,7 @@ impl ProofVerifier for MockProofVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::SpendPublicInputs;
 
     #[test]
     fn test_membership_witness_merkle_verify() {
@@ -274,8 +275,13 @@ mod tests {
             membership_witness: MembershipWitness::merkle_path(vec![], vec![], Fr::from(0u64)),
         };
 
-        let proof = prover.prove(&public, &private).unwrap();
-        assert!(verifier.verify_local(&public, &proof).await.unwrap());
+        let proof = prover
+            .prove(&ProofPublicInputs::Transfer(public.clone()), &private)
+            .unwrap();
+        assert!(verifier
+            .verify_local(&ProofPublicInputs::Transfer(public), &proof)
+            .await
+            .unwrap());
     }
 
     #[test]

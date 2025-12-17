@@ -20,9 +20,7 @@
 //! For POC, sync flow is more important as it requires less infrastructure.
 
 use masp_client::note::compute_asset_id;
-use masp_client::{
-    ChainError, Fr, Note, NoteCommitmentStore, NoteEncryption, ProofBytes, UnshieldRequest,
-};
+use masp_client::{ChainError, Fr, Note, NoteCommitmentStore, NoteEncryption, ProofBytes};
 
 mod test_env;
 use test_env::TestEnv;
@@ -63,7 +61,10 @@ fn prove_transfer(
     let nk = client.full_viewing_key().nk_field();
     let (public, private) = td.spend_proof_inputs(nk);
     env.prover
-        .prove(&public, &private)
+        .prove(
+            &masp_client::traits::ProofPublicInputs::Transfer(public),
+            &private,
+        )
         .expect("prover should succeed (scaffold)")
 }
 
@@ -178,22 +179,14 @@ async fn test_unshield_reveals_nullifier() {
     let shield_result = env.chain.shield(shield_req).await.unwrap();
     alice.add_note(note.clone(), shield_result.tx_sig);
 
-    // Prepare unshield
-    let (_, witness, nullifier) = alice.prepare_spend(note.commitment()).await.unwrap();
+    // Compute nullifier (for spent check) before unshielding
+    let (_, _witness, nullifier) = alice.prepare_spend(note.commitment()).await.unwrap();
 
-    let unshield_req = UnshieldRequest {
-        anchor: witness.root(),
-        input_commitment: note.commitment(),
-        membership_witness: witness,
-        nullifier,
-        spend_proof: mock_proof().into_bytes(),
-        recipient: [99u8; 32],
-        amount: 100,
-        token_address: tokens::usdc(),
-    };
-
-    env.chain.unshield(unshield_req).await.unwrap();
-    alice.mark_spent(note.commitment());
+    // Unshield via client flow (this will prove+verify under UltraPlonk)
+    alice
+        .unshield([99u8; 32], 100, tokens::usdc())
+        .await
+        .unwrap();
 
     // Nullifier should be spent
     assert!(env.chain.is_nullifier_spent(&nullifier).await.unwrap());
@@ -729,22 +722,9 @@ async fn test_bob_unshields_received_payment() {
     alice.mark_spent(note.commitment());
     bob.add_note(transfer_data.output.clone(), transfer_result.tx_sig);
 
-    // Bob unshields
+    // Bob unshields via client flow (this will prove+verify under UltraPlonk)
     let bob_note_cm = transfer_data.output.commitment();
-    let (_, witness, nullifier) = bob.prepare_spend(bob_note_cm).await.unwrap();
-
-    let unshield_req = UnshieldRequest {
-        anchor: witness.root(),
-        input_commitment: bob_note_cm,
-        membership_witness: witness,
-        nullifier,
-        spend_proof: mock_proof().into_bytes(),
-        recipient: [88u8; 32], // Bob's external wallet
-        amount: 100,
-        token_address: tokens::usdc(),
-    };
-
-    env.chain.unshield(unshield_req).await.unwrap();
+    bob.unshield([88u8; 32], 100, tokens::usdc()).await.unwrap();
     bob.mark_spent(bob_note_cm);
 
     assert_eq!(alice.balance(usdc_asset), 0);
@@ -941,7 +921,17 @@ async fn test_cannot_spend_others_note_wrong_nullifier() {
         spend_proof: mock_proof().into_bytes(),
         outputs: vec![TransferOutput::commitment_only(Fr::from(999u64))], // fake output
     };
-    env.chain.transfer(alice_transfer).await.unwrap(); // Would fail with real proofs!
+    let alice_result = env.chain.transfer(alice_transfer).await;
+    match env.config.proof_system {
+        masp_client::ProofSystemBackend::UltraPlonk => {
+            // With real proofs enabled, this should be rejected at proof verification.
+            assert!(alice_result.is_err());
+        }
+        _ => {
+            // In mock-proof mode, this "succeeds" (the goal of this test is nullifier semantics).
+            alice_result.unwrap();
+        }
+    }
 
     // Bob can STILL spend the note because his nullifier is different
     // (Alice's "spend" didn't actually invalidate the note)
@@ -1202,7 +1192,10 @@ async fn test_recovered_note_can_be_spent() {
     )];
 
     // Submit transfer
-    let transfer_req = transfer_data.to_request_with_outputs(mock_proof(), outputs);
+    let transfer_req = transfer_data.to_request_with_outputs(
+        prove_transfer(&env, &recovered_alice, &transfer_data),
+        outputs,
+    );
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
     recovered_alice.mark_spent(recovered_note.commitment);
 
@@ -1346,7 +1339,8 @@ async fn test_oob_first_payment_encrypted() {
         encrypted.ephemeral_key,
     )];
 
-    let transfer_req = transfer_data.to_request_with_outputs(mock_proof(), outputs);
+    let transfer_req = transfer_data
+        .to_request_with_outputs(prove_transfer(&env, &alice, &transfer_data), outputs);
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
     alice.mark_spent(note.commitment());
 
@@ -1405,7 +1399,8 @@ async fn test_oob_vs_full_sync_semantics() {
         enc.ephemeral_key,
     )];
 
-    let transfer_req = transfer_data.to_request_with_outputs(mock_proof(), outputs);
+    let transfer_req = transfer_data
+        .to_request_with_outputs(prove_transfer(&env, &alice, &transfer_data), outputs);
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
 
     // Method 1: Full sync (scans ALL outputs)

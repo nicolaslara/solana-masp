@@ -50,7 +50,18 @@ pub mod light;
 pub mod proof_system;
 pub mod solana;
 
+// CLI-based prover using nargo + bb (no dep conflicts, uses installed tools)
+pub mod cli_ultraplonk;
+
+// Verifier backend (ultraplonk-core) - feature-gated due to solana-program deps
+#[cfg(feature = "ultraplonk-verifier")]
+pub mod ultraplonk_verifier;
+
+pub use cli_ultraplonk::{CircuitType, CliProofManager, CliUltraPlonkProver};
+pub use config::ProofSystemBackend;
 pub use config::{BackendConfig, ChainBackend, EncryptionBackend, IndexerBackend};
 pub use light::LightIndexer;
-pub use config::ProofSystemBackend;
 pub use solana::SolanaChain;
+
+#[cfg(feature = "ultraplonk-verifier")]
+pub use ultraplonk_verifier::NoirRsUltraPlonkVerifier;

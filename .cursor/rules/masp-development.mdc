@@ -97,11 +97,12 @@ pub fn record_nullifier(nullifier: &[u8; 32]) -> Result<(), Error>;
 
 **Rust Best Practices:**
 
--   Use `thiserror` for custom errors (not string errors)
--   Prefer `&[u8]` over `Vec<u8>` for inputs
--   Use `#[derive(Debug, Clone, PartialEq)]` liberally
--   Add `#[cfg(test)]` unit tests alongside code
--   Use `cargo clippy` and `cargo fmt` before committing
+- Use `thiserror` for custom errors (not string errors)
+- Prefer `&[u8]` over `Vec<u8>` for inputs
+- Use `#[derive(Debug, Clone, PartialEq)]` liberally
+- Add `#[cfg(test)]` unit tests alongside code
+- Use `cargo clippy` and `cargo fmt` before committing
+- Fix warnings whenever possible. If not possible, silence them, but avoid silencing unless actually necessary.
 
 ### Solana Program Development
 

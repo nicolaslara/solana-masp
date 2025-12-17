@@ -1,4 +1,4 @@
-// MASP Unshield Circuit (Withdraw) — Stage 0 Scaffold
+// MASP Unshield Circuit (Withdraw) - Stage 0 Scaffold
 //
 // Goal: production-shaped input layout + working compile/execute/prove pipeline.
 // Constraints are intentionally minimal and will be replaced per the circuit security doc.
@@ -9,7 +9,7 @@ fn main(
     nullifier: pub Field,
     public_amount: pub u64,
     public_recipient: pub Field,
-
+    public_asset_id: pub Field,
     // Private inputs (production-shaped; mostly unused in stage 0)
     note_asset_id: Field,
     note_amount: u64,
@@ -18,16 +18,15 @@ fn main(
     note_randomness: Field,
     nk: Field,
 ) {
-    // Stage-0 constraints: ensure the withdrawn amount and recipient match the note.
+    // Stage-0 constraints: ensure the withdrawn amount and asset match the note.
     assert(public_amount == note_amount);
-    assert(public_recipient == note_recipient);
+    assert(public_asset_id == note_asset_id);
 
     // Touch other public inputs.
     assert(anchor == anchor);
     assert(nullifier == nullifier);
+    assert(public_recipient == public_recipient);
 
     // Tie in the remaining private fields so witness plumbing is exercised.
-    let _ = note_asset_id + note_nullifier_nonce + note_randomness + nk;
+    let _ = note_asset_id + note_recipient + note_nullifier_nonce + note_randomness + nk;
 }
-
-

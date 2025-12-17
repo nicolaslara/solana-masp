@@ -118,16 +118,87 @@ cd client
 MASP_PRINT_CONFIG=1 cargo test --test user_flows -- --nocapture
 ```
 
+Common knobs:
+
+- `MASP_CHAIN`: `mock|surfpool|devnet|testnet|mainnet|<custom_rpc_url>`
+- `MASP_INDEXER`: `mock|light` (light is a scaffold today; uses mock store internally)
+- `MASP_ENCRYPTION`: `chacha|mock` (mock is INSECURE, tests only)
+- `MASP_PROOF_SYSTEM`: `mock|ultraplonk|groth16` (non-mock are scaffolds today)
+- `MASP_PROOF_VERIFY`: `local|onchain`
+- `MASP_PRINT_CONFIG=1`: print chosen backends once per test run
+
+Examples:
+
+```bash
+# Exercise the SolanaChain scaffold selection (still uses mock internally today)
+cd client
+MASP_CHAIN=surfpool MASP_PRINT_CONFIG=1 cargo test --test user_flows -- --nocapture
+
+# Exercise the LightIndexer scaffold selection (still uses mock internally today)
+cd client
+MASP_INDEXER=light MASP_PRINT_CONFIG=1 cargo test --test user_flows -- --nocapture
+
+# Use mock encryption (INSECURE; for testing only)
+cd client
+MASP_ENCRYPTION=mock cargo test
+```
+
 ### Circuit Proof Pipeline Smoke Test (UltraPlonk)
 
 There is an **ignored** test that runs the real toolchain loop against our Stage-0 MASP transfer circuit:
 
 ```bash
 cd client
-cargo test --test masp_ultraplonk_pipeline -- --ignored --nocapture
+cargo test --features ultraplonk-tools --test masp_ultraplonk_pipeline -- --ignored --nocapture
 ```
 
 This requires `nargo` + `bb` on your PATH.
+
+### Real UltraPlonk Proving (CLI-based)
+
+This repo supports real UltraPlonk proving by shelling out to `nargo` + `bb` CLI tools:
+
+- Uses the installed `nargo`/`bb` toolchain (v1.0.0-beta.3 + 0.82.2)
+- Creates timestamped directories for proof artifacts: `client/target/masp_proofs/<circuit>-<timestamp>/`
+- Auto-cleans directories on success (set `MASP_KEEP_PROOF_ARTIFACTS=1` to keep)
+
+**Environment variables for CLI tools:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MASP_BB_PATH` | `~/.bb/bb` if exists, else `bb` in PATH | Path to `bb` binary |
+| `MASP_NARGO_PATH` | `nargo` in PATH | Path to `nargo` binary |
+| `MASP_KEEP_PROOF_ARTIFACTS` | unset | Set to `1` to keep proof artifacts |
+
+#### 1) Compile the circuit artifact (Noir)
+
+```bash
+cd circuits/masp/transfer
+nargo compile
+```
+
+This produces: `circuits/masp/transfer/target/masp_transfer.json`
+
+#### 2) Run the real-proof E2E test
+
+```bash
+cd client
+MASP_PROOF_SYSTEM=ultraplonk \
+  cargo test --features ultraplonk-verifier --test real_ultraplonk_transfer_e2e -- --ignored --nocapture
+```
+
+Notes:
+
+- The test is `#[ignore]` because it requires `nargo`/`bb` and the compiled circuit.
+- This targets the Stage-0 `transfer` circuit (single output commitment).
+- Proof artifacts are auto-cleaned on success. Set `MASP_KEEP_PROOF_ARTIFACTS=1` to keep them for debugging.
+
+#### Cleaning old proof artifacts
+
+```bash
+# Remove all proof artifact directories
+rm -rf client/target/masp_proofs/
+```
 
 ### Build (Circuits + Program)
 

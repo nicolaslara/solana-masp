@@ -9,10 +9,7 @@
 //! - `MASP_ENCRYPTION` (chacha|mock)  // mock is INSECURE, only for tests
 //! - `MASP_PRINT_CONFIG=1` to print selection
 
-use masp_client::backends::proof_system::{
-    Groth16ProverScaffold, Groth16VerifierScaffold, UltraPlonkProverScaffold,
-    UltraPlonkVerifierScaffold,
-};
+use masp_client::backends::proof_system::{Groth16ProverScaffold, Groth16VerifierScaffold};
 use masp_client::backends::{LightIndexer, SolanaChain};
 use masp_client::mock::{MockChain, MockChainOptions, MockNoteStore};
 use masp_client::proofs::{MockProofVerifier, MockSpendProver};
@@ -33,7 +30,9 @@ pub struct TestEnv {
     pub indexer: Arc<dyn Indexer>,
     pub chain: Arc<dyn Chain>,
     pub encryption: Arc<dyn NoteEncryption>,
+    #[allow(dead_code)]
     pub prover: Arc<dyn SpendProver>,
+    #[allow(dead_code)]
     pub verifier: Arc<dyn ProofVerifier>,
 }
 
@@ -45,23 +44,44 @@ impl TestEnv {
     pub fn from_env() -> Self {
         let config = BackendConfig::from_env();
 
+        // Avoid interleaved output: tests run in parallel. Print the config at most once.
         if std::env::var("MASP_PRINT_CONFIG").is_ok() {
-            config.print_config();
+            static PRINT_ONCE: std::sync::Once = std::sync::Once::new();
+            PRINT_ONCE.call_once(|| config.print_config());
         }
 
         // Shared store so chain writes are visible to the indexer in scaffold mode.
         let shared_store = Arc::new(MockNoteStore::new(16));
 
-        // Proof system selection (scaffolds today)
+        fn ultraplonk_prover() -> Arc<dyn SpendProver> {
+            // Use CLI-based prover that shells out to nargo + bb.
+            // Requires: nargo and bb installed, circuit compiled.
+            Arc::new(masp_client::backends::CliUltraPlonkProver::new())
+        }
+
+        fn ultraplonk_verifier() -> Arc<dyn ProofVerifier> {
+            #[cfg(feature = "ultraplonk-verifier")]
+            {
+                Arc::new(masp_client::backends::NoirRsUltraPlonkVerifier::new())
+            }
+            #[cfg(not(feature = "ultraplonk-verifier"))]
+            {
+                panic!(
+                    "UltraPlonk proof system selected, but the local verifier is not compiled in. \
+Compile tests with: `cargo test --features ultraplonk-verifier ...`"
+                );
+            }
+        }
+
         let prover: Arc<dyn SpendProver> = match config.proof_system {
             ProofSystemBackend::Mock => Arc::new(MockSpendProver),
-            ProofSystemBackend::UltraPlonk => Arc::new(UltraPlonkProverScaffold::default()),
+            ProofSystemBackend::UltraPlonk => ultraplonk_prover(),
             ProofSystemBackend::Groth16 => Arc::new(Groth16ProverScaffold::default()),
         };
 
         let verifier: Arc<dyn ProofVerifier> = match config.proof_system {
             ProofSystemBackend::Mock => Arc::new(MockProofVerifier),
-            ProofSystemBackend::UltraPlonk => Arc::new(UltraPlonkVerifierScaffold::default()),
+            ProofSystemBackend::UltraPlonk => ultraplonk_verifier(),
             ProofSystemBackend::Groth16 => Arc::new(Groth16VerifierScaffold::default()),
         };
 
@@ -130,6 +150,11 @@ impl TestEnv {
     /// Create a client bound to the configured backends.
     pub fn create_client(&self, seed: &[u8; 32]) -> MaspClient<dyn Indexer, dyn Chain> {
         let sk = SpendingKey::from_bytes(seed);
-        MaspClient::new(sk, self.indexer.clone(), self.chain.clone())
+        MaspClient::new(
+            sk,
+            self.indexer.clone(),
+            self.chain.clone(),
+            self.prover.clone(),
+        )
     }
 }

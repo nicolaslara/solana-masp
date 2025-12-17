@@ -7,6 +7,8 @@
 //! It validates the *production-shaped* development loop we care about:
 //! compile circuit → generate witness → generate proof + vk → convert vk → verify proof.
 
+#![cfg(feature = "ultraplonk-verifier")]
+
 use std::path::PathBuf;
 use std::process::Command;
 
