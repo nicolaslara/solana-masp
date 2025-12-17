@@ -238,12 +238,39 @@ where
         let note = Note::new(&mut OsRng, asset_id, amount, recipient);
         let commitment = note.commitment();
 
+        // Build shield proof (mock/real depending on configured prover backend).
+        let public = crate::traits::ShieldPublicInputs {
+            new_commitment: commitment,
+            public_asset_id: asset_id,
+            public_amount: amount,
+        };
+        let private = crate::traits::SpendPrivateInputs {
+            note_asset_id: note.asset_id,
+            note_amount: note.amount,
+            note_recipient: note.recipient,
+            note_nullifier_nonce: note.nullifier_nonce,
+            note_randomness: note.note_randomness,
+            nk: Fr::from(0u64),
+            membership_witness: crate::proofs::MembershipWitness::merkle_path(
+                vec![],
+                vec![],
+                Fr::from(0u64),
+            ),
+            output_notes: vec![],
+        };
+        let shield_proof = self
+            .prover
+            .prove(&crate::traits::ProofPublicInputs::Shield(public), &private)
+            .expect("shield prover should succeed (scaffold)")
+            .into_bytes();
+
         (
             note,
             ShieldRequest {
                 token_address: *token_address,
                 amount,
                 commitment,
+                shield_proof,
                 // Ciphertext should be added by caller if needed for scanning
                 ciphertext: None,
                 ephemeral_key: None,
@@ -410,9 +437,10 @@ where
 
         // 4. Submit to chain
         let (public, private) = transfer_data.spend_proof_inputs(self.fvk.nk_field());
-        let spend_proof = self
-            .prover
-            .prove(&crate::traits::ProofPublicInputs::Transfer(public), &private)?;
+        let spend_proof = self.prover.prove(
+            &crate::traits::ProofPublicInputs::Transfer(public),
+            &private,
+        )?;
 
         let request = transfer_data.to_request_with_outputs(spend_proof, outputs);
         let result = self.chain.transfer(request).await?;
@@ -472,6 +500,7 @@ where
         use ark_ff::PrimeField;
         let public = crate::traits::UnshieldPublicInputs {
             anchor: witness.root(),
+            input_commitment: spend_commitment,
             nullifier,
             public_amount: amount,
             // Stage-0: interpret the 32-byte recipient as a field element mod p.
@@ -487,10 +516,14 @@ where
             note_randomness: owned.note.note_randomness,
             nk: self.fvk.nk_field(),
             membership_witness: witness.clone(),
+            output_notes: vec![],
         };
         let spend_proof = self
             .prover
-            .prove(&crate::traits::ProofPublicInputs::Unshield(public), &private)?
+            .prove(
+                &crate::traits::ProofPublicInputs::Unshield(public),
+                &private,
+            )?
             .into_bytes();
 
         // 5. Build unshield request
@@ -778,6 +811,7 @@ impl TransferData {
 
         let public = SpendPublicInputs {
             anchor: self.anchor,
+            input_commitment: self.input_commitment,
             nullifier: self.nullifier,
             output_commitments,
             tx_binding: Fr::from(0u64),
@@ -792,6 +826,13 @@ impl TransferData {
             note_randomness: note.note_randomness,
             nk,
             membership_witness: self.membership_witness.clone(),
+            output_notes: {
+                let mut v = vec![self.output.clone()];
+                if let Some(change) = &self.change {
+                    v.push(change.clone());
+                }
+                v
+            },
         };
 
         (public, private)
@@ -946,6 +987,7 @@ mod tests {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm,
+                shield_proof: b"true".to_vec(),
                 ciphertext: None,
                 ephemeral_key: None,
             })

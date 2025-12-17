@@ -371,10 +371,12 @@ backend-light = []    # Light Protocol (production)
 - [ ] `main.nr` for each circuit should clearly call each statement-check function (audit trail)
 - [ ] Stage 0 (noop): compile + prove + verify end-to-end with placeholder constraints
 - [ ] Stage 1+: implement statement checks one-by-one with unit tests + E2E tests
+  - [x] Stage-0 entrypoints refactored into explicit statement-check functions (transfer/unshield/shield)
+  - [x] Added protocol-level docs for responsibility split (circuit vs chain vs client/indexer)
 
 ### 1.1 Program State
 
-- [ ] Commitment Merkle tree (toy depth 16)
+- [ ] Commitment Merkle tree
 - [ ] Root stored in PDA
 - [ ] Nullifier PDAs (one per spent nullifier)
 

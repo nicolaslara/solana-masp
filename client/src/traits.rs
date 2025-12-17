@@ -182,6 +182,11 @@ pub struct SpendPublicInputs {
     /// Anchor (commitment tree root)
     pub anchor: Anchor,
 
+    /// Input commitment being spent (must match note preimage).
+    ///
+    /// This binds the ZK spend proof to the same leaf that the membership witness proves.
+    pub input_commitment: Commitment,
+
     /// Nullifier being revealed
     pub nullifier: Nullifier,
 
@@ -200,6 +205,11 @@ pub struct UnshieldPublicInputs {
     /// Anchor (commitment tree root)
     pub anchor: Anchor,
 
+    /// Input commitment being spent (must match note preimage).
+    ///
+    /// This binds the ZK spend proof to the same leaf that the membership witness proves.
+    pub input_commitment: Commitment,
+
     /// Nullifier being revealed
     pub nullifier: Nullifier,
 
@@ -213,9 +223,24 @@ pub struct UnshieldPublicInputs {
     pub public_asset_id: Fr,
 }
 
+/// Public inputs for shield proof
+///
+/// This follows `docs/circuit-security-requirements.md` (Shield Circuit public inputs).
+#[derive(Debug, Clone)]
+pub struct ShieldPublicInputs {
+    /// Commitment being inserted
+    pub new_commitment: Commitment,
+    /// Asset id (public)
+    pub public_asset_id: Fr,
+    /// Amount (public)
+    pub public_amount: u64,
+}
+
 /// Public inputs for MASP proofs (per-circuit).
 #[derive(Debug, Clone)]
 pub enum ProofPublicInputs {
+    /// Shield (deposit transparent -> shielded)
+    Shield(ShieldPublicInputs),
     /// Transfer (shielded spend + output commitments)
     Transfer(SpendPublicInputs),
     /// Unshield (shielded spend + public withdrawal)
@@ -237,6 +262,15 @@ pub struct SpendPrivateInputs {
 
     /// Membership witness
     pub membership_witness: MembershipWitness,
+
+    /// Output note plaintexts for this action (ordered, length must match public output commitments).
+    ///
+    /// This is used by mock/prototype implementations to validate:
+    /// - outputs are well-formed (commitment matches note preimage)
+    /// - balance conservation (single-asset now; multi-asset later)
+    ///
+    /// Production circuits will take equivalent data as private inputs.
+    pub output_notes: Vec<crate::note::Note>,
 }
 
 /// Serialized proof bytes
@@ -351,6 +385,8 @@ pub struct ShieldRequest {
     pub token_address: TokenAddress,
     pub amount: u64,
     pub commitment: Commitment,
+    /// ZK proof for shield (optional in early scaffolding; required in production).
+    pub shield_proof: Vec<u8>,
     /// Encrypted note for self-scanning (stored in calldata)
     pub ciphertext: Option<Vec<u8>>,
     /// Ephemeral public key

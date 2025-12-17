@@ -87,10 +87,37 @@ async fn shield_with_encryption<E: masp_client::NoteEncryption>(
     let addr = client.full_viewing_key().diversified_address(0);
     let encrypted = encryption.encrypt(&mut rand::thread_rng(), note, &addr);
 
+    // Build a shield proof (mock or real depending on env.prover).
+    let public = masp_client::ShieldPublicInputs {
+        new_commitment: note.commitment(),
+        public_asset_id: masp_client::note::compute_asset_id(token_address),
+        public_amount: note.amount,
+    };
+    let private = masp_client::SpendPrivateInputs {
+        note_asset_id: note.asset_id,
+        note_amount: note.amount,
+        note_recipient: note.recipient,
+        note_nullifier_nonce: note.nullifier_nonce,
+        note_randomness: note.note_randomness,
+        nk: masp_client::Fr::from(0u64),
+        membership_witness: masp_client::MembershipWitness::merkle_path(
+            vec![],
+            vec![],
+            masp_client::Fr::from(0u64),
+        ),
+        output_notes: vec![],
+    };
+    let shield_proof = env
+        .prover
+        .prove(&masp_client::ProofPublicInputs::Shield(public), &private)
+        .expect("shield prover should succeed (scaffold)")
+        .into_bytes();
+
     let request = ShieldRequest {
         token_address: *token_address,
         amount: note.amount,
         commitment: note.commitment(),
+        shield_proof,
         ciphertext: Some(encrypted.to_bytes()),
         ephemeral_key: Some(encrypted.ephemeral_key),
     };

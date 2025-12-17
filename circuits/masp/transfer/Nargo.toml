@@ -4,3 +4,4 @@ type = "bin"
 authors = [""]
 
 [dependencies]
+masp_common = { path = "../common" }

@@ -19,6 +19,14 @@ This file captures learnings, design decisions, and discoveries as we develop th
 - ✅ Batch nullifier checking
 - ✅ 33 E2E tests (7 new for advanced sync/encryption)
 - ✅ Production-like indexing-latency hook: `Indexer::wait_for_update()` + `MaspClient::wait_for_indexer_update()`
+- ✅ Protocol documentation + responsibility split:
+  - `docs/protocol.md`
+  - `docs/circuit-security-requirements.md` updated with “who checks what”
+- ✅ Noir circuits refactored for auditability (Stage-0): `main` calls one function per required statement
+- ✅ Membership proof model clarified:
+  - Membership is verified **outside** MASP spend circuits (MerklePath in mocks; Light validity proof on-chain in production).
+  - Spend circuits bind `input_commitment` (public) to note plaintext (preimage knowledge).
+- ✅ Documented balance enforcement decision (in-circuit baseline; optional future value commitments + on-chain homomorphic check)
 
 ---
 

@@ -9,8 +9,8 @@
 #![cfg(feature = "ultraplonk-verifier")]
 
 use crate::traits::{
-    ProofBytes, ProofPublicInputs, ProofSystemError, ProofVerifier, SpendPublicInputs,
-    UnshieldPublicInputs,
+    ProofBytes, ProofPublicInputs, ProofSystemError, ProofVerifier, ShieldPublicInputs,
+    SpendPublicInputs, UnshieldPublicInputs,
 };
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -87,6 +87,7 @@ impl ProofVerifier for NoirRsUltraPlonkVerifier {
         proof: &ProofBytes,
     ) -> Result<bool, ProofSystemError> {
         match public_inputs {
+            ProofPublicInputs::Shield(pi) => self.verify_shield(pi, proof),
             ProofPublicInputs::Transfer(pi) => self.verify_transfer(pi, proof),
             ProofPublicInputs::Unshield(pi) => self.verify_unshield(pi, proof),
         }
@@ -107,6 +108,24 @@ impl ProofVerifier for NoirRsUltraPlonkVerifier {
 }
 
 impl NoirRsUltraPlonkVerifier {
+    fn verify_shield(
+        &self,
+        public_inputs: &ShieldPublicInputs,
+        proof: &ProofBytes,
+    ) -> Result<bool, ProofSystemError> {
+        let vk_onchain = self.get_vk_onchain(&self.vk_bb_path("shield"))?;
+
+        // Order must match shield circuit: new_commitment, public_asset_id, public_amount
+        let pis: Vec<[u8; 32]> = vec![
+            fr_to_be32(public_inputs.new_commitment),
+            fr_to_be32(public_inputs.public_asset_id),
+            fr_to_be32(crate::types::Fr::from(public_inputs.public_amount)),
+        ];
+
+        ultraplonk_core::verifier::verify_bytes(&vk_onchain, proof.as_bytes(), &pis)
+            .map_err(|_| ProofSystemError::VerificationFailed)
+    }
+
     fn verify_transfer(
         &self,
         public_inputs: &SpendPublicInputs,
@@ -137,9 +156,11 @@ impl NoirRsUltraPlonkVerifier {
             .copied()
             .unwrap_or(zero);
 
-        // Order must match transfer circuit: anchor, nullifier, out0, out1, out2, tx_binding
+        // Order must match transfer circuit:
+        // anchor, input_commitment, nullifier, out0, out1, out2, tx_binding
         let pis: Vec<[u8; 32]> = vec![
             fr_to_be32(public_inputs.anchor),
+            fr_to_be32(public_inputs.input_commitment),
             fr_to_be32(public_inputs.nullifier),
             fr_to_be32(out0),
             fr_to_be32(out1),
@@ -158,9 +179,11 @@ impl NoirRsUltraPlonkVerifier {
     ) -> Result<bool, ProofSystemError> {
         let vk_onchain = self.get_vk_onchain(&self.vk_bb_path("unshield"))?;
 
-        // Order must match unshield circuit: anchor, nullifier, public_amount, public_recipient, public_asset_id
+        // Order must match unshield circuit:
+        // anchor, input_commitment, nullifier, public_amount, public_recipient, public_asset_id
         let pis: Vec<[u8; 32]> = vec![
             fr_to_be32(public_inputs.anchor),
+            fr_to_be32(public_inputs.input_commitment),
             fr_to_be32(public_inputs.nullifier),
             fr_to_be32(crate::types::Fr::from(public_inputs.public_amount)),
             fr_to_be32(public_inputs.public_recipient),

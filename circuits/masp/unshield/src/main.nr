@@ -1,11 +1,70 @@
 // MASP Unshield Circuit (Withdraw) - Stage 0 Scaffold
 //
-// Goal: production-shaped input layout + working compile/execute/prove pipeline.
-// Constraints are intentionally minimal and will be replaced per the circuit security doc.
+// Goal:
+// - Keep a production-shaped *interface* for unshield (withdraw).
+// - Keep constraints mostly "no-op" for now, but make the *entrypoint narrative* auditable:
+//   `main` should call one function per statement we intend to prove.
+//
+// Security requirements: see `docs/circuit-security-requirements.md`.
+
+use dep::masp_common::{
+    prove_membership_externally_verified, prove_note_preimage_hashes_to_commitment,
+    prove_nullifier_derivation,
+};
+
+// -----------------------------------------------------------------------------
+// Statement check functions (Stage-0 placeholders)
+// -----------------------------------------------------------------------------
+
+/// Statement: "The spender is authorized to spend this note."
+fn prove_ownership_authorization() {
+    assert(true);
+}
+
+/// 3.5 Public output binding (Stage-0 partial)
+///
+/// Intended statement (Stage-1+):
+/// `note.amount == public_amount` and `note.asset_id == public_asset_id`.
+fn check_public_withdraw_binding(
+    public_amount: u64,
+    public_asset_id: Field,
+    note_amount: u64,
+    note_asset_id: Field,
+) {
+    assert(public_amount == note_amount);
+    assert(public_asset_id == note_asset_id);
+}
+
+// -----------------------------------------------------------------------------
+// Internal structs (for readability inside `main`)
+// -----------------------------------------------------------------------------
+
+struct Note {
+    asset_id: Field,
+    amount: u64,
+    recipient: Field,
+    nullifier_nonce: Field,
+    note_randomness: Field,
+}
+
+struct UnshieldPublic {
+    anchor: Field,
+    input_commitment: Field,
+    nullifier: Field,
+    public_amount: u64,
+    public_recipient: Field,
+    public_asset_id: Field,
+}
+
+struct UnshieldPrivate {
+    note: Note,
+    nk: Field,
+}
 
 fn main(
     // Public inputs (production-shaped)
     anchor: pub Field,
+    input_commitment: pub Field,
     nullifier: pub Field,
     public_amount: pub u64,
     public_recipient: pub Field,
@@ -18,15 +77,52 @@ fn main(
     note_randomness: Field,
     nk: Field,
 ) {
-    // Stage-0 constraints: ensure the withdrawn amount and asset match the note.
-    assert(public_amount == note_amount);
-    assert(public_asset_id == note_asset_id);
+    let public = UnshieldPublic {
+        anchor,
+        input_commitment,
+        nullifier,
+        public_amount,
+        public_recipient,
+        public_asset_id,
+    };
+    let private = UnshieldPrivate {
+        note: Note {
+            asset_id: note_asset_id,
+            amount: note_amount,
+            recipient: note_recipient,
+            nullifier_nonce: note_nullifier_nonce,
+            note_randomness,
+        },
+        nk,
+    };
 
-    // Touch other public inputs.
-    assert(anchor == anchor);
-    assert(nullifier == nullifier);
-    assert(public_recipient == public_recipient);
+    // Protocol narrative (Stage-0 scaffolding):
+    //
+    // - "This note is a member of the commitment set for this anchor"
+    prove_membership_externally_verified(public.anchor, public.input_commitment);
+    //
+    // - "I know the note plaintext that hashes to the commitment"
+    prove_note_preimage_hashes_to_commitment(
+        public.input_commitment,
+        private.note.asset_id,
+        private.note.amount,
+        private.note.recipient,
+        private.note.nullifier_nonce,
+        private.note.note_randomness,
+    );
+    //
+    // - "The nullifier is derived correctly from the owner's key material"
+    prove_nullifier_derivation(public.nullifier, private.nk, private.note.nullifier_nonce);
+    prove_ownership_authorization();
+    //
+    // - For unshield: "public withdrawal fields match the spent note"
+    check_public_withdraw_binding(
+        public.public_amount,
+        public.public_asset_id,
+        private.note.amount,
+        private.note.asset_id,
+    );
 
-    // Tie in the remaining private fields so witness plumbing is exercised.
-    let _ = note_asset_id + note_recipient + note_nullifier_nonce + note_randomness + nk;
+    // Touch remaining public input (recipient encoding decision is deferred).
+    assert(public.public_recipient == public.public_recipient);
 }

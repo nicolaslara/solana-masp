@@ -1,23 +1,81 @@
-// MASP Shield Circuit (Deposit) — Stage 0 Scaffold
+// MASP Shield Circuit (Deposit) - Stage 0 Scaffold
 //
-// Goal: production-shaped input layout + working compile/execute/prove pipeline.
-// Constraints are intentionally minimal and will be replaced per the circuit security doc.
+// Goal:
+// - Keep a production-shaped *interface* for shield (deposit).
+// - Keep constraints mostly "no-op" for now, but make the *entrypoint narrative* auditable:
+//   `main` should call one function per statement we intend to prove.
+//
+// Security requirements: see `docs/circuit-security-requirements.md`.
 
-fn main(
-    // Public input: new note commitment being inserted
-    new_commitment: pub Field,
+use dep::masp_common::{prove_amount_range, prove_asset_id_binding};
 
-    // Private input: note fields
-    note_asset_id: Field,
-    note_amount: u64,
-    note_recipient: Field,
-    note_nullifier_nonce: Field,
+// -----------------------------------------------------------------------------
+// Statement check functions (Stage-0 placeholders)
+// -----------------------------------------------------------------------------
+
+/// Statement: "I know the note plaintext that hashes to the new commitment."
+///
+/// Intended statement (Stage-1+):
+/// `new_commitment == Poseidon(DOM_NOTE_COMMIT, asset_id, amount, recipient, nullifier_nonce, note_randomness)`.
+fn prove_new_commitment_is_note_preimage_hash(
+    new_commitment: Field,
+    asset_id: Field,
+    amount: u64,
+    recipient: Field,
+    nullifier_nonce: Field,
     note_randomness: Field,
 ) {
-    // Stage-0 constraint: simple deterministic "commitment" formula for plumbing.
-    let amount_f: Field = note_amount as Field;
-    let expected = note_asset_id + amount_f + note_recipient + note_nullifier_nonce + note_randomness;
-    assert(new_commitment == expected);
+    assert(new_commitment == new_commitment);
+    let _ = asset_id + (amount as Field) + recipient + nullifier_nonce + note_randomness;
 }
 
+/// 1.2 Amount range check: implemented in `masp_common` (placeholder).
+/// 1.3 Asset binding: implemented in `masp_common` (placeholder).
 
+// -----------------------------------------------------------------------------
+// Internal structs (for readability inside `main`)
+// -----------------------------------------------------------------------------
+
+struct ShieldPublic {
+    new_commitment: Field,
+    asset_id: Field,
+    amount: u64,
+}
+
+struct ShieldPrivate {
+    recipient: Field,
+    nullifier_nonce: Field,
+    note_randomness: Field,
+}
+
+fn main(
+    // Public inputs (production-shaped)
+    new_commitment: pub Field,
+    public_asset_id: pub Field,
+    public_amount: pub u64,
+    // Private inputs (production-shaped)
+    recipient: Field,
+    nullifier_nonce: Field,
+    note_randomness: Field,
+) {
+    let public = ShieldPublic { new_commitment, asset_id: public_asset_id, amount: public_amount };
+    let private = ShieldPrivate { recipient, nullifier_nonce, note_randomness };
+
+    // Protocol narrative (Stage-0 scaffolding):
+    //
+    // - "Amounts are range-checked (u64)"
+    prove_amount_range(public.amount);
+    //
+    // - "Asset id is correctly bound to the transparent token boundary"
+    prove_asset_id_binding(public.asset_id);
+    //
+    // - "I know the note plaintext that hashes to the new commitment"
+    prove_new_commitment_is_note_preimage_hash(
+        public.new_commitment,
+        public.asset_id,
+        public.amount,
+        private.recipient,
+        private.nullifier_nonce,
+        private.note_randomness,
+    );
+}

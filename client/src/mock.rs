@@ -331,7 +331,7 @@ pub struct MockChain {
 ///
 /// Even in a mock chain, proof verification is conceptually always present.
 /// We default to:
-/// - `MockProofVerifier` (accepts everything)
+/// - `MockProofVerifier` (INSECURE test verifier; validates basic statements in Rust)
 /// - `Local` verification mode
 pub struct MockChainOptions {
     pub verifier: Arc<dyn ProofVerifier>,
@@ -449,6 +449,29 @@ impl Chain for MockChain {
     async fn shield(&self, request: ShieldRequest) -> Result<ShieldResult, ChainError> {
         let tx_sig = self.next_tx_sig();
 
+        // Verify shield proof (if provided).
+        let public_inputs = crate::traits::ShieldPublicInputs {
+            new_commitment: request.commitment,
+            public_asset_id: crate::note::compute_asset_id(&request.token_address),
+            public_amount: request.amount,
+        };
+        let proof = ProofBytes::new(request.shield_proof.clone());
+        let ok = match self.verify_mode {
+            crate::backends::config::ProofVerificationMode::Local => self
+                .verifier
+                .verify_local(&ProofPublicInputs::Shield(public_inputs), &proof)
+                .await
+                .map_err(|e| ChainError::TransactionFailed(e.to_string()))?,
+            crate::backends::config::ProofVerificationMode::OnChain => self
+                .verifier
+                .verify_on_chain(&ProofPublicInputs::Shield(public_inputs), &proof)
+                .await
+                .map_err(|e| ChainError::TransactionFailed(e.to_string()))?,
+        };
+        if !ok {
+            return Err(ChainError::InvalidProof);
+        }
+
         // Build ciphertext data if provided
         let ct_data = match (&request.ciphertext, &request.ephemeral_key) {
             (Some(ct), Some(epk)) => Some(OutputCiphertextData {
@@ -498,9 +521,14 @@ impl Chain for MockChain {
             return Err(ChainError::InvalidProof);
         }
 
-        // Verify spend proof (scaffold: verifier may be mock or real local verifier)
+        // Verify transfer proof.
+        //
+        // Responsibility split (production-shape):
+        // - Circuit proves membership/preimage/nullifier/output integrity/balance binding.
+        // - Chain enforces: anchor validity + nullifier uniqueness + proof verification.
         let public_inputs = SpendPublicInputs {
             anchor: request.anchor,
+            input_commitment: request.input_commitment,
             nullifier: request.nullifier,
             output_commitments: request.output_commitments(),
             tx_binding: Fr::from(0u64),
@@ -582,10 +610,15 @@ impl Chain for MockChain {
             return Err(ChainError::InvalidProof);
         }
 
-        // Verify unshield proof
+        // Verify unshield proof.
+        //
+        // Responsibility split (production-shape):
+        // - Circuit proves membership/preimage/nullifier/ownership and binds public withdrawal fields.
+        // - Chain enforces: anchor validity + nullifier uniqueness + proof verification + token transfer.
         use ark_ff::PrimeField;
         let public_inputs = UnshieldPublicInputs {
             anchor: request.anchor,
+            input_commitment: request.input_commitment,
             nullifier: request.nullifier,
             public_amount: request.amount,
             // Stage-0 encoding: interpret 32-byte recipient as a field element mod p.
@@ -626,6 +659,7 @@ impl Chain for MockChain {
 mod tests {
     use super::*;
     use crate::traits::ShieldRequest;
+    use crate::traits::SpendProver;
 
     #[tokio::test]
     async fn test_note_store_insert_and_witness() {
@@ -675,6 +709,7 @@ mod tests {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm,
+                shield_proof: b"true".to_vec(),
                 ciphertext: None,
                 ephemeral_key: None,
             })
@@ -690,13 +725,21 @@ mod tests {
         let acc = Arc::new(MockNoteStore::new(4));
         let chain = MockChain::new(acc.clone(), 10);
 
-        // Shield first
-        let cm1 = Fr::from(42u64);
+        // Shield first (use a real note commitment so mock proof checks can validate preimage).
+        let note_in = crate::note::Note::with_values(
+            Fr::from(1u64),
+            100,
+            Fr::from(2u64),
+            Fr::from(3u64),
+            Fr::from(4u64),
+        );
+        let cm1 = note_in.commitment();
         chain
             .shield(ShieldRequest {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm1,
+                shield_proof: b"true".to_vec(),
                 ciphertext: None,
                 ephemeral_key: None,
             })
@@ -707,18 +750,51 @@ mod tests {
         let witness = acc.get_witness(cm1).await.unwrap();
 
         // Transfer
-        let nf = Fr::from(12345u64);
-        let cm2 = Fr::from(100u64);
+        let nk = Fr::from(777u64);
+        let nf = crate::nullifier::compute_nullifier(nk, note_in.nullifier_nonce);
+        let note_out = crate::note::Note::with_values(
+            note_in.asset_id,
+            100,
+            Fr::from(9u64),
+            Fr::from(10u64),
+            Fr::from(11u64),
+        );
+        let cm2 = note_out.commitment();
 
+        use crate::proofs::MockSpendProver;
         use crate::traits::TransferOutput;
+        use crate::traits::{ProofPublicInputs, SpendPrivateInputs, SpendPublicInputs};
+
+        let anchor = chain.get_current_anchor().await.unwrap();
+        let public = SpendPublicInputs {
+            anchor,
+            input_commitment: cm1,
+            nullifier: nf,
+            output_commitments: vec![cm2],
+            tx_binding: Fr::from(0u64),
+        };
+        let private = SpendPrivateInputs {
+            note_asset_id: note_in.asset_id,
+            note_amount: note_in.amount,
+            note_recipient: note_in.recipient,
+            note_nullifier_nonce: note_in.nullifier_nonce,
+            note_randomness: note_in.note_randomness,
+            nk,
+            membership_witness: witness.clone(),
+            output_notes: vec![note_out],
+        };
+        let spend_proof = MockSpendProver
+            .prove(&ProofPublicInputs::Transfer(public), &private)
+            .unwrap()
+            .into_bytes();
 
         let result = chain
             .transfer(TransferRequest {
-                anchor: chain.get_current_anchor().await.unwrap(),
+                anchor,
                 input_commitment: cm1,
                 membership_witness: witness,
                 nullifier: nf,
-                spend_proof: vec![],
+                spend_proof,
                 outputs: vec![TransferOutput::commitment_only(cm2)],
             })
             .await
@@ -735,13 +811,21 @@ mod tests {
         let acc = Arc::new(MockNoteStore::new(4));
         let chain = MockChain::new(acc.clone(), 10);
 
-        // Shield
-        let cm = Fr::from(42u64);
+        // Shield (use a real note commitment so mock proof checks can validate preimage).
+        let note_in = crate::note::Note::with_values(
+            Fr::from(1u64),
+            100,
+            Fr::from(2u64),
+            Fr::from(3u64),
+            Fr::from(4u64),
+        );
+        let cm = note_in.commitment();
         chain
             .shield(ShieldRequest {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm,
+                shield_proof: b"true".to_vec(),
                 ciphertext: None,
                 ephemeral_key: None,
             })
@@ -749,17 +833,66 @@ mod tests {
             .unwrap();
 
         let witness = acc.get_witness(cm).await.unwrap();
-        let nf = Fr::from(12345u64);
+        let nk = Fr::from(777u64);
+        let nf = crate::nullifier::compute_nullifier(nk, note_in.nullifier_nonce);
+        let anchor = chain.get_current_anchor().await.unwrap();
+
+        use crate::proofs::MockSpendProver;
+        use crate::traits::{ProofPublicInputs, SpendPrivateInputs, SpendPublicInputs};
+
+        let mk_proof = |output_note: crate::note::Note, witness: MembershipWitness| {
+            let public = SpendPublicInputs {
+                anchor,
+                input_commitment: cm,
+                nullifier: nf,
+                output_commitments: vec![output_note.commitment()],
+                tx_binding: Fr::from(0u64),
+            };
+            let private = SpendPrivateInputs {
+                note_asset_id: note_in.asset_id,
+                note_amount: note_in.amount,
+                note_recipient: note_in.recipient,
+                note_nullifier_nonce: note_in.nullifier_nonce,
+                note_randomness: note_in.note_randomness,
+                nk,
+                membership_witness: witness,
+                output_notes: vec![output_note],
+            };
+            MockSpendProver
+                .prove(&ProofPublicInputs::Transfer(public), &private)
+                .unwrap()
+                .into_bytes()
+        };
+
+        let out1 = crate::note::Note::with_values(
+            note_in.asset_id,
+            100,
+            Fr::from(9u64),
+            Fr::from(10u64),
+            Fr::from(11u64),
+        );
+        let out2 = crate::note::Note::with_values(
+            note_in.asset_id,
+            100,
+            Fr::from(12u64),
+            Fr::from(13u64),
+            Fr::from(14u64),
+        );
+        let cm_out1 = out1.commitment();
+        let cm_out2 = out2.commitment();
+
+        let spend_proof_1 = mk_proof(out1, witness.clone());
+        let spend_proof_2 = mk_proof(out2, witness.clone());
 
         // First transfer succeeds
         chain
             .transfer(TransferRequest {
-                anchor: chain.get_current_anchor().await.unwrap(),
+                anchor,
                 input_commitment: cm,
                 membership_witness: witness.clone(),
                 nullifier: nf,
-                spend_proof: vec![],
-                outputs: vec![TransferOutput::commitment_only(Fr::from(100u64))],
+                spend_proof: spend_proof_1,
+                outputs: vec![TransferOutput::commitment_only(cm_out1)],
             })
             .await
             .unwrap();
@@ -767,12 +900,12 @@ mod tests {
         // Second transfer with same nullifier fails
         let result = chain
             .transfer(TransferRequest {
-                anchor: chain.get_current_anchor().await.unwrap(),
+                anchor,
                 input_commitment: cm,
                 membership_witness: witness,
                 nullifier: nf,
-                spend_proof: vec![],
-                outputs: vec![TransferOutput::commitment_only(Fr::from(200u64))],
+                spend_proof: spend_proof_2,
+                outputs: vec![TransferOutput::commitment_only(cm_out2)],
             })
             .await;
 
@@ -793,6 +926,7 @@ mod tests {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm1,
+                shield_proof: b"true".to_vec(),
                 ciphertext: Some(vec![1, 2, 3]),
                 ephemeral_key: Some([0u8; 64]),
             })
@@ -804,6 +938,7 @@ mod tests {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm2,
+                shield_proof: b"true".to_vec(),
                 ciphertext: Some(vec![4, 5, 6]),
                 ephemeral_key: Some([0u8; 64]),
             })
@@ -830,7 +965,14 @@ mod tests {
         let acc = Arc::new(MockNoteStore::new(4));
         let chain = MockChain::new(acc.clone(), 10);
 
-        let cm1 = Fr::from(1u64);
+        let note_in = crate::note::Note::with_values(
+            Fr::from(1u64),
+            100,
+            Fr::from(2u64),
+            Fr::from(3u64),
+            Fr::from(4u64),
+        );
+        let cm1 = note_in.commitment();
 
         // Shield first note
         let shield_result = chain
@@ -838,6 +980,7 @@ mod tests {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm1,
+                shield_proof: b"true".to_vec(),
                 ciphertext: None,
                 ephemeral_key: None,
             })
@@ -845,18 +988,59 @@ mod tests {
             .unwrap();
 
         let witness = acc.get_witness(cm1).await.unwrap();
-        let nf = Fr::from(999u64);
-        let cm2 = Fr::from(2u64);
-        let cm3 = Fr::from(3u64);
+        let nk = Fr::from(777u64);
+        let nf = crate::nullifier::compute_nullifier(nk, note_in.nullifier_nonce);
+        let out2 = crate::note::Note::with_values(
+            note_in.asset_id,
+            60,
+            Fr::from(20u64),
+            Fr::from(21u64),
+            Fr::from(22u64),
+        );
+        let out3 = crate::note::Note::with_values(
+            note_in.asset_id,
+            40,
+            Fr::from(23u64),
+            Fr::from(24u64),
+            Fr::from(25u64),
+        );
+        let cm2 = out2.commitment();
+        let cm3 = out3.commitment();
 
         // Transfer creates two outputs in same tx
+        use crate::proofs::MockSpendProver;
+        use crate::traits::{ProofPublicInputs, SpendPrivateInputs, SpendPublicInputs};
+
+        let anchor = chain.get_current_anchor().await.unwrap();
+        let public = SpendPublicInputs {
+            anchor,
+            input_commitment: cm1,
+            nullifier: nf,
+            output_commitments: vec![cm2, cm3],
+            tx_binding: Fr::from(0u64),
+        };
+        let private = SpendPrivateInputs {
+            note_asset_id: note_in.asset_id,
+            note_amount: note_in.amount,
+            note_recipient: note_in.recipient,
+            note_nullifier_nonce: note_in.nullifier_nonce,
+            note_randomness: note_in.note_randomness,
+            nk,
+            membership_witness: witness.clone(),
+            output_notes: vec![out2, out3],
+        };
+        let spend_proof = MockSpendProver
+            .prove(&ProofPublicInputs::Transfer(public), &private)
+            .unwrap()
+            .into_bytes();
+
         let transfer_result = chain
             .transfer(TransferRequest {
-                anchor: chain.get_current_anchor().await.unwrap(),
+                anchor,
                 input_commitment: cm1,
                 membership_witness: witness,
                 nullifier: nf,
-                spend_proof: vec![],
+                spend_proof,
                 outputs: vec![
                     TransferOutput::commitment_only(cm2),
                     TransferOutput::commitment_only(cm3),

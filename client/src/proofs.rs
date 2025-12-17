@@ -186,17 +186,154 @@ use crate::traits::{
 };
 use async_trait::async_trait;
 
-/// Mock prover that always returns a valid-looking proof
+const MOCK_PROOF_TRUE: &[u8] = b"true";
+
+fn mock_check_transfer(
+    public: &crate::traits::SpendPublicInputs,
+    private: &SpendPrivateInputs,
+) -> Result<(), ProofSystemError> {
+    use crate::note::Note;
+    use crate::nullifier::compute_nullifier;
+
+    // (1) "This note is a member of the commitment set for this anchor"
+    // In the mock environment, this is a Merkle path check.
+    if private.membership_witness.root() != public.anchor {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+    if !private
+        .membership_witness
+        .verify_local(public.input_commitment)
+    {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+
+    // (2) "I know the note plaintext that hashes to the commitment"
+    let in_note = Note::with_values(
+        private.note_asset_id,
+        private.note_amount,
+        private.note_recipient,
+        private.note_nullifier_nonce,
+        private.note_randomness,
+    );
+    if in_note.commitment() != public.input_commitment {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+
+    // (3) "The nullifier is derived correctly from the owner's key material"
+    if compute_nullifier(private.nk, private.note_nullifier_nonce) != public.nullifier {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+
+    // (4) "Outputs are well-formed and balance is conserved"
+    if private.output_notes.len() != public.output_commitments.len() {
+        return Err(ProofSystemError::InvalidPublicInputs);
+    }
+    let mut sum_out: u64 = 0;
+    for (note, cm) in private
+        .output_notes
+        .iter()
+        .zip(public.output_commitments.iter())
+    {
+        if note.commitment() != *cm {
+            return Err(ProofSystemError::VerificationFailed);
+        }
+        // Stage-0 rule: single-asset transfers only.
+        if note.asset_id != private.note_asset_id {
+            return Err(ProofSystemError::VerificationFailed);
+        }
+        sum_out = sum_out.saturating_add(note.amount);
+    }
+    if sum_out != private.note_amount {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+
+    Ok(())
+}
+
+fn mock_check_unshield(
+    public: &crate::traits::UnshieldPublicInputs,
+    private: &SpendPrivateInputs,
+) -> Result<(), ProofSystemError> {
+    use crate::note::Note;
+    use crate::nullifier::compute_nullifier;
+
+    // (1) "This note is a member of the commitment set for this anchor"
+    if private.membership_witness.root() != public.anchor {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+    if !private
+        .membership_witness
+        .verify_local(public.input_commitment)
+    {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+
+    // (2) "I know the note plaintext that hashes to the commitment"
+    let in_note = Note::with_values(
+        private.note_asset_id,
+        private.note_amount,
+        private.note_recipient,
+        private.note_nullifier_nonce,
+        private.note_randomness,
+    );
+    if in_note.commitment() != public.input_commitment {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+
+    // (3) "The nullifier is derived correctly from the owner's key material"
+    if compute_nullifier(private.nk, private.note_nullifier_nonce) != public.nullifier {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+
+    // (5) For unshield: "public withdrawal fields match the spent note"
+    if public.public_amount != private.note_amount {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+    if public.public_asset_id != private.note_asset_id {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+
+    Ok(())
+}
+
+/// Mock prover that checks statements in Rust and encodes a mock proof payload.
 pub struct MockSpendProver;
 
 impl SpendProver for MockSpendProver {
     fn prove(
         &self,
-        _public_inputs: &ProofPublicInputs,
-        _private_inputs: &SpendPrivateInputs,
+        public_inputs: &ProofPublicInputs,
+        private_inputs: &SpendPrivateInputs,
     ) -> Result<ProofBytes, ProofSystemError> {
-        // Return a placeholder proof
-        Ok(ProofBytes::new(vec![0u8; 32]))
+        // Reference-implementation mock: run the *intended circuit statements* in Rust,
+        // then return a trivial proof marker ("true").
+        match public_inputs {
+            ProofPublicInputs::Shield(pi) => {
+                use crate::note::Note;
+
+                // "I know the note plaintext that hashes to the commitment"
+                let note = Note::with_values(
+                    private_inputs.note_asset_id,
+                    private_inputs.note_amount,
+                    private_inputs.note_recipient,
+                    private_inputs.note_nullifier_nonce,
+                    private_inputs.note_randomness,
+                );
+                if note.commitment() != pi.new_commitment {
+                    return Err(ProofSystemError::VerificationFailed);
+                }
+                // Public binding to amount/asset at the transparent boundary.
+                if pi.public_amount != private_inputs.note_amount {
+                    return Err(ProofSystemError::VerificationFailed);
+                }
+                if pi.public_asset_id != private_inputs.note_asset_id {
+                    return Err(ProofSystemError::VerificationFailed);
+                }
+            }
+            ProofPublicInputs::Transfer(pi) => mock_check_transfer(pi, private_inputs)?,
+            ProofPublicInputs::Unshield(pi) => mock_check_unshield(pi, private_inputs)?,
+        }
+        Ok(ProofBytes::new(MOCK_PROOF_TRUE.to_vec()))
     }
 
     fn system_name(&self) -> &'static str {
@@ -211,10 +348,15 @@ pub struct MockProofVerifier;
 impl ProofVerifier for MockProofVerifier {
     async fn verify_local(
         &self,
-        _public_inputs: &ProofPublicInputs,
-        _proof: &ProofBytes,
+        public_inputs: &ProofPublicInputs,
+        proof: &ProofBytes,
     ) -> Result<bool, ProofSystemError> {
-        Ok(true)
+        // Mock verifier does not have access to private inputs, so it cannot re-run
+        // the semantic checks. Those are done in `MockSpendProver`.
+        //
+        // Here we only validate the "proof=true" marker.
+        let _ = public_inputs; // keep signature aligned with real verifier
+        Ok(proof.as_bytes() == MOCK_PROOF_TRUE)
     }
 
     fn system_name(&self) -> &'static str {
@@ -258,21 +400,36 @@ mod tests {
         let prover = MockSpendProver;
         let verifier = MockProofVerifier;
 
+        // Use a real note commitment so the mock prover/verifier can validate preimage + nullifier.
+        let note = crate::note::Note::with_values(
+            Fr::from(1u64),
+            100,
+            Fr::from(2u64),
+            Fr::from(3u64),
+            Fr::from(4u64),
+        );
+        let cm = note.commitment();
+        let nk = Fr::from(789u64);
+        let nf = crate::nullifier::compute_nullifier(nk, note.nullifier_nonce);
+
         let public = SpendPublicInputs {
-            anchor: Fr::from(0u64),
-            nullifier: Fr::from(111u64),
-            output_commitments: vec![],
+            // With an empty Merkle path, our MembershipWitness local check treats root==leaf.
+            anchor: cm,
+            input_commitment: cm,
+            nullifier: nf,
+            output_commitments: vec![cm],
             tx_binding: Fr::from(0u64),
         };
 
         let private = SpendPrivateInputs {
-            note_asset_id: Fr::from(1u64),
-            note_amount: 100,
-            note_recipient: Fr::from(999u64),
-            note_nullifier_nonce: Fr::from(123u64),
-            note_randomness: Fr::from(456u64),
-            nk: Fr::from(789u64),
-            membership_witness: MembershipWitness::merkle_path(vec![], vec![], Fr::from(0u64)),
+            note_asset_id: note.asset_id,
+            note_amount: note.amount,
+            note_recipient: note.recipient,
+            note_nullifier_nonce: note.nullifier_nonce,
+            note_randomness: note.note_randomness,
+            nk,
+            membership_witness: MembershipWitness::merkle_path(vec![], vec![], cm),
+            output_notes: vec![note],
         };
 
         let proof = prover

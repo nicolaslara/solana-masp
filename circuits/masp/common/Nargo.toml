@@ -1,0 +1,6 @@
+[package]
+name = "masp_common"
+type = "lib"
+authors = [""]
+
+[dependencies]
