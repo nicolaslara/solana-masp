@@ -13,17 +13,19 @@
 //!                    ▼
 //!              fvk = (ak, nk)  ─── FullViewingKey (can view, CANNOT spend)
 //!                    │
-//!                    ▼
-//!              ivk = H(ak.x, nk.x)  ─── IncomingViewingKey
+//!                    ├─► ivk = H(ak.x, nk.x)  ─── IncomingViewingKey (decrypt received)
+//!                    │         │
+//!                    │         ▼
+//!                    │   pk_d = ivk * g_d  ─── DiversifiedAddress
 //!                    │
-//!                    ▼
-//!              pk_d = ivk * g_d  ─── DiversifiedAddress
+//!                    └─► ovk = H(ak.x, nk.x, "ovk")  ─── OutgoingViewingKey (decrypt sent)
 //! ```
 //!
 //! **Key separation:**
 //! - `SpendingKey` - can spend (has ask, nsk secrets)
 //! - `FullViewingKey` - can view all tx, CANNOT spend (only ak, nk public keys)
-//! - `IncomingViewingKey` - can decrypt incoming notes only
+//! - `IncomingViewingKey` (ivk) - can decrypt notes sent TO you
+//! - `OutgoingViewingKey` (ovk) - can decrypt notes sent BY you (C_out)
 //!
 //! **Sapling terminology:**
 //! - `sk`  = spending key (root secret)
@@ -33,6 +35,7 @@
 //! - `nk`  = nullifier public key
 //! - `fvk` = full viewing key (ak, nk)
 //! - `ivk` = incoming viewing key
+//! - `ovk` = outgoing viewing key
 //! - `g_d` = diversifier base point
 //! - `pk_d`= diversified payment address
 
@@ -146,11 +149,23 @@ impl FullViewingKey {
     ///
     /// `ivk = H(DOM_IVK, ak.x, nk.x)`
     ///
-    /// The ivk allows decrypting notes sent to addresses derived from this key.
+    /// The ivk allows decrypting notes sent TO addresses derived from this key.
     pub fn ivk(&self) -> Fr {
         let ak_x = from_jubjub_base(self.ak.x);
         let nk_x = from_jubjub_base(self.nk.x);
         poseidon_hash(&[DomainTag::IncomingViewingKey.to_field(), ak_x, nk_x])
+    }
+
+    /// Derive the outgoing viewing key (Sapling: ovk)
+    ///
+    /// `ovk = H(DOM_OVK, ak.x, nk.x)`
+    ///
+    /// The ovk allows decrypting notes sent BY this key (C_out).
+    /// This enables sender to recover what they sent (audit trail).
+    pub fn ovk(&self) -> Fr {
+        let ak_x = from_jubjub_base(self.ak.x);
+        let nk_x = from_jubjub_base(self.nk.x);
+        poseidon_hash(&[DomainTag::OutgoingViewingKey.to_field(), ak_x, nk_x])
     }
 
     /// Get the nullifier key as a field element (nk.x coordinate)
@@ -287,5 +302,26 @@ mod tests {
         let ivk2 = fvk.ivk();
         assert_eq!(ivk1, ivk2);
         assert_ne!(ivk1, Fr::from(0u64));
+    }
+
+    #[test]
+    fn test_ovk_derivation() {
+        let fvk = SpendingKey::from_bytes(&[42u8; 32]).to_full_viewing_key();
+
+        let ovk1 = fvk.ovk();
+        let ovk2 = fvk.ovk();
+        assert_eq!(ovk1, ovk2);
+        assert_ne!(ovk1, Fr::from(0u64));
+
+        // ovk should be different from ivk
+        assert_ne!(fvk.ovk(), fvk.ivk());
+    }
+
+    #[test]
+    fn test_ovk_different_for_different_keys() {
+        let fvk1 = SpendingKey::from_bytes(&[1u8; 32]).to_full_viewing_key();
+        let fvk2 = SpendingKey::from_bytes(&[2u8; 32]).to_full_viewing_key();
+
+        assert_ne!(fvk1.ovk(), fvk2.ovk());
     }
 }

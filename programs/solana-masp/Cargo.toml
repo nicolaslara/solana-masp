@@ -5,9 +5,6 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Multi-Asset Shielded Pool for Solana (scaffolding)"
 
-[workspace]
-members = []
-
 [lib]
 crate-type = ["cdylib", "lib"]
 

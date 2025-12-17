@@ -41,7 +41,7 @@
 //! │  Feature Flags                                              │
 //! ├─────────────────────────────────────────────────────────────┤
 //! │  prove         - SpendProver trait (client-side)            │
-//! │  verify        - SpendVerifier trait (client + program)     │
+//! │  verify        - ProofVerifier trait (client + program)     │
 //! │  backend-mock  - Mock implementations (testing)             │
 //! │  backend-light - Light Protocol (production)                │
 //! │  std           - Standard library (client)                  │
@@ -248,22 +248,42 @@ pub trait SpendProver: Send + Sync {
     fn system_name(&self) -> &'static str;
 }
 
-/// Trait for spend proof verification (on-chain or client)
+/// Trait for ZK proof verification (locally or via on-chain program)
 ///
 /// ## Crate Separation
 /// - `masp-verifier` crate with `verify` feature
 /// - Should be no_std compatible for on-chain use
 ///
 /// ## Implementations
-/// - `MockSpendVerifier` - Always returns true
-/// - `UltraPlonkVerifier` - Real verification via BN254 syscalls
-pub trait SpendVerifier: Send + Sync {
-    /// Verify a spend proof
-    fn verify(
+/// - `MockProofVerifier` - Always returns true
+/// - `UltraPlonkVerifier` - Verification via BN254 syscalls / Solana program
+///
+/// Notes:
+/// - We support *two* verification paths:
+///   - `verify_local`: for fast local iteration (unit tests, mock chain)
+///   - `verify_on_chain`: for Solana program verification (instruction/CPI)
+/// - Most implementations can simply implement `verify_local` and inherit the
+///   default `verify_on_chain` behavior (delegates to local) until a program
+///   integration exists.
+#[async_trait]
+pub trait ProofVerifier: Send + Sync {
+    /// Verify a spend proof locally (off-chain)
+    async fn verify_local(
         &self,
         public_inputs: &SpendPublicInputs,
         proof: &ProofBytes,
     ) -> Result<bool, ProofSystemError>;
+
+    /// Verify a spend proof via the on-chain verifier (instruction/CPI).
+    ///
+    /// Default: fall back to local verification (useful for scaffolds).
+    async fn verify_on_chain(
+        &self,
+        public_inputs: &SpendPublicInputs,
+        proof: &ProofBytes,
+    ) -> Result<bool, ProofSystemError> {
+        self.verify_local(public_inputs, proof).await
+    }
 
     /// Get the verification system name (for debugging)
     fn system_name(&self) -> &'static str;
@@ -301,6 +321,10 @@ pub struct ShieldRequest {
     pub token_address: TokenAddress,
     pub amount: u64,
     pub commitment: Commitment,
+    /// Encrypted note for self-scanning (stored in calldata)
+    pub ciphertext: Option<Vec<u8>>,
+    /// Ephemeral public key
+    pub ephemeral_key: Option<[u8; 64]>,
 }
 
 /// Shield result
@@ -308,6 +332,43 @@ pub struct ShieldRequest {
 pub struct ShieldResult {
     pub tx_sig: String,
     pub commitment: Commitment,
+}
+
+/// Output data for a transfer (commitment + optional ciphertext)
+#[derive(Debug, Clone)]
+pub struct TransferOutput {
+    /// The note commitment
+    pub commitment: Commitment,
+
+    /// Encrypted note plaintext (C_enc) - stored in transaction calldata
+    pub ciphertext: Option<Vec<u8>>,
+
+    /// Ephemeral public key (64 bytes: x || y)
+    pub ephemeral_key: Option<[u8; 64]>,
+}
+
+impl TransferOutput {
+    /// Create output with just a commitment (no ciphertext)
+    pub fn commitment_only(commitment: Commitment) -> Self {
+        Self {
+            commitment,
+            ciphertext: None,
+            ephemeral_key: None,
+        }
+    }
+
+    /// Create output with ciphertext data
+    pub fn with_ciphertext(
+        commitment: Commitment,
+        ciphertext: Vec<u8>,
+        ephemeral_key: [u8; 64],
+    ) -> Self {
+        Self {
+            commitment,
+            ciphertext: Some(ciphertext),
+            ephemeral_key: Some(ephemeral_key),
+        }
+    }
 }
 
 /// Transfer request
@@ -328,11 +389,15 @@ pub struct TransferRequest {
     /// ZK proof of valid spend (UltraPlonk)
     pub spend_proof: Vec<u8>,
 
-    /// Output commitments
-    pub output_commitments: Vec<Commitment>,
+    /// Output data (commitments + ciphertexts)
+    pub outputs: Vec<TransferOutput>,
+}
 
-    /// Encrypted notes for recipients
-    pub ciphertexts: Vec<Vec<u8>>,
+impl TransferRequest {
+    /// Get just the output commitments
+    pub fn output_commitments(&self) -> Vec<Commitment> {
+        self.outputs.iter().map(|o| o.commitment).collect()
+    }
 }
 
 /// Transfer result
@@ -419,6 +484,24 @@ pub trait Chain: Send + Sync {
     /// Check if a nullifier has been spent
     async fn is_nullifier_spent(&self, nullifier: &Nullifier) -> Result<bool, ChainError>;
 
+    /// Batch check if nullifiers have been spent (for shielded sync)
+    ///
+    /// This is critical for efficient wallet recovery - instead of checking
+    /// each nullifier individually (O(n) RPC calls), we check all at once.
+    ///
+    /// Returns a Vec of bools in the same order as input nullifiers.
+    async fn batch_check_nullifiers(
+        &self,
+        nullifiers: &[Nullifier],
+    ) -> Result<Vec<bool>, ChainError> {
+        // Default: sequential checks (inefficient but correct)
+        let mut results = Vec::with_capacity(nullifiers.len());
+        for nf in nullifiers {
+            results.push(self.is_nullifier_spent(nf).await?);
+        }
+        Ok(results)
+    }
+
     // ===== High-level operations =====
 
     /// Shield: deposit tokens + insert commitment
@@ -471,14 +554,34 @@ pub struct OutputCiphertext {
     /// The commitment (note identifier)
     pub commitment: Commitment,
 
-    /// Encrypted note plaintext
+    /// Encrypted note plaintext (C_enc) for recipient
     pub ciphertext: Vec<u8>,
 
-    /// Ephemeral public key for decryption
-    pub ephemeral_key: [u8; 32],
+    /// Ephemeral public key for decryption (64 bytes: x || y)
+    pub ephemeral_key: [u8; 64],
 
     /// Transaction that created this output
     pub tx_sig: String,
+}
+
+/// Scan parameters for shielded sync
+#[derive(Debug, Clone, Default)]
+pub struct ScanParams {
+    /// Start from this transaction (exclusive)
+    pub since_tx: Option<String>,
+    /// Limit number of outputs to return
+    pub limit: Option<usize>,
+}
+
+/// Scan result with pagination info
+#[derive(Debug, Clone)]
+pub struct ScanResult {
+    /// Outputs found
+    pub outputs: Vec<OutputCiphertext>,
+    /// Last tx_sig for pagination
+    pub last_tx_sig: Option<String>,
+    /// Whether there are more results
+    pub has_more: bool,
 }
 
 /// Indexer trait - scans for notes, provides witnesses
@@ -498,8 +601,167 @@ pub trait Indexer: NoteCommitmentStore {
         since_tx: Option<&str>,
     ) -> Result<Vec<OutputCiphertext>, IndexerError>;
 
+    /// Wait until the indexer has observed recent chain updates.
+    ///
+    /// In production, indexers are external observers of the ledger (RPC/Helius/Light),
+    /// so this is often a **no-op** from the protocol perspective.
+    ///
+    /// In tests, this can be used to model indexing latency between a transaction
+    /// being submitted and becoming queryable via the indexer.
+    ///
+    /// Default: no-op.
+    async fn wait_for_update(&self, _tx_sig: Option<&str>) -> Result<(), IndexerError> {
+        Ok(())
+    }
+
+    /// Scan with pagination (for efficient shielded sync)
+    async fn scan_outputs_paginated(&self, params: ScanParams) -> Result<ScanResult, IndexerError> {
+        // Default: use non-paginated scan
+        let outputs = self.scan_outputs_since(params.since_tx.as_deref()).await?;
+
+        let (outputs, has_more) = if let Some(limit) = params.limit {
+            if outputs.len() > limit {
+                (outputs[..limit].to_vec(), true)
+            } else {
+                (outputs, false)
+            }
+        } else {
+            (outputs, false)
+        };
+
+        let last_tx_sig = outputs.last().map(|o| o.tx_sig.clone());
+
+        Ok(ScanResult {
+            outputs,
+            last_tx_sig,
+            has_more,
+        })
+    }
+
     /// Get commitments created in a transaction (for OOB)
     async fn get_commitments_for_tx(&self, tx_sig: &str) -> Result<Vec<Commitment>, IndexerError>;
+
+    /// Get output ciphertexts for a transaction (for OOB)
+    async fn get_outputs_for_tx(
+        &self,
+        tx_sig: &str,
+    ) -> Result<Vec<OutputCiphertext>, IndexerError> {
+        // Default: scan all and filter
+        let outputs = self.scan_outputs_since(None).await?;
+        Ok(outputs.into_iter().filter(|o| o.tx_sig == tx_sig).collect())
+    }
+}
+
+// ============================================================================
+// Arc Blanket Implementations
+// ============================================================================
+
+// These allow Arc<T> to be used where T is expected, enabling shared ownership
+// of backend implementations across multiple clients.
+
+use std::sync::Arc;
+
+#[async_trait]
+impl<T: NoteCommitmentStore + ?Sized> NoteCommitmentStore for Arc<T> {
+    async fn root(&self) -> Result<Anchor, StoreError> {
+        (**self).root().await
+    }
+
+    async fn exists(&self, commitment: Commitment) -> Result<bool, StoreError> {
+        (**self).exists(commitment).await
+    }
+
+    async fn get_witness(&self, commitment: Commitment) -> Result<MembershipWitness, StoreError> {
+        (**self).get_witness(commitment).await
+    }
+
+    async fn get_witnesses(
+        &self,
+        commitments: &[Commitment],
+    ) -> Result<Vec<MembershipWitness>, StoreError> {
+        (**self).get_witnesses(commitments).await
+    }
+}
+
+#[async_trait]
+impl<T: NullifierSet + ?Sized> NullifierSet for Arc<T> {
+    async fn is_spent(&self, nullifier: &Nullifier) -> Result<bool, NullifierError> {
+        (**self).is_spent(nullifier).await
+    }
+}
+
+#[async_trait]
+impl<T: Chain + ?Sized> Chain for Arc<T> {
+    async fn insert_commitment(
+        &self,
+        commitment: Commitment,
+    ) -> Result<InsertCommitmentResult, ChainError> {
+        (**self).insert_commitment(commitment).await
+    }
+
+    async fn insert_nullifier(&self, nullifier: Nullifier) -> Result<String, ChainError> {
+        (**self).insert_nullifier(nullifier).await
+    }
+
+    async fn get_current_anchor(&self) -> Result<Anchor, ChainError> {
+        (**self).get_current_anchor().await
+    }
+
+    async fn is_valid_anchor(&self, anchor: &Anchor) -> Result<bool, ChainError> {
+        (**self).is_valid_anchor(anchor).await
+    }
+
+    async fn is_nullifier_spent(&self, nullifier: &Nullifier) -> Result<bool, ChainError> {
+        (**self).is_nullifier_spent(nullifier).await
+    }
+
+    async fn batch_check_nullifiers(
+        &self,
+        nullifiers: &[Nullifier],
+    ) -> Result<Vec<bool>, ChainError> {
+        (**self).batch_check_nullifiers(nullifiers).await
+    }
+
+    async fn shield(&self, request: ShieldRequest) -> Result<ShieldResult, ChainError> {
+        (**self).shield(request).await
+    }
+
+    async fn transfer(&self, request: TransferRequest) -> Result<TransferResult, ChainError> {
+        (**self).transfer(request).await
+    }
+
+    async fn unshield(&self, request: UnshieldRequest) -> Result<UnshieldResult, ChainError> {
+        (**self).unshield(request).await
+    }
+}
+
+#[async_trait]
+impl<T: Indexer + ?Sized> Indexer for Arc<T> {
+    async fn scan_outputs_since(
+        &self,
+        since_tx: Option<&str>,
+    ) -> Result<Vec<OutputCiphertext>, IndexerError> {
+        (**self).scan_outputs_since(since_tx).await
+    }
+
+    async fn wait_for_update(&self, tx_sig: Option<&str>) -> Result<(), IndexerError> {
+        (**self).wait_for_update(tx_sig).await
+    }
+
+    async fn scan_outputs_paginated(&self, params: ScanParams) -> Result<ScanResult, IndexerError> {
+        (**self).scan_outputs_paginated(params).await
+    }
+
+    async fn get_commitments_for_tx(&self, tx_sig: &str) -> Result<Vec<Commitment>, IndexerError> {
+        (**self).get_commitments_for_tx(tx_sig).await
+    }
+
+    async fn get_outputs_for_tx(
+        &self,
+        tx_sig: &str,
+    ) -> Result<Vec<OutputCiphertext>, IndexerError> {
+        (**self).get_outputs_for_tx(tx_sig).await
+    }
 }
 
 // ============================================================================

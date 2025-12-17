@@ -1,17 +1,33 @@
 //! Mock implementations for testing
 //!
 //! These mocks use simple in-memory data structures:
-//! - Merkle tree for commitment accumulator
+//! - Merkle tree for note commitment store
 //! - HashSet for nullifier set
+//!
+//! ## Architecture
+//!
+//! ```text
+//! Client ─────────reads─────────▶ Indexer (MockNoteStore)
+//!    │                               ▲
+//!    │                               │ observes
+//!    └────submits────▶ Chain ────────┘
+//!                    (MockChain)
+//! ```
+//!
+//! The client READS from the indexer but only WRITES through the chain.
+//! When MockChain processes transactions, it updates MockNoteStore (the indexer).
 //!
 //! Identifier scheme: commitment directly (no extra hash layer)
 
+use crate::backends::config::ProofVerificationMode;
 use crate::hash::merkle_hash;
 use crate::proofs::MembershipWitness;
+use crate::proofs::MockProofVerifier;
 use crate::traits::{
     Chain, ChainError, Indexer, IndexerError, InsertCommitmentResult, NoteCommitmentStore,
-    NullifierError, NullifierSet, OutputCiphertext, StoreError, TransferRequest, TransferResult,
-    UnshieldRequest, UnshieldResult,
+    NullifierError, NullifierSet, OutputCiphertext, ProofBytes, ProofVerifier, ShieldRequest,
+    ShieldResult, SpendPublicInputs, StoreError, TransferRequest, TransferResult, UnshieldRequest,
+    UnshieldResult,
 };
 use crate::types::{Anchor, Commitment, Fr, Nullifier};
 use async_trait::async_trait;
@@ -19,17 +35,33 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 // ============================================================================
-// Mock Accumulator (Merkle Tree)
+// Ciphertext Data (passed to chain operations)
 // ============================================================================
 
-/// Mock commitment accumulator using in-memory Merkle tree
+/// Ciphertext data to be stored with an output commitment
 ///
-/// Identifier scheme: commitment directly (no hash layer)
-pub struct MockAccumulator {
-    inner: Arc<RwLock<MockAccumulatorInner>>,
+/// This is what the client provides when submitting a transaction.
+/// The chain stores it, and the indexer can read it for scanning.
+#[derive(Debug, Clone)]
+pub struct OutputCiphertextData {
+    /// Encrypted note plaintext (C_enc)
+    pub c_enc: Vec<u8>,
+    /// Ephemeral public key (64 bytes: x || y)
+    pub ephemeral_key: [u8; 64],
 }
 
-struct MockAccumulatorInner {
+// ============================================================================
+// Mock Note Store (Merkle Tree)
+// ============================================================================
+
+/// Mock note commitment store using in-memory Merkle tree
+///
+/// Identifier scheme: commitment directly (no hash layer)
+pub struct MockNoteStore {
+    inner: Arc<RwLock<MockNoteStoreInner>>,
+}
+
+struct MockNoteStoreInner {
     depth: usize,
     nodes: HashMap<(usize, u64), Fr>,
     commitments: HashMap<Commitment, u64>, // commitment -> leaf_index
@@ -39,7 +71,7 @@ struct MockAccumulatorInner {
     tx_log: HashMap<String, Vec<Commitment>>,
 }
 
-impl MockAccumulator {
+impl MockNoteStore {
     pub fn new(depth: usize) -> Self {
         let mut empty_nodes = vec![Fr::from(0u64)];
         for _ in 1..=depth {
@@ -48,7 +80,7 @@ impl MockAccumulator {
         }
 
         Self {
-            inner: Arc::new(RwLock::new(MockAccumulatorInner {
+            inner: Arc::new(RwLock::new(MockNoteStoreInner {
                 depth,
                 nodes: HashMap::new(),
                 commitments: HashMap::new(),
@@ -98,23 +130,33 @@ impl MockAccumulator {
         leaf_index
     }
 
-    /// Insert with ciphertext
-    pub fn insert_with_ciphertext(
+    /// Insert a commitment with optional ciphertext data
+    ///
+    /// This is the ONLY way to insert - called by MockChain operations.
+    /// Clients should NOT call this directly; they submit to the chain.
+    ///
+    /// Stores data in two places:
+    /// 1. Merkle tree + indexes - for membership proofs
+    /// 2. Ciphertexts vector - for scanning/trial decryption (indexer reads this)
+    pub(crate) fn insert_output(
         &self,
         commitment: Commitment,
         tx_sig: &str,
-        ciphertext: Vec<u8>,
-        ephemeral_key: [u8; 32],
+        ciphertext: Option<OutputCiphertextData>,
     ) -> u64 {
+        // Insert into Merkle tree and indexes
         let leaf_index = self.insert(commitment, tx_sig);
 
-        let mut inner = self.inner.write().unwrap();
-        inner.ciphertexts.push(OutputCiphertext {
-            commitment,
-            ciphertext,
-            ephemeral_key,
-            tx_sig: tx_sig.to_string(),
-        });
+        // Store ciphertext data for scanning (if provided)
+        if let Some(ct_data) = ciphertext {
+            let mut inner = self.inner.write().unwrap();
+            inner.ciphertexts.push(OutputCiphertext {
+                commitment,
+                ciphertext: ct_data.c_enc,
+                ephemeral_key: ct_data.ephemeral_key,
+                tx_sig: tx_sig.to_string(),
+            });
+        }
 
         leaf_index
     }
@@ -132,7 +174,7 @@ impl MockAccumulator {
     }
 }
 
-impl MockAccumulatorInner {
+impl MockNoteStoreInner {
     fn get_node(&self, level: usize, index: u64) -> Fr {
         self.nodes
             .get(&(level, index))
@@ -160,7 +202,7 @@ impl MockAccumulatorInner {
 }
 
 #[async_trait]
-impl NoteCommitmentStore for MockAccumulator {
+impl NoteCommitmentStore for MockNoteStore {
     async fn root(&self) -> Result<Anchor, StoreError> {
         Ok(self.current_root())
     }
@@ -186,7 +228,7 @@ impl NoteCommitmentStore for MockAccumulator {
 }
 
 #[async_trait]
-impl Indexer for MockAccumulator {
+impl Indexer for MockNoteStore {
     async fn scan_outputs_since(
         &self,
         since_tx: Option<&str>,
@@ -274,30 +316,62 @@ impl NullifierSet for MockNullifierSet {
 // Mock Chain
 // ============================================================================
 
-/// Mock chain combining accumulator and nullifier set
+/// Mock chain combining note store and nullifier set
 pub struct MockChain {
-    accumulator: Arc<MockAccumulator>,
+    note_store: Arc<MockNoteStore>,
     nullifier_set: MockNullifierSet,
     anchor_history: Arc<RwLock<Vec<Anchor>>>,
     max_anchors: usize,
     tx_counter: Arc<RwLock<u64>>,
+    verifier: Arc<dyn ProofVerifier>,
+    verify_mode: ProofVerificationMode,
+}
+
+/// Configuration for how `MockChain` verifies spend proofs.
+///
+/// Even in a mock chain, proof verification is conceptually always present.
+/// We default to:
+/// - `MockProofVerifier` (accepts everything)
+/// - `Local` verification mode
+pub struct MockChainOptions {
+    pub verifier: Arc<dyn ProofVerifier>,
+    pub verify_mode: ProofVerificationMode,
+}
+
+impl Default for MockChainOptions {
+    fn default() -> Self {
+        Self {
+            verifier: Arc::new(MockProofVerifier),
+            verify_mode: ProofVerificationMode::Local,
+        }
+    }
 }
 
 impl MockChain {
-    pub fn new(accumulator: Arc<MockAccumulator>, max_anchors: usize) -> Self {
-        let initial_root = accumulator.current_root();
+    pub fn new(note_store: Arc<MockNoteStore>, max_anchors: usize) -> Self {
+        Self::new_with_options(note_store, max_anchors, MockChainOptions::default())
+    }
+
+    pub fn new_with_options(
+        note_store: Arc<MockNoteStore>,
+        max_anchors: usize,
+        options: MockChainOptions,
+    ) -> Self {
+        let initial_root = note_store.current_root();
         Self {
-            accumulator,
+            note_store,
             nullifier_set: MockNullifierSet::new(),
             anchor_history: Arc::new(RwLock::new(vec![initial_root])),
             max_anchors,
             tx_counter: Arc::new(RwLock::new(0)),
+            verifier: options.verifier,
+            verify_mode: options.verify_mode,
         }
     }
 
-    /// Get the accumulator (for tests)
-    pub fn accumulator(&self) -> &MockAccumulator {
-        &self.accumulator
+    /// Get the note store (for tests)
+    pub fn note_store(&self) -> &MockNoteStore {
+        &self.note_store
     }
 
     fn next_tx_sig(&self) -> String {
@@ -307,7 +381,7 @@ impl MockChain {
     }
 
     fn update_anchor_history(&self) {
-        let root = self.accumulator.current_root();
+        let root = self.note_store.current_root();
         let mut history = self.anchor_history.write().unwrap();
 
         if history.last() != Some(&root) {
@@ -335,13 +409,10 @@ impl Chain for MockChain {
         commitment: Commitment,
     ) -> Result<InsertCommitmentResult, ChainError> {
         let tx_sig = self.next_tx_sig();
-        self.accumulator.insert(commitment, &tx_sig);
+        self.note_store.insert(commitment, &tx_sig);
         self.update_anchor_history();
 
-        Ok(InsertCommitmentResult {
-            tx_sig,
-            commitment,
-        })
+        Ok(InsertCommitmentResult { tx_sig, commitment })
     }
 
     async fn insert_nullifier(&self, nullifier: Nullifier) -> Result<String, ChainError> {
@@ -353,12 +424,12 @@ impl Chain for MockChain {
     }
 
     async fn get_current_anchor(&self) -> Result<Anchor, ChainError> {
-        Ok(self.accumulator.current_root())
+        Ok(self.note_store.current_root())
     }
 
     async fn is_valid_anchor(&self, anchor: &Anchor) -> Result<bool, ChainError> {
         let history = self.anchor_history.read().unwrap();
-        let current = self.accumulator.current_root();
+        let current = self.note_store.current_root();
         Ok(*anchor == current || history.contains(anchor))
     }
 
@@ -372,6 +443,37 @@ impl Chain for MockChain {
     // ===== High-level operations =====
     // Note: shield() uses default implementation (just calls insert_commitment)
 
+    /// Shield: deposit tokens + insert commitment
+    ///
+    /// Chain stores the commitment and ciphertext (indexer can read it).
+    async fn shield(&self, request: ShieldRequest) -> Result<ShieldResult, ChainError> {
+        let tx_sig = self.next_tx_sig();
+
+        // Build ciphertext data if provided
+        let ct_data = match (&request.ciphertext, &request.ephemeral_key) {
+            (Some(ct), Some(epk)) => Some(OutputCiphertextData {
+                c_enc: ct.clone(),
+                ephemeral_key: *epk,
+            }),
+            _ => None,
+        };
+
+        // MOCK ONLY: we write directly into `MockNoteStore` here so tests can scan/witness
+        // immediately without running a real indexer.
+        //
+        // PRODUCTION: the chain does NOT "update the indexer". Ciphertexts/commitments live
+        // in ledger space, and an external indexer (Helius/Light-backed) observes the chain
+        // and builds its own DB / witness service asynchronously.
+        self.note_store
+            .insert_output(request.commitment, &tx_sig, ct_data);
+        self.update_anchor_history();
+
+        Ok(ShieldResult {
+            tx_sig,
+            commitment: request.commitment,
+        })
+    }
+
     async fn transfer(&self, request: TransferRequest) -> Result<TransferResult, ChainError> {
         // Validate anchor
         if !self.is_valid_anchor(&request.anchor).await? {
@@ -380,7 +482,7 @@ impl Chain for MockChain {
 
         // Verify input commitment exists
         if !self
-            .accumulator
+            .note_store
             .exists(request.input_commitment)
             .await
             .unwrap_or(false)
@@ -396,28 +498,64 @@ impl Chain for MockChain {
             return Err(ChainError::InvalidProof);
         }
 
+        // Verify spend proof (scaffold: verifier may be mock or real local verifier)
+        let public_inputs = SpendPublicInputs {
+            anchor: request.anchor,
+            nullifier: request.nullifier,
+            output_commitments: request.output_commitments(),
+            tx_binding: Fr::from(0u64),
+        };
+        let proof = ProofBytes::new(request.spend_proof.clone());
+        let ok = match self.verify_mode {
+            crate::backends::config::ProofVerificationMode::Local => self
+                .verifier
+                .verify_local(&public_inputs, &proof)
+                .await
+                .map_err(|e| ChainError::TransactionFailed(e.to_string()))?,
+            crate::backends::config::ProofVerificationMode::OnChain => self
+                .verifier
+                .verify_on_chain(&public_inputs, &proof)
+                .await
+                .map_err(|e| ChainError::TransactionFailed(e.to_string()))?,
+        };
+        if !ok {
+            return Err(ChainError::InvalidProof);
+        }
+
         // Insert nullifier (fails if double-spend)
         self.insert_nullifier(request.nullifier).await?;
 
-        // Insert output commitments
-        let mut output_tx_sigs = Vec::new();
-        for (i, cm) in request.output_commitments.iter().enumerate() {
-            let result = if let Some(ct) = request.ciphertexts.get(i) {
-                let tx_sig = self.next_tx_sig();
-                self.accumulator
-                    .insert_with_ciphertext(*cm, &tx_sig, ct.clone(), [0u8; 32]);
-                self.update_anchor_history();
-                tx_sig
-            } else {
-                self.insert_commitment(*cm).await?.tx_sig
+        // Insert output commitments with ciphertexts (all in same "transaction")
+        let tx_sig = self.next_tx_sig();
+        for output in &request.outputs {
+            let ct_data = match (&output.ciphertext, &output.ephemeral_key) {
+                (Some(ct), Some(epk)) => Some(OutputCiphertextData {
+                    c_enc: ct.clone(),
+                    ephemeral_key: *epk,
+                }),
+                _ => None,
             };
-            output_tx_sigs.push(result);
+
+            // MOCK ONLY: direct write into the "indexer" store; see note in `shield()`.
+            self.note_store
+                .insert_output(output.commitment, &tx_sig, ct_data);
         }
+        self.update_anchor_history();
 
         Ok(TransferResult {
-            tx_sig: output_tx_sigs.first().cloned().unwrap_or_default(),
-            output_commitments: request.output_commitments,
+            tx_sig,
+            output_commitments: request.output_commitments(),
         })
+    }
+
+    /// Batch check multiple nullifiers at once (efficient for shielded sync)
+    async fn batch_check_nullifiers(
+        &self,
+        nullifiers: &[Nullifier],
+    ) -> Result<Vec<bool>, ChainError> {
+        // For mock, we can check all at once since everything is in memory
+        let set = self.nullifier_set.nullifiers.read().unwrap();
+        Ok(nullifiers.iter().map(|nf| set.contains(nf)).collect())
     }
 
     async fn unshield(&self, request: UnshieldRequest) -> Result<UnshieldResult, ChainError> {
@@ -428,7 +566,7 @@ impl Chain for MockChain {
 
         // Verify input commitment exists
         if !self
-            .accumulator
+            .note_store
             .exists(request.input_commitment)
             .await
             .unwrap_or(false)
@@ -441,6 +579,30 @@ impl Chain for MockChain {
             .membership_witness
             .verify_local(request.input_commitment)
         {
+            return Err(ChainError::InvalidProof);
+        }
+
+        // Verify spend proof (scaffold)
+        let public_inputs = SpendPublicInputs {
+            anchor: request.anchor,
+            nullifier: request.nullifier,
+            output_commitments: vec![],
+            tx_binding: Fr::from(0u64),
+        };
+        let proof = ProofBytes::new(request.spend_proof.clone());
+        let ok = match self.verify_mode {
+            crate::backends::config::ProofVerificationMode::Local => self
+                .verifier
+                .verify_local(&public_inputs, &proof)
+                .await
+                .map_err(|e| ChainError::TransactionFailed(e.to_string()))?,
+            crate::backends::config::ProofVerificationMode::OnChain => self
+                .verifier
+                .verify_on_chain(&public_inputs, &proof)
+                .await
+                .map_err(|e| ChainError::TransactionFailed(e.to_string()))?,
+        };
+        if !ok {
             return Err(ChainError::InvalidProof);
         }
 
@@ -463,8 +625,8 @@ mod tests {
     use crate::traits::ShieldRequest;
 
     #[tokio::test]
-    async fn test_accumulator_insert_and_witness() {
-        let acc = MockAccumulator::new(4);
+    async fn test_note_store_insert_and_witness() {
+        let acc = MockNoteStore::new(4);
 
         let cm = Fr::from(42u64);
         acc.insert(cm, "tx_1");
@@ -477,7 +639,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_not_found() {
-        let acc = MockAccumulator::new(4);
+        let acc = MockNoteStore::new(4);
 
         let cm = Fr::from(42u64);
         let result = acc.get_witness(cm).await;
@@ -501,7 +663,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chain_shield() {
-        let acc = Arc::new(MockAccumulator::new(4));
+        let acc = Arc::new(MockNoteStore::new(4));
         let chain = MockChain::new(acc.clone(), 10);
 
         let cm = Fr::from(42u64);
@@ -510,6 +672,8 @@ mod tests {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm,
+                ciphertext: None,
+                ephemeral_key: None,
             })
             .await
             .unwrap();
@@ -520,7 +684,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chain_transfer() {
-        let acc = Arc::new(MockAccumulator::new(4));
+        let acc = Arc::new(MockNoteStore::new(4));
         let chain = MockChain::new(acc.clone(), 10);
 
         // Shield first
@@ -530,6 +694,8 @@ mod tests {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm1,
+                ciphertext: None,
+                ephemeral_key: None,
             })
             .await
             .unwrap();
@@ -541,6 +707,8 @@ mod tests {
         let nf = Fr::from(12345u64);
         let cm2 = Fr::from(100u64);
 
+        use crate::traits::TransferOutput;
+
         let result = chain
             .transfer(TransferRequest {
                 anchor: chain.get_current_anchor().await.unwrap(),
@@ -548,8 +716,7 @@ mod tests {
                 membership_witness: witness,
                 nullifier: nf,
                 spend_proof: vec![],
-                output_commitments: vec![cm2],
-                ciphertexts: vec![],
+                outputs: vec![TransferOutput::commitment_only(cm2)],
             })
             .await
             .unwrap();
@@ -560,7 +727,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_double_spend_prevented() {
-        let acc = Arc::new(MockAccumulator::new(4));
+        use crate::traits::TransferOutput;
+
+        let acc = Arc::new(MockNoteStore::new(4));
         let chain = MockChain::new(acc.clone(), 10);
 
         // Shield
@@ -570,6 +739,8 @@ mod tests {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm,
+                ciphertext: None,
+                ephemeral_key: None,
             })
             .await
             .unwrap();
@@ -585,8 +756,7 @@ mod tests {
                 membership_witness: witness.clone(),
                 nullifier: nf,
                 spend_proof: vec![],
-                output_commitments: vec![Fr::from(100u64)],
-                ciphertexts: vec![],
+                outputs: vec![TransferOutput::commitment_only(Fr::from(100u64))],
             })
             .await
             .unwrap();
@@ -599,8 +769,7 @@ mod tests {
                 membership_witness: witness,
                 nullifier: nf,
                 spend_proof: vec![],
-                output_commitments: vec![Fr::from(200u64)],
-                ciphertexts: vec![],
+                outputs: vec![TransferOutput::commitment_only(Fr::from(200u64))],
             })
             .await;
 
@@ -609,36 +778,104 @@ mod tests {
 
     #[tokio::test]
     async fn test_indexer_scan() {
-        let acc = MockAccumulator::new(4);
+        let acc = Arc::new(MockNoteStore::new(4));
+        let chain = MockChain::new(acc.clone(), 10);
 
         let cm1 = Fr::from(1u64);
         let cm2 = Fr::from(2u64);
 
-        acc.insert_with_ciphertext(cm1, "tx_1", vec![1, 2, 3], [0u8; 32]);
-        acc.insert_with_ciphertext(cm2, "tx_2", vec![4, 5, 6], [0u8; 32]);
+        // Use chain to insert (proper flow - chain updates indexer)
+        chain
+            .shield(ShieldRequest {
+                token_address: [0u8; 32],
+                amount: 100,
+                commitment: cm1,
+                ciphertext: Some(vec![1, 2, 3]),
+                ephemeral_key: Some([0u8; 64]),
+            })
+            .await
+            .unwrap();
+
+        chain
+            .shield(ShieldRequest {
+                token_address: [0u8; 32],
+                amount: 100,
+                commitment: cm2,
+                ciphertext: Some(vec![4, 5, 6]),
+                ephemeral_key: Some([0u8; 64]),
+            })
+            .await
+            .unwrap();
 
         // Scan all
         let outputs = acc.scan_outputs_since(None).await.unwrap();
         assert_eq!(outputs.len(), 2);
 
-        // Scan since tx_1
-        let outputs = acc.scan_outputs_since(Some("tx_1")).await.unwrap();
+        // Get the first tx_sig
+        let first_tx = outputs[0].tx_sig.clone();
+
+        // Scan since first tx
+        let outputs = acc.scan_outputs_since(Some(&first_tx)).await.unwrap();
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].commitment, cm2);
     }
 
     #[tokio::test]
     async fn test_indexer_get_commitments_for_tx() {
-        let acc = MockAccumulator::new(4);
+        use crate::traits::TransferOutput;
+
+        let acc = Arc::new(MockNoteStore::new(4));
+        let chain = MockChain::new(acc.clone(), 10);
 
         let cm1 = Fr::from(1u64);
+
+        // Shield first note
+        let shield_result = chain
+            .shield(ShieldRequest {
+                token_address: [0u8; 32],
+                amount: 100,
+                commitment: cm1,
+                ciphertext: None,
+                ephemeral_key: None,
+            })
+            .await
+            .unwrap();
+
+        let witness = acc.get_witness(cm1).await.unwrap();
+        let nf = Fr::from(999u64);
         let cm2 = Fr::from(2u64);
+        let cm3 = Fr::from(3u64);
 
-        acc.insert(cm1, "tx_1");
-        acc.insert(cm2, "tx_1");
+        // Transfer creates two outputs in same tx
+        let transfer_result = chain
+            .transfer(TransferRequest {
+                anchor: chain.get_current_anchor().await.unwrap(),
+                input_commitment: cm1,
+                membership_witness: witness,
+                nullifier: nf,
+                spend_proof: vec![],
+                outputs: vec![
+                    TransferOutput::commitment_only(cm2),
+                    TransferOutput::commitment_only(cm3),
+                ],
+            })
+            .await
+            .unwrap();
 
-        let cms = acc.get_commitments_for_tx("tx_1").await.unwrap();
-        assert_eq!(cms, vec![cm1, cm2]);
+        // Get commitments for the transfer tx
+        let cms = acc
+            .get_commitments_for_tx(&transfer_result.tx_sig)
+            .await
+            .unwrap();
+        assert_eq!(cms.len(), 2);
+        assert!(cms.contains(&cm2));
+        assert!(cms.contains(&cm3));
+
+        // Shield tx should have only one commitment
+        let cms = acc
+            .get_commitments_for_tx(&shield_result.tx_sig)
+            .await
+            .unwrap();
+        assert_eq!(cms, vec![cm1]);
     }
 }
-

@@ -26,10 +26,17 @@ thiserror = "2.0.17"
 
 # Random number generation (must match arkworks version)
 rand = "0.8"
+rand_core = "0.6"
 
 # Async traits
 async-trait = "0.1"
 
+# Encryption (AEAD)
+chacha20poly1305 = "0.10"
+
 [dev-dependencies]
 rand = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# Local UltraPlonk verifier library (used for proof-system integration smoke tests)
+ultraplonk-core = { path = "../../solana-ultraplonk-verifier/crates/ultraplonk-core" }

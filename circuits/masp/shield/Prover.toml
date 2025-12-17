@@ -1,0 +1,10 @@
+# Stage 0 test inputs for masp_shield
+
+note_asset_id = "10"
+note_amount = "7"
+note_recipient = "11"
+note_nullifier_nonce = "13"
+note_randomness = "17"
+
+# new_commitment = note_asset_id + note_amount + note_recipient + note_nullifier_nonce + note_randomness
+new_commitment = "58"

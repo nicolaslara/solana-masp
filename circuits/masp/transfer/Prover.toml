@@ -1,0 +1,15 @@
+# Stage 0 test inputs for masp_transfer (must satisfy the simple constraint in src/main.nr)
+
+anchor = "1"
+nullifier = "2"
+tx_binding = "3"
+
+note_asset_id = "10"
+note_amount = "7"
+note_recipient = "11"
+note_nullifier_nonce = "13"
+note_randomness = "17"
+nk = "19"
+
+# output_commitment = note_asset_id + note_amount + note_recipient + note_nullifier_nonce + note_randomness + nk
+output_commitment = "77"

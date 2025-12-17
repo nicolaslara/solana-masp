@@ -10,7 +10,8 @@ alwaysApply: true
 
 1. **Read `tasks.md`** - Current status and open questions
 2. **Read `knowledge.md`** - Learnings and design decisions
-3. **Update both** as you make progress
+3. **Read `docs/circuit-security-requirements.md`** - ⚠️ CRITICAL for circuit work
+4. **Update these docs** as you make progress
 
 ## Project Structure
 
@@ -30,6 +31,8 @@ solana-masp/
 ## Best Practices (2025)
 
 ### Noir Circuit Development
+
+⚠️ **ALWAYS read `docs/circuit-security-requirements.md` before modifying circuits!**
 
 ```noir
 // Use explicit types for clarity
@@ -58,6 +61,14 @@ fn main(
 -   Prefer `Field` over `u64` when possible (native to ZK)
 -   Document expected constraints per component
 -   Test with `nargo test` before generating proofs
+
+**Security Requirements (from `docs/circuit-security-requirements.md`):**
+
+-   **Commitment integrity**: Always re-derive commitment from note fields
+-   **Range checks**: All amounts must be < 2^64 to prevent overflow
+-   **Nullifier derivation**: Must use `nk` (derived from spending key)
+-   **Balance conservation**: Input amounts = output amounts (+ public delta)
+-   **Membership proof**: Verify Merkle path against anchor
 
 ### Rust Development
 
@@ -188,6 +199,7 @@ Before committing:
 -   [ ] `nargo test` passes (if circuit changed)
 -   [ ] Updated `tasks.md` if completing tasks
 -   [ ] Updated `knowledge.md` if learned something new
+-   [ ] Updated `docs/circuit-security-requirements.md` if circuit constraints changed
 
 ---
 

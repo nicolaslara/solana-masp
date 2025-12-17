@@ -14,6 +14,14 @@ alwaysApply: true
 -   Captures learnings, decisions, open questions
 -   **Update as you learn new things**
 
+### Circuit Security Requirements ⚠️ CRITICAL
+
+-   **Path:** `./docs/circuit-security-requirements.md`
+-   **MUST READ before modifying circuits**
+-   Lists all constraints that MUST be enforced in ZK
+-   Covers: commitment integrity, nullifier derivation, balance conservation, membership proofs
+-   **Update when circuit constraints change**
+
 ### Local Sapling-Groth16 Spike
 
 -   **Path:** `../sapling-groth16/`
@@ -180,6 +188,9 @@ solana program deploy target/deploy/solana_masp.so --url http://127.0.0.1:8899
 | -------------------------- | ----------------------------------------------------------------- |
 | Current tasks              | `./tasks.md`                                                      |
 | Learnings & decisions      | `./knowledge.md`                                                  |
+| **Circuit security** ⚠️    | `./docs/circuit-security-requirements.md`                         |
+| Encryption comparison      | `./docs/encryption-comparison.md`                                 |
+| Payment discovery scaling  | `./docs/payment-discovery-analysis.md`                            |
 | Poseidon vs BLAKE2s        | `../sapling-groth16/sapling-tasks.md`                             |
 | Domain separation          | `../sapling-groth16/docs/domain_tags.md`                          |
 | UltraPlonk verification    | `../solana-ultraplonk-verifier/`                                  |

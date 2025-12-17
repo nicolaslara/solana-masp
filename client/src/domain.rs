@@ -56,6 +56,16 @@ pub enum DomainTag {
     /// Transaction binding hash
     /// `tx_hash = H(DOM, anchor, nullifiers..., commitments...)`
     TransactionBinding = 12,
+
+    /// Outgoing viewing key derivation
+    /// `ovk = H(DOM, ak_x, nk_x)`
+    /// Used to decrypt C_out (notes sent BY this key)
+    OutgoingViewingKey = 13,
+
+    /// Outgoing ciphertext key derivation
+    /// `ock = H(DOM, ovk, epk_x, commitment)`
+    /// Symmetric key for C_out encryption
+    OutgoingCiphertextKey = 14,
 }
 
 impl DomainTag {
@@ -90,6 +100,8 @@ mod tests {
             DomainTag::NullifierSecret,
             DomainTag::NullifierNonce,
             DomainTag::TransactionBinding,
+            DomainTag::OutgoingViewingKey,
+            DomainTag::OutgoingCiphertextKey,
         ];
 
         for (i, tag_i) in tags.iter().enumerate() {

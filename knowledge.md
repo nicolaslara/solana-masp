@@ -11,9 +11,28 @@ This file captures learnings, design decisions, and discoveries as we develop th
 **Phase:** Milestone 0 - Off-chain primitives (COMPLETE)
 **Last Updated:** 2024-12-16
 
+### Recent Completions
+- ✅ C_out (Outgoing Ciphertext) for sender audit trail
+- ✅ Outgoing Viewing Key (ovk) derivation
+- ✅ Full shielded sync from chain
+- ✅ Incremental sync
+- ✅ Batch nullifier checking
+- ✅ 33 E2E tests (7 new for advanced sync/encryption)
+- ✅ Production-like indexing-latency hook: `Indexer::wait_for_update()` + `MaspClient::wait_for_indexer_update()`
+
 ---
 
 ## Architecture Decisions ✅
+
+### Indexer Latency Modeling (Reference Implementation)
+
+**Decision:** Keep the `Indexer` trait read-only, but add an optional `wait_for_update(tx_sig)` hook with a **default no-op** implementation.
+
+**Rationale:**
+- In production, the indexer is an external observer (RPC/Helius/Light) and “waiting” is not a protocol requirement.
+- In tests and demos, modeling indexing lag makes flows more realistic (submit → wait → scan) without building a full indexer.
+
+**Client helper:** `MaspClient::wait_for_indexer_update()` forwards to the configured indexer.
 
 ### Note Structure: Orchard-style Actions
 
@@ -110,6 +129,11 @@ enum DomainTag {
     NullifierNonce = 10,   // nonce = H(DOM, spent_cm, index)
     TxBinding = 11,        // binding_hash = H(DOM, tx_fields...)
     Ciphertext = 12,       // c_hash = H(DOM, ciphertext...)
+    // Future (Milestone 7+):
+    LongTermKey = 13,      // lt_sk = H(DOM, spending_key)
+    DiscoveryTag = 14,     // tag = H(DOM, shared_secret, direction, counter)
+    OutgoingViewingKey = 15,   // ovk = H(DOM, spending_key)
+    WalletBackup = 16,     // backup_key = H(DOM, spending_key)
 }
 ```
 
@@ -122,7 +146,7 @@ MaspClient<I: Indexer, C: Chain>
     ├── Keys (SpendingKey, ViewingKey) - local
     ├── Notes (OwnedNote) - local
     └── Operations via traits:
-        ├── Indexer: get_witness, scan_outputs
+        ├── Indexer: get_witness, scan_outputs, exists
         └── Chain: submit_transaction, is_nullifier_spent
 ```
 
@@ -137,6 +161,25 @@ MaspClient<I: Indexer, C: Chain>
 - Merkle tree (on indexer)
 - Nullifier set (on chain)
 - Root history (on chain)
+
+### Client Sync Patterns
+
+**Sync Flow (Primary for POC):**
+
+1. Client scans `indexer.scan_outputs_since(last_tx)` for new ciphertexts
+2. Tries to decrypt each ciphertext with viewing key
+3. For decrypted notes, verifies commitment via `indexer.exists()`
+4. Checks nullifier via `chain.is_nullifier_spent()` to detect spent notes
+5. Adds unspent notes to local state
+
+**OOB Flow (Secondary):**
+
+1. Sender provides tx_sig to receiver out-of-band (email, message, etc.)
+2. Receiver calls `indexer.get_commitments_for_tx(tx_sig)` to find commitments
+3. Sender also provides note plaintext (or receiver decrypts ciphertext)
+4. Receiver verifies via `import_note()` which checks commitment exists
+
+**Key insight:** Sync is more robust (works independently) but requires ciphertext storage. OOB requires less infrastructure but needs external communication.
 
 ### State Storage Strategy (Phased)
 
@@ -161,6 +204,129 @@ MaspClient<I: Indexer, C: Chain>
 - Logs are not reliable DA layer
 - Calldata is retained in ledger history
 - Enables rescan recovery
+- Retrievable via `getTransaction` RPC (Helius, standard Solana)
+
+### Note Encryption Scheme
+
+**Decision:** ECIES with ChaCha20-Poly1305 (matches Zcash Sapling pattern)
+
+```text
+Encryption (sender knows recipient's pk_d and g_d):
+1. Generate ephemeral keypair: esk (random), epk = esk * g_d
+2. ECDH: shared_secret = esk * pk_d
+3. KDF: symmetric_key = Poseidon(DOM_CIPHERTEXT, ss.x, ss.y, epk.x)
+4. AAD: ephemeral_key bytes (binds ciphertext to this encryption)
+5. Encrypt: ChaCha20-Poly1305(symmetric_key, nonce, plaintext, aad=epk)
+6. Output: (epk, nonce, ciphertext_with_tag)
+
+Decryption (recipient has ivk):
+1. Compute: shared_secret = ivk * epk
+2. Same KDF to derive symmetric_key
+3. Decrypt with ChaCha20-Poly1305 using epk as AAD
+4. Verify recipient field matches
+5. Optionally verify commitment if known
+```
+
+**Comparison with Zcash:**
+| Aspect | Zcash | Our Implementation |
+|--------|-------|-------------------|
+| Key Exchange | X25519 | Baby JubJub ECDH |
+| AEAD | ChaCha20-Poly1305 | ChaCha20-Poly1305 ✅ |
+| KDF | Blake2b | Poseidon (ZK-native) |
+| AAD | commitment | ephemeral key |
+| Outgoing Ciphertext | Yes (C_out) | ✅ Implemented |
+| Outgoing Viewing Key | Yes (ovk) | ✅ Implemented |
+| Batch Nullifier Checks | Yes | ✅ Implemented |
+
+**Why epk as AAD instead of commitment:**
+- Allows trial decryption without knowing commitment
+- Commitment verified after decryption
+- Same security: epk is per-encryption, prevents swapping
+
+**Trait-based design:**
+- `NoteEncryption` trait allows swappable algorithms
+- `ChaChaPolyEncryption` - production (authenticated encryption)
+- `MockEncryption` - testing (fast XOR, insecure)
+- `encrypt_with_outgoing()` - creates both C_enc and C_out
+
+### Out-of-Band (OOB) Communication
+
+**Decision:** Trait-based OOB channel for payment notifications
+
+```rust
+// Minimal notification (sender to recipient)
+PaymentNotification {
+    tx_sig: "5K8Z...",     // Transaction signature
+    output_index: 0,        // Which output in tx
+    commitment: Option<[u8; 32]>,  // For quick verification
+}
+
+// OOB Channel trait
+trait OobChannel {
+    async fn send(recipient_id, notification);
+    async fn receive(recipient_id) -> Vec<PaymentNotification>;
+}
+```
+
+**How it works:**
+1. Alice pays Bob via shielded transfer
+2. Alice sends `PaymentNotification` to Bob (Signal, email, QR, etc.)
+3. Bob calls `indexer.get_commitments_for_tx(tx_sig)` to verify
+4. Bob decrypts ciphertext or uses provided note plaintext
+5. Bob imports note after verification
+
+**Key insight:** OOB is complementary to sync:
+- **Sync**: Scans all ciphertexts, slower but autonomous
+- **OOB**: Targeted fetch, faster but needs external communication
+
+### Payment Discovery Scaling (Future)
+
+**Problem:** Trial decryption is O(N) where N = all shielded outputs.
+
+**Current (POC):** Trial decryption - simple, correct, doesn't scale.
+
+**Production (Future):** Tag-based discovery with PIR:
+1. First payment: OOB key exchange to establish shared secret
+2. Subsequent: Deterministic tags + PIR lookup (O(1))
+3. Fallback: Trial decryption for recovery
+
+**Why epk can't be lost:** It's stored on-chain in transaction data.
+
+See `docs/payment-discovery-analysis.md` for full analysis.
+
+### Sender Recovery Problem (C_out) ✅
+
+**Critical insight:** Recipients can always recover, but senders cannot!
+
+```
+Recipient (Bob): ss = ivk * epk    ← ivk derived from seed ✅
+Sender (Alice):  ss = esk * pk_d   ← esk was RANDOM, not from seed ❌
+```
+
+**Solution: Outgoing Ciphertext (C_out)** ✅ IMPLEMENTED
+
+Each transaction includes TWO ciphertexts:
+1. `C_enc` - For recipient, encrypted with `ss = esk * pk_d`
+2. `C_out` - For sender, encrypted with `ovk` (outgoing viewing key)
+
+Since `ovk` is derived from Alice's seed, she can always decrypt C_out.
+C_out contains `esk || pk_d.x || note_plaintext`.
+
+**Implementation:**
+```rust
+// Key derivation
+ovk = Poseidon(DOM_OVK, ak.x, nk.x)
+
+// Outgoing ciphertext key
+ock = Poseidon(DOM_OCK, ovk, epk.x, commitment)
+
+// C_out encryption
+C_out = ChaCha20Poly1305(ock, nonce, esk || pk_d.x || note_plaintext, aad=commitment)
+```
+
+**Sync methods:**
+- `sync_from_chain(scan_sent=true)` - Recovers sent notes via C_out
+- `SyncResult.sent_notes` - Contains recovered `OutgoingPlaintext`
 
 ### Circuit Split (Separate Circuits)
 
@@ -243,6 +409,16 @@ Minimal public inputs:
 3. **Forester dependency** - Light queues need draining (liveness risk)
 4. **Don't use Light nullifier queue** - Designed for compressed account lifecycle, not MASP spentness
 
+### From E2E Testing
+
+1. **Indexer is the source of truth** - Client verifies notes via indexer before adding them
+2. **Sync vs OOB** - Two note discovery patterns:
+   - **Sync**: Client scans ciphertexts from indexer, decrypts to find owned notes
+   - **OOB**: Sender shares tx_sig, receiver fetches commitments from indexer
+3. **Nullifier check on sync** - Restored clients must check `is_nullifier_spent()` before adding notes
+4. **Multi-asset isolation** - Different tokens have separate balances (asset_id is key)
+5. **Single tx_sig per transfer** - All output commitments (output + change) belong to same transaction
+
 ---
 
 ## Implementation Notes
@@ -285,13 +461,64 @@ All use big-endian byte format.
 
 ---
 
+## Configurable Backends
+
+Tests can run with different backends via environment variables:
+
+```bash
+# Default: all mocks
+cargo test --test user_flows
+
+# Show backend configuration
+MASP_PRINT_CONFIG=1 cargo test -- --nocapture
+
+# Chain backends (MASP_CHAIN)
+MASP_CHAIN=mock           # In-memory mock (default)
+MASP_CHAIN=surfpool       # Local Surfpool (http://127.0.0.1:8899)
+MASP_CHAIN=devnet         # Solana devnet
+MASP_CHAIN=testnet        # Solana testnet
+MASP_CHAIN=mainnet        # Solana mainnet-beta
+
+# Indexer backends (MASP_INDEXER)
+MASP_INDEXER=mock         # In-memory mock (default)
+MASP_INDEXER=light        # Light Protocol via Helius
+
+# Encryption backends (MASP_ENCRYPTION)
+MASP_ENCRYPTION=chacha    # ChaCha20-Poly1305 (default, production)
+MASP_ENCRYPTION=mock      # Mock encryption (fast testing, INSECURE)
+```
+
+**Current Status:** All non-mock backends are scaffolds that use mock internally.
+As real implementations are added, tests will automatically use them.
+
+### Encryption Algorithm: ChaCha20-Poly1305
+
+**Properties:**
+- 256-bit key, 96-bit nonce
+- Authenticated encryption (integrity + confidentiality)
+- Fast in software (no AES-NI required)
+- Standard IETF RFC 8439
+- Used in: TLS 1.3, WireGuard, Noise Protocol, Zcash Sapling
+
+**Why not AES-GCM?**
+- ChaCha20 is faster on devices without AES hardware acceleration
+- Constant-time implementation is easier (no cache timing attacks)
+- AES-GCM can be added as an option later if needed
+
+**Future options:**
+- `AesGcm`: AES-256-GCM (hardware acceleration on modern CPUs)
+- `XChaCha`: Extended nonce (192-bit) for safer random nonce generation
+- `Aegis`: AEGIS-256 (very fast with AES-NI)
+
+---
+
 ## Open Questions
 
 1. ~~Note structure~~ → Actions (decided)
 2. ~~Commitment scheme~~ → Poseidon (decided)
 3. ~~Multi-asset~~ → α tags (decided)
 4. ~~Key derivation~~ → Sapling-style on Baby JubJub (decided)
-5. Exact ciphertext format (ECIES? ChaCha20-Poly1305?)
+5. ~~Exact ciphertext format~~ → ECIES with ChaCha20-Poly1305 (decided)
 6. Relayer fee structure details
 7. Light Protocol integration patterns (Milestone 3)
 
@@ -309,6 +536,27 @@ All use big-endian byte format.
 ---
 
 ## Design Documents
+
+- **[Circuit Security Requirements](docs/circuit-security-requirements.md)** ⚠️ **CRITICAL**:
+
+  - All constraints that MUST be enforced in ZK circuits
+  - Shield, Transfer, Unshield circuit requirements
+  - Out-of-circuit integrity checks (nullifier uniqueness, anchor validity)
+  - Security invariants and audit priorities
+  - **Keep updated when circuit constraints change**
+
+- **[Encryption Comparison](docs/encryption-comparison.md)** - Zcash comparison:
+
+  - How our ECIES implementation compares to Zcash
+  - What we did better (trait-based, ZK-native KDF)
+  - Gaps (C_out not implemented)
+
+- **[Payment Discovery Analysis](docs/payment-discovery-analysis.md)** - Scaling sync:
+
+  - Trial decryption vs tag-based discovery
+  - Why epk can't be lost (on-chain)
+  - PIR for O(1) payment lookup
+  - Migration path from POC to production
 
 - **[Light Protocol Integration](docs/light-protocol-integration.md)** - LP integration design:
 

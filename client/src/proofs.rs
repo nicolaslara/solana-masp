@@ -13,22 +13,22 @@
 //!    - Light Protocol: Address insert succeeds (fails if exists)
 //!
 //! 3. **Spend Validity** - The spender knows a valid note
-//!    - Abstracted via SpendProver/SpendVerifier traits
+//!    - Abstracted via SpendProver/ProofVerifier traits
 //!    - Current: UltraPlonk
 //!    - Proves: commitment matches note, nullifier derivation, balance, etc.
 //!
 //! ## Proof System Abstraction
 //!
-//! The SpendProver/SpendVerifier traits (in traits.rs) abstract over:
+//! The SpendProver/ProofVerifier traits (in traits.rs) abstract over:
 //! - UltraPlonk (current implementation)
 //! - Future proving systems
 //!
 //! ## Crate Separation
 //!
 //! Designed for splitting into:
-//! - `masp-proofs-core` - MembershipWitness, AccumulatorId (no_std)
+//! - `masp-proofs-core` - MembershipWitness, StoreId (no_std)
 //! - `masp-prover` - SpendProver implementations (std, prove feature)
-//! - `masp-verifier` - SpendVerifier implementations (no_std, verify feature)
+//! - `masp-verifier` - ProofVerifier implementations (no_std, verify feature)
 
 use crate::types::{Anchor, Commitment, Fr};
 
@@ -182,8 +182,9 @@ impl StoreId {
 // ============================================================================
 
 use crate::traits::{
-    ProofBytes, ProofSystemError, SpendPrivateInputs, SpendProver, SpendPublicInputs, SpendVerifier,
+    ProofBytes, ProofSystemError, ProofVerifier, SpendPrivateInputs, SpendProver, SpendPublicInputs,
 };
+use async_trait::async_trait;
 
 /// Mock prover that always returns a valid-looking proof
 pub struct MockSpendProver;
@@ -204,10 +205,11 @@ impl SpendProver for MockSpendProver {
 }
 
 /// Mock verifier that always returns true
-pub struct MockSpendVerifier;
+pub struct MockProofVerifier;
 
-impl SpendVerifier for MockSpendVerifier {
-    fn verify(
+#[async_trait]
+impl ProofVerifier for MockProofVerifier {
+    async fn verify_local(
         &self,
         _public_inputs: &SpendPublicInputs,
         _proof: &ProofBytes,
@@ -250,10 +252,10 @@ mod tests {
         assert!(!witness.verify_local(Fr::from(42u64)));
     }
 
-    #[test]
-    fn test_mock_prover_verifier() {
+    #[tokio::test]
+    async fn test_mock_prover_verifier() {
         let prover = MockSpendProver;
-        let verifier = MockSpendVerifier;
+        let verifier = MockProofVerifier;
 
         let public = SpendPublicInputs {
             anchor: Fr::from(0u64),
@@ -273,7 +275,7 @@ mod tests {
         };
 
         let proof = prover.prove(&public, &private).unwrap();
-        assert!(verifier.verify(&public, &proof).unwrap());
+        assert!(verifier.verify_local(&public, &proof).await.unwrap());
     }
 
     #[test]

@@ -14,6 +14,30 @@ alwaysApply: true
 
 ---
 
+## Reference Implementation Principles (Keep Interfaces Stable)
+
+This repository is a **reference implementation**. It’s okay for internals to be mocked initially (proofs, storage, RPC), but the **user-facing flows and the protocol-level interfaces must remain production-shaped**.
+
+### What “production-shaped” means here
+
+- **Client flows stay stable**: `shield`, `transfer_to`, `unshield`, `receive_payment(tx_sig)`, `recover()` should behave like real wallet flows.
+- **Mocks are in-memory, not “fake production”**: they exist to test semantics, not to mimic all infrastructure.
+- **Indexer is external in production**: the chain does not “update the indexer”. Indexers observe the ledger.
+  - In tests, it’s acceptable to call a client helper like `wait_for_indexer_update()` to model indexing latency (noop in real impl).
+- **Traits are protocol boundaries**: avoid churn in `Chain`/`Indexer`/`NoteEncryption`/`SpendProver`/`ProofVerifier`.
+  - If an interface change is needed, update `tasks.md` + `knowledge.md` with rationale before/with the change.
+
+### Decision discipline
+
+- Prefer **document-first** changes for:
+  - indexer/store abstraction changes
+  - note format changes
+  - domain separation changes
+  - proof public-input layout changes
+- When something gets hard, step back and reason from the user flows downwards. Don’t patch traits “just to make it work”.
+
+---
+
 ## Development Workflows
 
 ### Circuit Development

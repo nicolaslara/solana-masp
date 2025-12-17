@@ -1,0 +1,13 @@
+# Stage 0 test inputs for masp_unshield
+
+anchor = "1"
+nullifier = "2"
+public_amount = "7"
+public_recipient = "11"
+
+note_asset_id = "10"
+note_amount = "7"
+note_recipient = "11"
+note_nullifier_nonce = "13"
+note_randomness = "17"
+nk = "19"
