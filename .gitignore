@@ -1,0 +1,31 @@
+# Temporary Prover files (with timestamps)
+circuits/**/Prover_*.toml
+
+# Witness files (with timestamps)
+circuits/**/witness_*.gz
+
+# Proof directories (with timestamps)
+client/target/masp_proofs/*-*/
+
+# Build artifacts
+target/
+**/target/
+
+# Cargo
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+
