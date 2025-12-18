@@ -646,14 +646,32 @@ impl SpendProver for CliUltraPlonkProver {
             .create_proof_dir(circuit_type)
             .map_err(|e| ProofSystemError::ProvingFailed(format!("create proof dir: {e}")))?;
 
+        // Calculate prover name outside closure for cleanup
+        let prover_name = self.proof_prover_name(&proof_dir);
+        let prover_toml_circuit = circuit_dir.join(format!("{prover_name}.toml"));
+
         let result = (|| {
-            // 4. Write a per-proof prover TOML into the circuit package root.
-            // nargo execute looks for `<PROVER_NAME>.toml` in the package root.
-            let prover_name = self.proof_prover_name(&proof_dir);
-            let prover_toml = circuit_dir.join(format!("{prover_name}.toml"));
+            // 4. Write a per-proof prover TOML.
+            // nargo execute looks for `<PROVER_NAME>.toml` in the package root, so we must
+            // write it there. We also write a copy to proof_dir for archival/debugging.
+            let prover_toml_proof = proof_dir.join(format!("{prover_name}.toml"));
             let toml_content = self.build_prover_toml(public_inputs, private_inputs)?;
-            std::fs::write(&prover_toml, &toml_content).map_err(|e| {
-                ProofSystemError::ProvingFailed(format!("write {}: {e}", prover_toml.display()))
+
+            // Write to proof_dir first (for archival)
+            std::fs::write(&prover_toml_proof, &toml_content).map_err(|e| {
+                ProofSystemError::ProvingFailed(format!(
+                    "write {}: {e}",
+                    prover_toml_proof.display()
+                ))
+            })?;
+
+            // Copy to circuit_dir (where nargo expects it)
+            std::fs::copy(&prover_toml_proof, &prover_toml_circuit).map_err(|e| {
+                ProofSystemError::ProvingFailed(format!(
+                    "copy {} to {}: {e}",
+                    prover_toml_proof.display(),
+                    prover_toml_circuit.display()
+                ))
             })?;
 
             // 5. Run nargo execute to generate witness
@@ -736,11 +754,14 @@ impl SpendProver for CliUltraPlonkProver {
 
             // Cleanup witness file (it's in circuit_dir/target/, not proof_dir)
             let _ = std::fs::remove_file(&witness_path);
-            // Cleanup prover toml (it's in circuit_dir)
-            let _ = std::fs::remove_file(&prover_toml);
+            // Cleanup prover toml from circuit_dir (proof_dir copy remains for debugging)
+            let _ = std::fs::remove_file(&prover_toml_circuit);
 
             Ok(ProofBytes::new(proof_body.to_vec()))
         })();
+
+        // Always cleanup prover toml from circuit_dir, even on error
+        let _ = std::fs::remove_file(&prover_toml_circuit);
 
         // Cleanup proof directory on success
         if result.is_ok() {

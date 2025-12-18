@@ -20,7 +20,7 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 - Poseidon hashing via `light-poseidon` crate
 - Multi-asset via Fiat-Shamir α tags
 - Trait-based client (Indexer + Chain abstractions)
-- Off-Chain note-commitment-tree (verified via merkle paths against on-chain merkle proofs)
+- On-chain commitment-tree accumulator (anchors); membership proven via Merkle paths (privacy-preserving; no commitment references)
 - Light Protocol for state compression **(nullifier set only; commitment tree is not Light)** (Milestone 3+)
 
 **Circuits:**
@@ -28,6 +28,24 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 - Shield circuit (deposit)
 - Transfer circuit (shielded action)
 - Unshield circuit (withdraw)
+
+---
+
+## Next priority order (authoritative)
+
+This section defines the **required implementation ordering** for the next milestones.
+We should **not** proceed to “real circuit implementation” work until items (1)–(4) are done.
+
+1. **Privacy-preserving commitment tree + anchors (and update mocks accordingly)**:
+   - See **Milestone 3**.
+2. **Note consolidation support (mocks + user flows + circuit scaffold)**:
+   - Add a consolidation flow to `client/tests/user_flows.rs` and keep the protocol interface stable.
+3. **Key model review / simplification**:
+   - Ensure the SpendingKey vs FullViewingKey split is clean and minimal (no accidental “watch-only spending” capability).
+4. **Asset tags (multi-asset correctness) in mocks + circuit scaffolds**:
+   - Implement α-tag semantics in reference prover checks and mirror them in circuit scaffolds.
+5. **Then: circuit implementation (incremental constraints)**:
+   - Only after (1)–(4) are locked.
 
 ---
 
@@ -290,11 +308,8 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 - [x] Create `docs/protocol-soundness.md` (soundness/privacy checklist + current gaps)
 - [x] MockChain: bind membership witness root to request anchor (transfer/unshield)
 - [x] MockSpendProver: enforce output nullifier nonce derivation for transfer outputs
-- [ ] P0: Define and enforce **spend authorization** so a watch-only `FullViewingKey` cannot spend
-  - Requires an explicit circuit statement binding secret key material (e.g. `nsk`/`ask`) to the note recipient/address derivation
-  - Likely requires updating note format and/or circuit private inputs (recipient currently only stores `pk_d.x`)
-- [ ] P1: Define `tx_binding_hash` inputs/layout and enforce it (currently `tx_binding=0`)
-  - Include **unshield recipient binding**: public recipient must be committed into `tx_binding_hash` (prevents swapping destination)
+- [x] P0: Define and enforce **spend authorization** so a watch-only `FullViewingKey` cannot spend
+- [x] P1: Define `tx_binding_hash` inputs/layout and enforce it
 - [ ] P1: Model transparent boundary checks in mocks (optional for now; required for on-chain POC soundness)
   - Shield: ensure `(token_address, amount)` deposit is enforced by the chain/program (mock currently does not model SPL transfers)
   - Unshield: ensure `(token_address, amount, recipient)` withdrawal is enforced by the chain/program (mock currently does not model SPL transfers)
@@ -475,6 +490,19 @@ backend-light = []    # Light Protocol (production)
 
 ---
 
+## Milestone 3.1: Note Consolidation / UTXO Management (Research → Reference Implementation)
+
+**Goal:** make spending feasible under Solana limits when balances are fragmented across many small notes.
+
+**Deliverables (reference implementation):**
+
+- [ ] Add a **consolidation user flow** to `client/tests/user_flows.rs` (public API only)
+- [ ] Implement a mock/reference “consolidate” action (N→1 or N→2) in the client + mock chain semantics
+- [ ] Add a **Stage-0 Noir circuit scaffold** for consolidation (like transfer/unshield/shield)
+- [ ] Document privacy tradeoffs + wallet heuristics in `docs/protocol-soundness.md` or a dedicated doc
+
+---
+
 ## Milestone 4: Light Protocol for Nullifiers
 
 **Goal:** Eliminate unbounded PDA growth.
@@ -516,14 +544,6 @@ backend-light = []    # Light Protocol (production)
 See `docs/payment-discovery-analysis.md` for full design.
 
 ---
-
-## Future: Note Consolidation / UTXO Management (Research)
-
-**Problem:** many small notes can exceed Solana transaction limits when spending (too many inputs).
-
-- [ ] Research consolidation strategies (e.g., dedicated consolidation action/circuit like N→1)
-- [ ] Explore wallet heuristics (when to consolidate, privacy implications)
-- [ ] Evaluate Solana constraints (account/IX limits, CU) vs proof shape
 
 ### Current OOB Limitations
 
