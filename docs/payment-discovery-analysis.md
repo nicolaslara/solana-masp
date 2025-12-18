@@ -9,6 +9,7 @@ This document compares different approaches to shielded payment discovery, analy
 ## The Core Problem
 
 In transparent chains, discovering payments is trivial:
+
 ```
 balance = chain.getBalance(address)
 ```
@@ -77,6 +78,7 @@ Timeline:
 | **Anyone else** | ❌ NO | Can't derive without ivk or esk |
 
 **The math:**
+
 ```
 Alice:   ss = esk * pk_d = esk * (ivk * g_d)
 Bob:     ss = ivk * epk  = ivk * (esk * g_d)
@@ -130,6 +132,7 @@ Transaction contains TWO ciphertexts:
 ```
 
 **Why C_out works:**
+
 ```
 Alice's key hierarchy:
   seed → sk → ovk (outgoing viewing key)
@@ -142,6 +145,7 @@ C_out encryption:
 ```
 
 **Without C_out (our current state):**
+
 - Alice loses wallet state → Alice cannot recover what she SENT
 - Alice can still recover what she RECEIVED (uses ivk * epk)
 - This is a significant UX gap for sender audit/recovery
@@ -176,6 +180,7 @@ For 1M outputs:
 ### How It Works
 
 **First payment (Alice → Bob):**
+
 ```
 // Alice and Bob do long-term key exchange
 S = DH(alice_long_term_sk, bob_long_term_pk)
@@ -186,6 +191,7 @@ tag_stream_b_to_a = PRF(S, "bob->alice")
 ```
 
 **Subsequent payments:**
+
 ```
 // Alice's 6th payment to Bob
 tag = tag_stream_a_to_b[6]            // Deterministic!
@@ -383,6 +389,7 @@ Properties:
 ### For POC (Current Phase)
 
 Keep trial decryption. It's:
+
 - Simple to implement ✅
 - Correct ✅
 - Fully recoverable from mnemonic ✅
@@ -480,6 +487,7 @@ Nullifier = H(nk, nullifier_nonce)
 ```
 
 **For notes you RECEIVED:**
+
 ```
 1. Decrypt C_enc → get note with nullifier_nonce
 2. Compute: nf = H(my_nk, note.nullifier_nonce)
@@ -489,6 +497,7 @@ Nullifier = H(nk, nullifier_nonce)
 ```
 
 **For notes you SENT:**
+
 ```
 You CANNOT compute the nullifier!
 - You know the note plaintext (from C_out)
@@ -557,6 +566,7 @@ SPENT CHECK COST:
 Our design uses Light Protocol for nullifiers (not PDAs or our own Merkle tree).
 
 **How it works:**
+
 ```rust
 // Nullifier = compressed account "address" in Light Protocol
 // Spending a note = creating an address with that nullifier
@@ -617,6 +627,7 @@ LIGHT PROTOCOL NULLIFIER CHECK:
 ```
 
 **Key insight:** Off-chain batch checking is cheap! The expensive part is:
+
 1. Finding your notes in the first place (trial decrypt)
 2. On-chain proof verification (CU cost)
 
@@ -670,6 +681,7 @@ Light Protocol uses Option B (batched proof)!
 ```
 
 **Batched Validity Proof:**
+
 - Single proof covers multiple accounts
 - Verifies all M accounts exist in same tree
 - On-chain verification: ~100K CU (regardless of M, up to limit)
@@ -697,7 +709,7 @@ ON-CHAIN VERIFICATION:
   → Can verify ~10-14 batched proofs per TX
 ```
 
-### For MASP Sync: No Proofs Needed!
+### For MASP Sync: No Proofs Needed
 
 ```
 CLIENT SYNC FLOW:
@@ -758,7 +770,8 @@ SLOW (compute bound):
   ❌ Many proofs for many inputs (rare)
 ```
 
-**Bottom line:** 
+**Bottom line:**
+
 - Sync doesn't need proofs → fast!
 - Spending needs proofs → ~200ms generation + ~100K CU verification
 - Batch proofs amortize cost → don't pay M× for M accounts
@@ -766,6 +779,7 @@ SLOW (compute bound):
 ### Does C_out Help With Spent Detection?
 
 **What C_out contains:**
+
 ```
 C_out = Encrypt(ovk, {
     pk_d,      // Recipient address
@@ -775,10 +789,12 @@ C_out = Encrypt(ovk, {
 ```
 
 **What C_out does NOT contain:**
+
 - ❌ Which note was SPENT to fund this transaction
 - ❌ The input nullifier
 
 **But wait!** The nullifier is a PUBLIC INPUT to the ZK proof:
+
 ```
 Transaction on-chain:
 ├── Public inputs: [anchor, NULLIFIER, new_commitment, ...]
@@ -788,6 +804,7 @@ Transaction on-chain:
 ```
 
 So if you decrypt C_out for a transaction, you can:
+
 1. Know you were the sender (C_out decrypts)
 2. Look at the transaction's public inputs → see the nullifier
 3. Correlate: "I spent note with nullifier X to create this payment"
@@ -795,6 +812,7 @@ So if you decrypt C_out for a transaction, you can:
 **This helps with audit trail, but not with recovery!**
 
 For recovery, you still need to:
+
 1. Find notes you received (trial decrypt C_enc)
 2. Compute their nullifiers
 3. Check if spent
@@ -869,6 +887,7 @@ Bob's public key isn't derivable from Alice's seed!
 ### Solutions to Tag Recovery Problem
 
 **Solution 1: OOB Re-sync (Simple but Manual)**
+
 ```
 Alice → Bob (out-of-band): "I lost my state, let's restart"
 Bob resets counter for Alice to 0
@@ -881,6 +900,7 @@ Problems:
 ```
 
 **Solution 2: Store Sender Info in Note (Recommended)**
+
 ```
 Extended note plaintext:
 {
@@ -900,6 +920,7 @@ Recovery flow:
 ```
 
 **Solution 3: Window Search (Fallback)**
+
 ```
 Instead of looking for exactly tag[expected]:
   Check: tag[expected], tag[expected+1], ..., tag[expected+W]
@@ -914,6 +935,7 @@ Cost: O(W) PIR queries instead of O(1)
 ```
 
 **Solution 4: Beacon Tags (Periodic Resync)**
+
 ```
 Every K payments, include a "beacon" that's discoverable:
   beacon = H(S, "beacon", floor(counter / K))
@@ -927,6 +949,7 @@ Cost: O(counterparties × beacons_per_period) queries
 ```
 
 **Solution 5: Accept the Limitation**
+
 ```
 Recovery policy:
   - Notes: Recovered via trial decrypt ✅
@@ -1019,6 +1042,7 @@ After recovery, Bob's payment with tag[11]:
 ### What Would Actually Help Recovery?
 
 **Option 1: Encrypted Backup (Recommended)**
+
 ```
 - Periodically backup wallet state (notes, counters, spent status)
 - Encrypted to self (derived from seed)
@@ -1027,6 +1051,7 @@ After recovery, Bob's payment with tag[11]:
 ```
 
 **Option 2: Batch Nullifier Check via Light Protocol**
+
 ```
 - Use getMultipleCompressedAccounts or getValidityProof
 - Single RPC call for ALL nullifiers
@@ -1035,6 +1060,7 @@ After recovery, Bob's payment with tag[11]:
 ```
 
 **Option 3: Nullifier Bloom Filter (Further Optimization)**
+
 ```
 - Indexer maintains bloom filter of all nullifiers
 - Client downloads bloom filter (small!)
@@ -1044,6 +1070,7 @@ After recovery, Bob's payment with tag[11]:
 ```
 
 **Option 3: TEE/FHE Sync Service (Privacy tradeoff)**
+
 ```
 - Give viewing key to trusted service
 - Service does expensive sync
@@ -1052,6 +1079,7 @@ After recovery, Bob's payment with tag[11]:
 ```
 
 **Option 4: Accept Expensive Recovery**
+
 ```
 - Recovery is rare (device loss, corruption)
 - Accept O(N) cost as one-time penalty
@@ -1110,4 +1138,3 @@ After recovery, Bob's payment with tag[11]:
 - [Zcash Protocol Spec §4.19](https://zips.z.cash/protocol/protocol.pdf) - Note encryption
 - [Private Information Retrieval](https://en.wikipedia.org/wiki/Private_information_retrieval) - PIR basics
 - [Tachyon](https://seanbowe.com/blog/tachyon-scaling-zcash-oblivious-synchronization/) - Zcash scaling proposal
-

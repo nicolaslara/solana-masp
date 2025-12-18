@@ -12,6 +12,7 @@ This file captures learnings, design decisions, and discoveries as we develop th
 **Last Updated:** 2024-12-16
 
 ### Recent Completions
+
 - ✅ C_out (Outgoing Ciphertext) for sender audit trail
 - ✅ Outgoing Viewing Key (ovk) derivation
 - ✅ Full shielded sync from chain
@@ -262,6 +263,7 @@ Decryption (recipient has ivk):
 ```
 
 **Comparison with Zcash:**
+
 | Aspect | Zcash | Our Implementation |
 |--------|-------|-------------------|
 | Key Exchange | X25519 | Baby JubJub ECDH |
@@ -273,11 +275,13 @@ Decryption (recipient has ivk):
 | Batch Nullifier Checks | Yes | ✅ Implemented |
 
 **Why epk as AAD instead of commitment:**
+
 - Allows trial decryption without knowing commitment
 - Commitment verified after decryption
 - Same security: epk is per-encryption, prevents swapping
 
 **Trait-based design:**
+
 - `NoteEncryption` trait allows swappable algorithms
 - `ChaChaPolyEncryption` - production (authenticated encryption)
 - `MockEncryption` - testing (fast XOR, insecure)
@@ -303,6 +307,7 @@ trait OobChannel {
 ```
 
 **How it works:**
+
 1. Alice pays Bob via shielded transfer
 2. Alice sends `PaymentNotification` to Bob (Signal, email, QR, etc.)
 3. Bob calls `indexer.get_commitments_for_tx(tx_sig)` to verify
@@ -310,6 +315,7 @@ trait OobChannel {
 5. Bob imports note after verification
 
 **Key insight:** OOB is complementary to sync:
+
 - **Sync**: Scans all ciphertexts, slower but autonomous
 - **OOB**: Targeted fetch, faster but needs external communication
 
@@ -320,6 +326,7 @@ trait OobChannel {
 **Current (POC):** Trial decryption - simple, correct, doesn't scale.
 
 **Production (Future):** Tag-based discovery with PIR:
+
 1. First payment: OOB key exchange to establish shared secret
 2. Subsequent: Deterministic tags + PIR lookup (O(1))
 3. Fallback: Trial decryption for recovery
@@ -340,6 +347,7 @@ Sender (Alice):  ss = esk * pk_d   ← esk was RANDOM, not from seed ❌
 **Solution: Outgoing Ciphertext (C_out)** ✅ IMPLEMENTED
 
 Each transaction includes TWO ciphertexts:
+
 1. `C_enc` - For recipient, encrypted with `ss = esk * pk_d`
 2. `C_out` - For sender, encrypted with `ovk` (outgoing viewing key)
 
@@ -347,6 +355,7 @@ Since `ovk` is derived from Alice's seed, she can always decrypt C_out.
 C_out contains `esk || pk_d.x || note_plaintext`.
 
 **Implementation:**
+
 ```rust
 // Key derivation
 ovk = Poseidon(DOM_OVK, ak.x, nk.x)
@@ -359,6 +368,7 @@ C_out = ChaCha20Poly1305(ock, nonce, esk || pk_d.x || note_plaintext, aad=commit
 ```
 
 **Sync methods:**
+
 - `sync_from_chain(scan_sent=true)` - Recovers sent notes via C_out
 - `SyncResult.sent_notes` - Contains recovered `OutgoingPlaintext`
 
@@ -528,6 +538,7 @@ As real implementations are added, tests will automatically use them.
 ### Encryption Algorithm: ChaCha20-Poly1305
 
 **Properties:**
+
 - 256-bit key, 96-bit nonce
 - Authenticated encryption (integrity + confidentiality)
 - Fast in software (no AES-NI required)
@@ -535,11 +546,13 @@ As real implementations are added, tests will automatically use them.
 - Used in: TLS 1.3, WireGuard, Noise Protocol, Zcash Sapling
 
 **Why not AES-GCM?**
+
 - ChaCha20 is faster on devices without AES hardware acceleration
 - Constant-time implementation is easier (no cache timing attacks)
 - AES-GCM can be added as an option later if needed
 
 **Future options:**
+
 - `AesGcm`: AES-256-GCM (hardware acceleration on modern CPUs)
 - `XChaCha`: Extended nonce (192-bit) for safer random nonce generation
 - `Aegis`: AEGIS-256 (very fast with AES-NI)
