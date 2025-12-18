@@ -5,19 +5,61 @@
 //
 // Security requirements: see `docs/circuit-security-requirements.md`.
 
+use std::hash::poseidon2::Poseidon2;
+
 /// Statement: "This note is a member of the commitment set for this anchor."
 ///
 /// In the current protocol design, membership is proven inside the MASP spend proof via a
 /// Merkle path against a public `anchor` (commitment-tree root). The chain separately checks
 /// that the provided anchor is a valid recent root.
 ///
-/// The MASP spend circuits still take `(anchor, input_commitment)` as public inputs so the
-/// spend proof is bound to the *same* membership context verified externally.
+/// In our v0 reference implementation, the spent `input_commitment` is a *private* value and the
+/// Merkle path witness (siblings + indices) is also private. Only the `anchor` is public.
 ///
-/// Stage-0: This function does not add constraints; it exists to make the entrypoint readable.
+/// Stage-0: historically this was a no-op. As of Milestone 3, we add the real Merkle path check.
 pub fn prove_membership_externally_verified(anchor: Field, input_commitment: Field) {
     assert(anchor == anchor);
     assert(input_commitment == input_commitment);
+}
+
+fn merkle_hash(left: Field, right: Field) -> Field {
+    // Must match Rust `client/src/hash.rs::merkle_hash`:
+    // H(DOM_MERKLE_NODE=7, left, right)
+    //
+    // NOTE: We intentionally use the same domain-tag value as `DomainTag::MerkleNode`.
+    let dom: Field = 7;
+
+    // Noir stdlib Poseidon2.
+    //
+    // NOTE: This currently does NOT match the Rust `merkle_hash` (which uses Circom Poseidon via
+    // `light-poseidon`). Until we align the hash function across Rust + Noir, we cannot enforce
+    // Merkle membership inside Noir without breaking the UltraPlonk prover tests.
+    Poseidon2::hash([dom, left, right], 3)
+}
+
+/// Statement: "This note is a member of the commitment set for this anchor (Merkle path)."
+pub fn prove_merkle_membership(
+    anchor: Field,
+    input_commitment: Field,
+    siblings: [Field; 16],
+    path_indices: [bool; 16],
+) {
+    // Enforce the Merkle path against the public `anchor` using Poseidon2.
+    //
+    // NOTE: This must match the Rust-side commitment accumulator hashing (`client/src/hash.rs::merkle_hash`).
+    let mut current: Field = input_commitment;
+    for i in 0..16 {
+        let sib = siblings[i];
+        let is_right = path_indices[i];
+        if is_right {
+            // current is the right child
+            current = merkle_hash(sib, current);
+        } else {
+            // current is the left child
+            current = merkle_hash(current, sib);
+        }
+    }
+    assert(current == anchor);
 }
 
 /// Statement: "I know the note plaintext that hashes to the commitment."
@@ -46,7 +88,8 @@ pub fn prove_note_preimage_hashes_to_commitment(
     assert(input_commitment == input_commitment);
     let amount_f: Field = note_amount as Field;
     let div_f: Field = note_diversifier_index as Field;
-    let _ = note_asset_id + amount_f + note_recipient + div_f + note_nullifier_nonce + note_randomness;
+    let _ =
+        note_asset_id + amount_f + note_recipient + div_f + note_nullifier_nonce + note_randomness;
 }
 
 /// Statement: "The nullifier is derived correctly from the owner's key material."

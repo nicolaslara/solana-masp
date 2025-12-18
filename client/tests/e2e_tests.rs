@@ -998,7 +998,6 @@ async fn test_cannot_spend_others_note_wrong_nullifier() {
     let alice_anchor = alice_witness.root();
     let alice_public = masp_client::SpendPublicInputs {
         anchor: alice_anchor,
-        input_commitment: bob_note.commitment(),
         nullifier: alice_nullifier,
         output_commitments: vec![],
         tx_binding: masp_client::tx_binding::tx_binding_transfer(

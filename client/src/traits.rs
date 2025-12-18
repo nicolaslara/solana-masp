@@ -182,11 +182,6 @@ pub struct SpendPublicInputs {
     /// Anchor (commitment tree root)
     pub anchor: Anchor,
 
-    /// Input commitment being spent (must match note preimage).
-    ///
-    /// This binds the ZK spend proof to the same leaf that the membership witness proves.
-    pub input_commitment: Commitment,
-
     /// Nullifier being revealed
     pub nullifier: Nullifier,
 
@@ -204,11 +199,6 @@ pub struct SpendPublicInputs {
 pub struct UnshieldPublicInputs {
     /// Anchor (commitment tree root)
     pub anchor: Anchor,
-
-    /// Input commitment being spent (must match note preimage).
-    ///
-    /// This binds the ZK spend proof to the same leaf that the membership witness proves.
-    pub input_commitment: Commitment,
 
     /// Nullifier being revealed
     pub nullifier: Nullifier,
@@ -456,14 +446,11 @@ pub struct TransferRequest {
     /// Anchor for membership proof
     pub anchor: Anchor,
 
-    /// Input commitment being spent
-    pub input_commitment: Commitment,
-
-    /// Membership witness (Merkle path or validity proof)
-    pub membership_witness: MembershipWitness,
-
     /// Nullifier of spent note
     pub nullifier: Nullifier,
+
+    /// Transaction binding hash (public input to spend proof)
+    pub tx_binding: Fr,
 
     /// ZK proof of valid spend (UltraPlonk)
     pub spend_proof: Vec<u8>,
@@ -490,9 +477,8 @@ pub struct TransferResult {
 #[derive(Debug, Clone)]
 pub struct UnshieldRequest {
     pub anchor: Anchor,
-    pub input_commitment: Commitment,
-    pub membership_witness: MembershipWitness,
     pub nullifier: Nullifier,
+    pub tx_binding: Fr,
     pub spend_proof: Vec<u8>,
     pub recipient: [u8; 32],
     pub amount: u64,

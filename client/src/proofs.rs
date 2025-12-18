@@ -205,11 +205,10 @@ fn mock_public_inputs_hash(public_inputs: &ProofPublicInputs) -> Fr {
             Fr::from(pi.public_amount),
         ]),
         ProofPublicInputs::Transfer(pi) => {
-            let mut inputs = Vec::with_capacity(6 + pi.output_commitments.len());
+            let mut inputs = Vec::with_capacity(5 + pi.output_commitments.len());
             inputs.push(dom);
             inputs.push(Fr::from(2u64)); // discriminator: transfer
             inputs.push(pi.anchor);
-            inputs.push(pi.input_commitment);
             inputs.push(pi.nullifier);
             inputs.push(pi.tx_binding);
             inputs.push(Fr::from(pi.output_commitments.len() as u64));
@@ -220,7 +219,6 @@ fn mock_public_inputs_hash(public_inputs: &ProofPublicInputs) -> Fr {
             dom,
             Fr::from(3u64), // discriminator: unshield
             pi.anchor,
-            pi.input_commitment,
             pi.nullifier,
             pi.tx_binding,
             Fr::from(pi.public_amount),
@@ -286,10 +284,21 @@ fn mock_check_transfer(
     // Explicit range-check statement (no-op in Rust, but must exist in circuits).
     mock_assert_amount_is_u64(private.note_amount)?;
 
+    // Derive input commitment from private note fields (not a public input).
+    let in_note = Note::with_values(
+        private.note_asset_id,
+        private.note_amount,
+        private.note_recipient,
+        private.note_diversifier_index,
+        private.note_nullifier_nonce,
+        private.note_randomness,
+    );
+    let input_commitment = in_note.commitment();
+
     // Transaction binding hash (anti-malleability / intent binding).
     let expected_tx_binding = crate::tx_binding::tx_binding_transfer(
         public.anchor,
-        public.input_commitment,
+        input_commitment,
         public.nullifier,
         &public.output_commitments,
     );
@@ -302,25 +311,12 @@ fn mock_check_transfer(
     if private.membership_witness.root() != public.anchor {
         return Err(ProofSystemError::VerificationFailed);
     }
-    if !private
-        .membership_witness
-        .verify_local(public.input_commitment)
-    {
+    if !private.membership_witness.verify_local(input_commitment) {
         return Err(ProofSystemError::VerificationFailed);
     }
 
     // (2) "I know the note plaintext that hashes to the commitment"
-    let in_note = Note::with_values(
-        private.note_asset_id,
-        private.note_amount,
-        private.note_recipient,
-        private.note_diversifier_index,
-        private.note_nullifier_nonce,
-        private.note_randomness,
-    );
-    if in_note.commitment() != public.input_commitment {
-        return Err(ProofSystemError::VerificationFailed);
-    }
+    // (already established by deriving `input_commitment` from the private note fields above)
 
     // (2.5) "I am authorized to spend this note" (SpendingKey-only ownership).
     mock_check_spend_authorization(private)?;
@@ -354,7 +350,7 @@ fn mock_check_transfer(
         //
         // This matches the intended circuit statement:
         //   out_i.nullifier_nonce == H(DOM_NULLIFIER_NONCE, input_commitment, output_index)
-        let expected_nonce = Note::derive_nullifier_nonce(public.input_commitment, i as u64);
+        let expected_nonce = Note::derive_nullifier_nonce(input_commitment, i as u64);
         if note.nullifier_nonce != expected_nonce {
             return Err(ProofSystemError::VerificationFailed);
         }
@@ -378,10 +374,21 @@ fn mock_check_unshield(
     mock_assert_amount_is_u64(private.note_amount)?;
     mock_assert_amount_is_u64(public.public_amount)?;
 
+    // Derive input commitment from private note fields (not a public input).
+    let in_note = Note::with_values(
+        private.note_asset_id,
+        private.note_amount,
+        private.note_recipient,
+        private.note_diversifier_index,
+        private.note_nullifier_nonce,
+        private.note_randomness,
+    );
+    let input_commitment = in_note.commitment();
+
     // Transaction binding hash (anti-malleability / intent binding).
     let expected_tx_binding = crate::tx_binding::tx_binding_unshield(
         public.anchor,
-        public.input_commitment,
+        input_commitment,
         public.nullifier,
         public.public_amount,
         public.public_recipient,
@@ -395,25 +402,12 @@ fn mock_check_unshield(
     if private.membership_witness.root() != public.anchor {
         return Err(ProofSystemError::VerificationFailed);
     }
-    if !private
-        .membership_witness
-        .verify_local(public.input_commitment)
-    {
+    if !private.membership_witness.verify_local(input_commitment) {
         return Err(ProofSystemError::VerificationFailed);
     }
 
     // (2) "I know the note plaintext that hashes to the commitment"
-    let in_note = Note::with_values(
-        private.note_asset_id,
-        private.note_amount,
-        private.note_recipient,
-        private.note_diversifier_index,
-        private.note_nullifier_nonce,
-        private.note_randomness,
-    );
-    if in_note.commitment() != public.input_commitment {
-        return Err(ProofSystemError::VerificationFailed);
-    }
+    // (already established by deriving `input_commitment` from the private note fields above)
 
     // (2.5) "I am authorized to spend this note" (SpendingKey-only ownership).
     mock_check_spend_authorization(private)?;
@@ -571,7 +565,6 @@ mod tests {
         let public = SpendPublicInputs {
             // With an empty Merkle path, our MembershipWitness local check treats root==leaf.
             anchor: cm,
-            input_commitment: cm,
             nullifier: nf,
             output_commitments: vec![out_cm],
             tx_binding: crate::tx_binding::tx_binding_transfer(cm, cm, nf, &[out_cm]),

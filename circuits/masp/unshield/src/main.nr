@@ -8,7 +8,7 @@
 // Security requirements: see `docs/circuit-security-requirements.md`.
 
 use dep::masp_common::{
-    prove_membership_externally_verified, prove_note_preimage_hashes_to_commitment,
+    prove_merkle_membership, prove_note_preimage_hashes_to_commitment,
     prove_nullifier_derivation, prove_tx_binding,
 };
 
@@ -50,7 +50,6 @@ struct Note {
 
 struct UnshieldPublic {
     anchor: Field,
-    input_commitment: Field,
     nullifier: Field,
     tx_binding: Field,
     public_amount: u64,
@@ -66,12 +65,16 @@ struct UnshieldPrivate {
 fn main(
     // Public inputs (production-shaped)
     anchor: pub Field,
-    input_commitment: pub Field,
     nullifier: pub Field,
     tx_binding: pub Field,
     public_amount: pub u64,
     public_recipient: pub Field,
     public_asset_id: pub Field,
+    // Private-only (wallet-local): spent commitment (not a public input)
+    input_commitment: Field,
+    // Private Merkle path witness (leaf -> root)
+    siblings: [Field; 16],
+    path_indices: [bool; 16],
     // Private inputs (production-shaped; mostly unused in stage 0)
     note_asset_id: Field,
     note_amount: u64,
@@ -83,7 +86,6 @@ fn main(
 ) {
     let public = UnshieldPublic {
         anchor,
-        input_commitment,
         nullifier,
         tx_binding,
         public_amount,
@@ -105,11 +107,11 @@ fn main(
     // Protocol narrative (Stage-0 scaffolding):
     //
     // - "This note is a member of the commitment set for this anchor"
-    prove_membership_externally_verified(public.anchor, public.input_commitment);
+    prove_merkle_membership(public.anchor, input_commitment, siblings, path_indices);
     //
     // - "I know the note plaintext that hashes to the commitment"
     prove_note_preimage_hashes_to_commitment(
-        public.input_commitment,
+        input_commitment,
         private.note.asset_id,
         private.note.amount,
         private.note.recipient,

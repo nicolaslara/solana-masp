@@ -11,10 +11,17 @@ ark-ed-on-bn254 = "0.5.0"                                    # Baby JubJub (embe
 ark-ff = "0.5.0"
 ark-ec = "0.5.0"
 ark-serialize = { version = "0.5.0", features = ["derive"] }
-ark-std = "0.5.0"
+## NOTE: avoid listing transitive deps here unless we directly use them.
 
 # Poseidon hash (BN254 native, matches Noir)
 light-poseidon = "0.4.0"
+
+# Poseidon2 permutation (BN254). We use this to match Noir stdlib `std::hash::poseidon2::Poseidon2`
+# by implementing the exact same sponge/IV logic in Rust and using Poseidon2(t=4) permutation.
+taceo-poseidon2 = { version = "0.2.0", default-features = false, features = [
+    "bn254",
+    "t4",
+] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -47,5 +54,4 @@ default = []
 ultraplonk-verifier = ["dep:ultraplonk-core"]
 
 [dev-dependencies]
-rand = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

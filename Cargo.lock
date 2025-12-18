@@ -1113,7 +1113,6 @@ dependencies = [
  "ark-ed-on-bn254",
  "ark-ff 0.5.0",
  "ark-serialize 0.5.0",
- "ark-std 0.5.0",
  "async-trait",
  "chacha20poly1305",
  "hex",
@@ -1123,6 +1122,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde_json",
+ "taceo-poseidon2",
  "thiserror 2.0.17",
  "tokio",
  "ultraplonk-core",
@@ -3038,6 +3038,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "taceo-poseidon2"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fbf106fb8682ee4e057872a18f431828bd467c28d2ead469e4c84dbf6ce5ec6"
+dependencies = [
+ "ark-bn254 0.5.0",
+ "ark-ff 0.5.0",
+ "ark-std 0.5.0",
+ "num-bigint",
+ "num-traits",
 ]
 
 [[package]]

@@ -332,8 +332,8 @@ where
 
         Ok(TransferData {
             anchor: witness.root(),
-            input_commitment: spend_commitment,
             membership_witness: witness,
+            spent_commitment: spend_commitment,
             nullifier,
             spend_note: owned.note,
             output,
@@ -513,7 +513,6 @@ where
         use ark_ff::PrimeField;
         let public = crate::traits::UnshieldPublicInputs {
             anchor: witness.root(),
-            input_commitment: spend_commitment,
             nullifier,
             tx_binding: crate::tx_binding::tx_binding_unshield(
                 witness.root(),
@@ -550,11 +549,18 @@ where
             .into_bytes();
 
         // 5. Build unshield request
+        let tx_binding = crate::tx_binding::tx_binding_unshield(
+            witness.root(),
+            spend_commitment,
+            nullifier,
+            amount,
+            Fr::from_be_bytes_mod_order(&recipient),
+            asset_id,
+        );
         let request = UnshieldRequest {
             anchor: witness.root(),
-            input_commitment: spend_commitment,
-            membership_witness: witness,
             nullifier,
+            tx_binding,
             spend_proof,
             recipient,
             amount,
@@ -813,7 +819,9 @@ pub struct SyncResult {
 #[derive(Debug)]
 pub struct TransferData {
     pub anchor: Anchor,
-    pub input_commitment: Commitment,
+    /// The commitment of the note being spent (wallet-local; NOT sent to chain).
+    pub spent_commitment: Commitment,
+    /// Membership witness for the spent commitment (wallet-local; NOT sent to chain).
     pub membership_witness: MembershipWitness,
     pub nullifier: Nullifier,
     pub spend_note: Note,
@@ -845,14 +853,13 @@ impl TransferData {
 
         let tx_binding = crate::tx_binding::tx_binding_transfer(
             self.anchor,
-            self.input_commitment,
+            self.spent_commitment,
             self.nullifier,
             &output_commitments,
         );
 
         let public = SpendPublicInputs {
             anchor: self.anchor,
-            input_commitment: self.input_commitment,
             nullifier: self.nullifier,
             output_commitments,
             tx_binding,
@@ -893,11 +900,17 @@ impl TransferData {
             outputs.push(TransferOutput::commitment_only(change.commitment()));
         }
 
+        let tx_binding = crate::tx_binding::tx_binding_transfer(
+            self.anchor,
+            self.spent_commitment,
+            self.nullifier,
+            &outputs.iter().map(|o| o.commitment).collect::<Vec<_>>(),
+        );
+
         TransferRequest {
             anchor: self.anchor,
-            input_commitment: self.input_commitment,
-            membership_witness: self.membership_witness.clone(),
             nullifier: self.nullifier,
+            tx_binding,
             spend_proof: spend_proof.into_bytes(),
             outputs,
         }
@@ -909,11 +922,17 @@ impl TransferData {
         spend_proof: ProofBytes,
         outputs: Vec<crate::traits::TransferOutput>,
     ) -> TransferRequest {
+        let output_commitments: Vec<_> = outputs.iter().map(|o| o.commitment).collect();
+        let tx_binding = crate::tx_binding::tx_binding_transfer(
+            self.anchor,
+            self.spent_commitment,
+            self.nullifier,
+            &output_commitments,
+        );
         TransferRequest {
             anchor: self.anchor,
-            input_commitment: self.input_commitment,
-            membership_witness: self.membership_witness.clone(),
             nullifier: self.nullifier,
+            tx_binding,
             spend_proof: spend_proof.into_bytes(),
             outputs,
         }

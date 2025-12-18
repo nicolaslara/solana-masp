@@ -157,10 +157,9 @@ impl NoirRsUltraPlonkVerifier {
             .unwrap_or(zero);
 
         // Order must match transfer circuit:
-        // anchor, input_commitment, nullifier, out0, out1, out2, tx_binding
+        // anchor, nullifier, out0, out1, out2, tx_binding
         let pis: Vec<[u8; 32]> = vec![
             fr_to_be32(public_inputs.anchor),
-            fr_to_be32(public_inputs.input_commitment),
             fr_to_be32(public_inputs.nullifier),
             fr_to_be32(out0),
             fr_to_be32(out1),
@@ -180,10 +179,9 @@ impl NoirRsUltraPlonkVerifier {
         let vk_onchain = self.get_vk_onchain(&self.vk_bb_path("unshield"))?;
 
         // Order must match unshield circuit:
-        // anchor, input_commitment, nullifier, tx_binding, public_amount, public_recipient, public_asset_id
+        // anchor, nullifier, tx_binding, public_amount, public_recipient, public_asset_id
         let pis: Vec<[u8; 32]> = vec![
             fr_to_be32(public_inputs.anchor),
-            fr_to_be32(public_inputs.input_commitment),
             fr_to_be32(public_inputs.nullifier),
             fr_to_be32(public_inputs.tx_binding),
             fr_to_be32(crate::types::Fr::from(public_inputs.public_amount)),

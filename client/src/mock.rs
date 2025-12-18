@@ -503,51 +503,16 @@ impl Chain for MockChain {
             return Err(ChainError::InvalidAnchor);
         }
 
-        // Bind the membership witness to the same anchor the transaction claims to use.
-        //
-        // In production, the chain verifies membership externally (Merkle path or Light validity proof)
-        // against the transaction's anchor. The spend proof is also bound to this anchor via public inputs.
-        //
-        // In the mock environment, we keep this explicit check so a malformed witness can't be used with a
-        // different anchor (even if the prover/verifier are mocked).
-        if request.membership_witness.root() != request.anchor {
-            return Err(ChainError::InvalidProof);
-        }
-
-        // Verify input commitment exists
-        if !self
-            .note_store
-            .exists(request.input_commitment)
-            .await
-            .unwrap_or(false)
-        {
-            return Err(ChainError::InvalidProof);
-        }
-
-        // Verify membership witness locally (for mock)
-        if !request
-            .membership_witness
-            .verify_local(request.input_commitment)
-        {
-            return Err(ChainError::InvalidProof);
-        }
-
         // Verify transfer proof.
         //
         // Responsibility split (production-shape):
-        // - Circuit proves membership/preimage/nullifier/output integrity/balance binding.
+        // - Spend proof proves membership (against `anchor`) + preimage + nullifier + outputs + balance binding.
         // - Chain enforces: anchor validity + nullifier uniqueness + proof verification.
         let public_inputs = SpendPublicInputs {
             anchor: request.anchor,
-            input_commitment: request.input_commitment,
             nullifier: request.nullifier,
             output_commitments: request.output_commitments(),
-            tx_binding: crate::tx_binding::tx_binding_transfer(
-                request.anchor,
-                request.input_commitment,
-                request.nullifier,
-                &request.output_commitments(),
-            ),
+            tx_binding: request.tx_binding,
         };
         let proof = ProofBytes::new(request.spend_proof.clone());
         let ok = match self.verify_mode {
@@ -608,29 +573,6 @@ impl Chain for MockChain {
             return Err(ChainError::InvalidAnchor);
         }
 
-        // Bind the membership witness to the same anchor the transaction claims to use.
-        if request.membership_witness.root() != request.anchor {
-            return Err(ChainError::InvalidProof);
-        }
-
-        // Verify input commitment exists
-        if !self
-            .note_store
-            .exists(request.input_commitment)
-            .await
-            .unwrap_or(false)
-        {
-            return Err(ChainError::InvalidProof);
-        }
-
-        // Verify membership witness
-        if !request
-            .membership_witness
-            .verify_local(request.input_commitment)
-        {
-            return Err(ChainError::InvalidProof);
-        }
-
         // Verify unshield proof.
         //
         // Responsibility split (production-shape):
@@ -639,16 +581,8 @@ impl Chain for MockChain {
         use ark_ff::PrimeField;
         let public_inputs = UnshieldPublicInputs {
             anchor: request.anchor,
-            input_commitment: request.input_commitment,
             nullifier: request.nullifier,
-            tx_binding: crate::tx_binding::tx_binding_unshield(
-                request.anchor,
-                request.input_commitment,
-                request.nullifier,
-                request.amount,
-                Fr::from_be_bytes_mod_order(&request.recipient),
-                crate::note::compute_asset_id(&request.token_address),
-            ),
+            tx_binding: request.tx_binding,
             public_amount: request.amount,
             // Stage-0 encoding: interpret 32-byte recipient as a field element mod p.
             public_recipient: Fr::from_be_bytes_mod_order(&request.recipient),
@@ -823,7 +757,6 @@ mod tests {
         let anchor = chain.get_current_anchor().await.unwrap();
         let public = SpendPublicInputs {
             anchor,
-            input_commitment: cm1,
             nullifier: nf,
             output_commitments: vec![cm2],
             tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm1, nf, &[cm2]),
@@ -848,9 +781,8 @@ mod tests {
         let result = chain
             .transfer(TransferRequest {
                 anchor,
-                input_commitment: cm1,
-                membership_witness: witness,
                 nullifier: nf,
+                tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm1, nf, &[cm2]),
                 spend_proof,
                 outputs: vec![TransferOutput::commitment_only(cm2)],
             })
@@ -915,7 +847,6 @@ mod tests {
         let mk_proof = |output_note: crate::note::Note, witness: MembershipWitness| {
             let public = SpendPublicInputs {
                 anchor,
-                input_commitment: cm,
                 nullifier: nf,
                 output_commitments: vec![output_note.commitment()],
                 tx_binding: crate::tx_binding::tx_binding_transfer(
@@ -970,9 +901,8 @@ mod tests {
         chain
             .transfer(TransferRequest {
                 anchor,
-                input_commitment: cm,
-                membership_witness: witness.clone(),
                 nullifier: nf,
+                tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm, nf, &[cm_out1]),
                 spend_proof: spend_proof_1,
                 outputs: vec![TransferOutput::commitment_only(cm_out1)],
             })
@@ -983,9 +913,8 @@ mod tests {
         let result = chain
             .transfer(TransferRequest {
                 anchor,
-                input_commitment: cm,
-                membership_witness: witness,
                 nullifier: nf,
+                tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm, nf, &[cm_out2]),
                 spend_proof: spend_proof_2,
                 outputs: vec![TransferOutput::commitment_only(cm_out2)],
             })
@@ -1127,7 +1056,6 @@ mod tests {
         let anchor = chain.get_current_anchor().await.unwrap();
         let public = SpendPublicInputs {
             anchor,
-            input_commitment: cm1,
             nullifier: nf,
             output_commitments: vec![cm2, cm3],
             tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm1, nf, &[cm2, cm3]),
@@ -1152,9 +1080,8 @@ mod tests {
         let transfer_result = chain
             .transfer(TransferRequest {
                 anchor,
-                input_commitment: cm1,
-                membership_witness: witness,
                 nullifier: nf,
+                tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm1, nf, &[cm2, cm3]),
                 spend_proof,
                 outputs: vec![
                     TransferOutput::commitment_only(cm2),

@@ -13,7 +13,7 @@
 // - output_commitment_2: fee note (optional, 0 if unused)
 
 use dep::masp_common::{
-    prove_membership_externally_verified, prove_note_preimage_hashes_to_commitment,
+    prove_merkle_membership, prove_note_preimage_hashes_to_commitment,
     prove_nullifier_derivation, prove_tx_binding,
 };
 
@@ -93,7 +93,6 @@ struct Note {
 
 struct TransferPublic {
     anchor: Field,
-    input_commitment: Field,
     nullifier: Field,
     output_commitments: [Field; 3],
     tx_binding: Field,
@@ -108,12 +107,16 @@ struct TransferPrivate {
 fn main(
     // Public inputs (production-shaped)
     anchor: pub Field,
-    input_commitment: pub Field,
     nullifier: pub Field,
     output_commitment_0: pub Field, // recipient
     output_commitment_1: pub Field, // change (0 if no change)
     output_commitment_2: pub Field, // fee (0 if no fee)
     tx_binding: pub Field,
+    // Private-only (wallet-local): spent commitment (not a public input)
+    input_commitment: Field,
+    // Private Merkle path witness (leaf -> root)
+    siblings: [Field; 16],
+    path_indices: [bool; 16],
     // Private inputs for the spent note (production-shaped; mostly unused in stage 0)
     note_asset_id: Field,
     note_amount: u64,
@@ -133,7 +136,6 @@ fn main(
 
     let public = TransferPublic {
         anchor,
-        input_commitment,
         nullifier,
         output_commitments: [output_commitment_0, output_commitment_1, output_commitment_2],
         tx_binding,
@@ -155,12 +157,11 @@ fn main(
     // Protocol narrative (Stage-0 scaffolding):
     //
     // - "This note is a member of the commitment set for this anchor"
-    //   (verified externally via MerklePath in mocks or Light validity proof in production).
-    prove_membership_externally_verified(public.anchor, public.input_commitment);
+    prove_merkle_membership(public.anchor, input_commitment, siblings, path_indices);
     //
     // - "I know the note plaintext that hashes to the commitment"
     prove_note_preimage_hashes_to_commitment(
-        public.input_commitment,
+        input_commitment,
         private.note.asset_id,
         private.note.amount,
         private.note.recipient,
