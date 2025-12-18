@@ -213,6 +213,9 @@ pub struct UnshieldPublicInputs {
     /// Nullifier being revealed
     pub nullifier: Nullifier,
 
+    /// Transaction binding hash (prevents malleability / binds intent)
+    pub tx_binding: Fr,
+
     /// Amount being withdrawn (public)
     pub public_amount: u64,
 
@@ -250,10 +253,20 @@ pub enum ProofPublicInputs {
 /// Private inputs for spend proof
 #[derive(Debug, Clone)]
 pub struct SpendPrivateInputs {
+    /// Spending key secret (root) as a field element.
+    ///
+    /// This is required for **spend authorization** in the reference semantics:
+    /// a watch-only FullViewingKey must not be able to satisfy spend constraints.
+    ///
+    /// In production, equivalent secret material must be provided to the prover and proven
+    /// inside the circuit (ZK-native ownership).
+    pub spending_key: Fr,
+
     /// Note fields
     pub note_asset_id: Fr,
     pub note_amount: u64,
     pub note_recipient: Fr,
+    pub note_diversifier_index: u64,
     pub note_nullifier_nonce: Fr,
     pub note_randomness: Fr,
 

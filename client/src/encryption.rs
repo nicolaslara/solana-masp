@@ -68,8 +68,8 @@ impl<T: RngCore + CryptoRng + ?Sized> CryptoRngCore for T {}
 // ============================================================================
 
 /// Size of note plaintext
-/// asset_id(32) + amount(8) + recipient(32) + nullifier_nonce(32) + note_randomness(32) = 136 bytes
-pub const PLAINTEXT_SIZE: usize = 136;
+/// asset_id(32) + amount(8) + recipient(32) + diversifier_index(8) + nullifier_nonce(32) + note_randomness(32) = 144 bytes
+pub const PLAINTEXT_SIZE: usize = 144;
 
 /// Ephemeral public key size (x and y coordinates)
 pub const EPK_SIZE: usize = 64;
@@ -77,11 +77,17 @@ pub const EPK_SIZE: usize = 64;
 /// Nonce size for ChaCha20-Poly1305
 pub const NONCE_SIZE: usize = 12;
 
+/// Diversifier index size (u64, little-endian) stored alongside ciphertext.
+///
+/// This is public metadata that lets wallets avoid scanning many indices during trial decryption.
+pub const DIVERSIFIER_INDEX_SIZE: usize = 8;
+
 /// Authentication tag size for ChaCha20-Poly1305
 pub const TAG_SIZE: usize = 16;
 
 /// Total encrypted note size
-pub const ENCRYPTED_NOTE_SIZE: usize = EPK_SIZE + NONCE_SIZE + PLAINTEXT_SIZE + TAG_SIZE;
+pub const ENCRYPTED_NOTE_SIZE: usize =
+    DIVERSIFIER_INDEX_SIZE + EPK_SIZE + NONCE_SIZE + PLAINTEXT_SIZE + TAG_SIZE;
 
 // ============================================================================
 // Errors
@@ -314,6 +320,12 @@ impl<T: NoteEncryption + ?Sized> NoteEncryption for Arc<T> {
 /// via Helius/RPC `getTransaction` calls.
 #[derive(Debug, Clone)]
 pub struct EncryptedNote {
+    /// Diversifier index used to derive the recipient address for this ciphertext.
+    ///
+    /// This is public metadata (not secret) and should be included in the transaction output
+    /// alongside the ciphertext, so wallets do not need to scan many indices to find the right one.
+    pub diversifier_index: u64,
+
     /// Ephemeral public key (epk = esk * g_d)
     /// Stored as (x, y) coordinates, 32 bytes each
     pub ephemeral_key: [u8; EPK_SIZE],
@@ -329,6 +341,7 @@ impl EncryptedNote {
     /// Serialize for storage in transaction instruction data
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(ENCRYPTED_NOTE_SIZE);
+        bytes.extend_from_slice(&self.diversifier_index.to_le_bytes());
         bytes.extend_from_slice(&self.ephemeral_key);
         bytes.extend_from_slice(&self.nonce);
         bytes.extend_from_slice(&self.ciphertext);
@@ -337,19 +350,28 @@ impl EncryptedNote {
 
     /// Deserialize from transaction instruction data
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, EncryptionError> {
-        if bytes.len() < EPK_SIZE + NONCE_SIZE {
+        if bytes.len() < DIVERSIFIER_INDEX_SIZE + EPK_SIZE + NONCE_SIZE {
             return Err(EncryptionError::InvalidLength);
         }
 
+        let mut di = [0u8; DIVERSIFIER_INDEX_SIZE];
+        di.copy_from_slice(&bytes[..DIVERSIFIER_INDEX_SIZE]);
+        let diversifier_index = u64::from_le_bytes(di);
+
         let mut ephemeral_key = [0u8; EPK_SIZE];
-        ephemeral_key.copy_from_slice(&bytes[..EPK_SIZE]);
+        ephemeral_key
+            .copy_from_slice(&bytes[DIVERSIFIER_INDEX_SIZE..DIVERSIFIER_INDEX_SIZE + EPK_SIZE]);
 
         let mut nonce = [0u8; NONCE_SIZE];
-        nonce.copy_from_slice(&bytes[EPK_SIZE..EPK_SIZE + NONCE_SIZE]);
+        nonce.copy_from_slice(
+            &bytes
+                [DIVERSIFIER_INDEX_SIZE + EPK_SIZE..DIVERSIFIER_INDEX_SIZE + EPK_SIZE + NONCE_SIZE],
+        );
 
-        let ciphertext = bytes[EPK_SIZE + NONCE_SIZE..].to_vec();
+        let ciphertext = bytes[DIVERSIFIER_INDEX_SIZE + EPK_SIZE + NONCE_SIZE..].to_vec();
 
         Ok(Self {
+            diversifier_index,
             ephemeral_key,
             nonce,
             ciphertext,
@@ -670,12 +692,14 @@ impl NoteEncryption for ChaChaPolyEncryption {
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         rng.fill_bytes(&mut nonce_bytes);
 
-        // 7. Build AAD: ephemeral key (known to decryptor)
+        // 7. Build AAD: (diversifier_index || ephemeral_key)
         // Note: Zcash uses commitment as AAD, but we use epk because:
         // - epk is always known during decryption (it's in the ciphertext)
         // - We verify commitment after decryption
         // - This allows trial decryption without knowing commitment
-        let aad = &ephemeral_key[..];
+        let mut aad = Vec::with_capacity(DIVERSIFIER_INDEX_SIZE + EPK_SIZE);
+        aad.extend_from_slice(&recipient_addr.diversifier_index.to_le_bytes());
+        aad.extend_from_slice(&ephemeral_key);
 
         // 8. Encrypt with ChaCha20-Poly1305 using AAD
         let plaintext = serialize_note(note);
@@ -686,12 +710,13 @@ impl NoteEncryption for ChaChaPolyEncryption {
                 nonce,
                 chacha20poly1305::aead::Payload {
                     msg: &plaintext,
-                    aad,
+                    aad: &aad,
                 },
             )
             .expect("encryption should not fail");
 
         EncryptedNote {
+            diversifier_index: recipient_addr.diversifier_index,
             ephemeral_key,
             nonce: nonce_bytes,
             ciphertext,
@@ -704,6 +729,10 @@ impl NoteEncryption for ChaChaPolyEncryption {
         fvk: &FullViewingKey,
         diversifier_index: u64,
     ) -> Result<Note, EncryptionError> {
+        // Quick reject: if the ciphertext declares a different diversifier, don't bother.
+        if encrypted.diversifier_index != diversifier_index {
+            return Err(EncryptionError::WrongRecipient);
+        }
         let addr = fvk.diversified_address(diversifier_index);
         let ivk = fvk.ivk();
 
@@ -716,8 +745,10 @@ impl NoteEncryption for ChaChaPolyEncryption {
         // KDF: derive same symmetric key
         let symmetric_key = derive_symmetric_key(&shared_secret, &encrypted.ephemeral_key);
 
-        // AAD is the ephemeral key (always known)
-        let aad = &encrypted.ephemeral_key[..];
+        // AAD is (diversifier_index || ephemeral_key)
+        let mut aad = Vec::with_capacity(DIVERSIFIER_INDEX_SIZE + EPK_SIZE);
+        aad.extend_from_slice(&encrypted.diversifier_index.to_le_bytes());
+        aad.extend_from_slice(&encrypted.ephemeral_key);
 
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&symmetric_key));
         let nonce = Nonce::from_slice(&encrypted.nonce);
@@ -726,13 +757,18 @@ impl NoteEncryption for ChaChaPolyEncryption {
                 nonce,
                 chacha20poly1305::aead::Payload {
                     msg: &encrypted.ciphertext,
-                    aad,
+                    aad: &aad,
                 },
             )
             .map_err(|_| EncryptionError::DecryptionFailed)?;
 
         // Deserialize note
         let note = deserialize_note(&plaintext)?;
+
+        // Verify note's committed diversifier matches the ciphertext/attempted diversifier.
+        if note.diversifier_index != diversifier_index {
+            return Err(EncryptionError::WrongRecipient);
+        }
 
         // Verify recipient matches
         if note.recipient != addr.to_field() {
@@ -794,8 +830,10 @@ impl NoteEncryption for ChaChaPolyEncryption {
         // 7. Compute commitment for AAD
         let commitment = note.commitment();
 
-        // 8. Build AAD: ephemeral key (known to decryptor)
-        let aad = &ephemeral_key[..];
+        // 8. Build AAD: (diversifier_index || ephemeral_key)
+        let mut aad = Vec::with_capacity(DIVERSIFIER_INDEX_SIZE + EPK_SIZE);
+        aad.extend_from_slice(&recipient_addr.diversifier_index.to_le_bytes());
+        aad.extend_from_slice(&ephemeral_key);
 
         // 9. Encrypt C_enc with ChaCha20-Poly1305
         let plaintext = serialize_note(note);
@@ -806,12 +844,13 @@ impl NoteEncryption for ChaChaPolyEncryption {
                 nonce,
                 chacha20poly1305::aead::Payload {
                     msg: &plaintext,
-                    aad,
+                    aad: &aad,
                 },
             )
             .expect("encryption should not fail");
 
         let c_enc = EncryptedNote {
+            diversifier_index: recipient_addr.diversifier_index,
             ephemeral_key,
             nonce: nonce_bytes,
             ciphertext,
@@ -877,7 +916,7 @@ impl NoteEncryption for MockEncryption {
         &self,
         rng: &mut dyn CryptoRngCore,
         note: &Note,
-        _recipient_addr: &DiversifiedAddress,
+        recipient_addr: &DiversifiedAddress,
     ) -> EncryptedNote {
         // For mock: store the full nonce in the ephemeral_key field
         let nonce_fr = Fr::rand(rng);
@@ -897,6 +936,7 @@ impl NoteEncryption for MockEncryption {
         let nonce = [0u8; NONCE_SIZE];
 
         EncryptedNote {
+            diversifier_index: recipient_addr.diversifier_index,
             ephemeral_key,
             nonce,
             ciphertext,
@@ -909,6 +949,9 @@ impl NoteEncryption for MockEncryption {
         fvk: &FullViewingKey,
         diversifier_index: u64,
     ) -> Result<Note, EncryptionError> {
+        if encrypted.diversifier_index != diversifier_index {
+            return Err(EncryptionError::WrongRecipient);
+        }
         let addr = fvk.diversified_address(diversifier_index);
 
         // Recover nonce_fr from ephemeral_key
@@ -1064,6 +1107,7 @@ fn serialize_note(note: &Note) -> Vec<u8> {
     bytes.extend_from_slice(&p.asset_id);
     bytes.extend_from_slice(&p.amount.to_le_bytes());
     bytes.extend_from_slice(&p.recipient);
+    bytes.extend_from_slice(&p.diversifier_index.to_le_bytes());
     bytes.extend_from_slice(&p.nullifier_nonce);
     bytes.extend_from_slice(&p.note_randomness);
     bytes
@@ -1087,16 +1131,23 @@ fn deserialize_note(bytes: &[u8]) -> Result<Note, EncryptionError> {
     let mut recipient = [0u8; 32];
     recipient.copy_from_slice(&bytes[40..72]);
 
+    let diversifier_index = u64::from_le_bytes(
+        bytes[72..80]
+            .try_into()
+            .map_err(|_| EncryptionError::SerializationError)?,
+    );
+
     let mut nullifier_nonce = [0u8; 32];
-    nullifier_nonce.copy_from_slice(&bytes[72..104]);
+    nullifier_nonce.copy_from_slice(&bytes[80..112]);
 
     let mut note_randomness = [0u8; 32];
-    note_randomness.copy_from_slice(&bytes[104..136]);
+    note_randomness.copy_from_slice(&bytes[112..144]);
 
     let plaintext = NotePlaintext {
         asset_id,
         amount,
         recipient,
+        diversifier_index,
         nullifier_nonce,
         note_randomness,
     };
@@ -1153,18 +1204,10 @@ pub fn try_decrypt_note(
 }
 
 /// Trial decrypt: try multiple diversifier indices
-pub fn trial_decrypt(
-    encrypted: &EncryptedNote,
-    fvk: &FullViewingKey,
-    max_diversifier: u64,
-) -> Option<(Note, u64)> {
+pub fn trial_decrypt(encrypted: &EncryptedNote, fvk: &FullViewingKey) -> Option<(Note, u64)> {
     let enc = ChaChaPolyEncryption::new();
-    for i in 0..=max_diversifier {
-        if let Ok(note) = enc.try_decrypt(encrypted, fvk, i) {
-            return Some((note, i));
-        }
-    }
-    None
+    let i = encrypted.diversifier_index;
+    enc.try_decrypt(encrypted, fvk, i).ok().map(|n| (n, i))
 }
 
 // ============================================================================
@@ -1259,7 +1302,13 @@ mod tests {
         let addr = fvk.diversified_address(0);
 
         let asset_id = compute_asset_id(&test_token());
-        let note = Note::new(&mut rng, asset_id, 100, addr.to_field());
+        let note = Note::new(
+            &mut rng,
+            asset_id,
+            100,
+            addr.to_field(),
+            addr.diversifier_index,
+        );
 
         let encrypted = enc.encrypt(&mut rng, &note, &addr);
         let decrypted = enc.try_decrypt(&encrypted, &fvk, 0).unwrap();
@@ -1284,7 +1333,13 @@ mod tests {
         let attacker_fvk = attacker_sk.to_full_viewing_key();
 
         let asset_id = compute_asset_id(&test_token());
-        let note = Note::new(&mut rng, asset_id, 100, recipient_addr.to_field());
+        let note = Note::new(
+            &mut rng,
+            asset_id,
+            100,
+            recipient_addr.to_field(),
+            recipient_addr.diversifier_index,
+        );
 
         let encrypted = enc.encrypt(&mut rng, &note, &recipient_addr);
 
@@ -1303,7 +1358,13 @@ mod tests {
         let addr = fvk.diversified_address(0);
 
         let asset_id = compute_asset_id(&test_token());
-        let note = Note::new(&mut rng, asset_id, 100, addr.to_field());
+        let note = Note::new(
+            &mut rng,
+            asset_id,
+            100,
+            addr.to_field(),
+            addr.diversifier_index,
+        );
 
         let mut encrypted = enc.encrypt(&mut rng, &note, &addr);
 
@@ -1327,7 +1388,13 @@ mod tests {
         let addr = fvk.diversified_address(5);
 
         let asset_id = compute_asset_id(&test_token());
-        let note = Note::new(&mut rng, asset_id, 100, addr.to_field());
+        let note = Note::new(
+            &mut rng,
+            asset_id,
+            100,
+            addr.to_field(),
+            addr.diversifier_index,
+        );
 
         let encrypted = enc.encrypt(&mut rng, &note, &addr);
 
@@ -1352,7 +1419,13 @@ mod tests {
         let addr = fvk.diversified_address(0);
 
         let asset_id = compute_asset_id(&test_token());
-        let note = Note::new(&mut rng, asset_id, 100, addr.to_field());
+        let note = Note::new(
+            &mut rng,
+            asset_id,
+            100,
+            addr.to_field(),
+            addr.diversifier_index,
+        );
 
         let encrypted = enc.encrypt(&mut rng, &note, &addr);
         let decrypted = enc.try_decrypt(&encrypted, &fvk, 0).unwrap();
@@ -1372,7 +1445,13 @@ mod tests {
         let addr = fvk.diversified_address(0);
 
         let asset_id = compute_asset_id(&test_token());
-        let note = Note::new(&mut rng, asset_id, 100, addr.to_field());
+        let note = Note::new(
+            &mut rng,
+            asset_id,
+            100,
+            addr.to_field(),
+            addr.diversifier_index,
+        );
 
         let encrypted = enc.encrypt(&mut rng, &note, &addr);
 
@@ -1395,7 +1474,7 @@ mod tests {
     fn test_verify_commitment_valid() {
         let mut rng = StdRng::seed_from_u64(12345);
         let asset_id = compute_asset_id(&test_token());
-        let note = Note::new(&mut rng, asset_id, 100, Fr::from(999u64));
+        let note = Note::new(&mut rng, asset_id, 100, Fr::from(999u64), 0);
 
         let commitment = note.commitment();
         let result = verify_note_commitment(&note, commitment);
@@ -1406,7 +1485,7 @@ mod tests {
     fn test_verify_commitment_mismatch() {
         let mut rng = StdRng::seed_from_u64(12345);
         let asset_id = compute_asset_id(&test_token());
-        let note = Note::new(&mut rng, asset_id, 100, Fr::from(999u64));
+        let note = Note::new(&mut rng, asset_id, 100, Fr::from(999u64), 0);
 
         let wrong_commitment = Fr::from(12345u64);
         let result = verify_note_commitment(&note, wrong_commitment);
@@ -1425,11 +1504,17 @@ mod tests {
         let addr = fvk.diversified_address(3);
 
         let asset_id = compute_asset_id(&test_token());
-        let note = Note::new(&mut rng, asset_id, 100, addr.to_field());
+        let note = Note::new(
+            &mut rng,
+            asset_id,
+            100,
+            addr.to_field(),
+            addr.diversifier_index,
+        );
 
         let encrypted = encrypt_note(&mut rng, &note, &addr);
 
-        let result = trial_decrypt(&encrypted, &fvk, 10);
+        let result = trial_decrypt(&encrypted, &fvk);
         assert!(result.is_some());
 
         let (decrypted, diversifier) = result.unwrap();

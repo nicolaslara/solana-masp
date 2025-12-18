@@ -367,6 +367,7 @@ tx_binding = "{tx_binding}"
 note_asset_id = "{note_asset_id}"
 note_amount = "{note_amount}"
 note_recipient = "{note_recipient}"
+note_diversifier_index = "{note_diversifier_index}"
 note_nullifier_nonce = "{note_nullifier_nonce}"
 note_randomness = "{note_randomness}"
 nk = "{nk}"
@@ -385,6 +386,7 @@ out2_value = "{out2_value}"
             note_asset_id = fr_to_dec(private.note_asset_id),
             note_amount = private.note_amount,
             note_recipient = fr_to_dec(private.note_recipient),
+            note_diversifier_index = private.note_diversifier_index,
             note_nullifier_nonce = fr_to_dec(private.note_nullifier_nonce),
             note_randomness = fr_to_dec(private.note_randomness),
             nk = fr_to_dec(private.nk),
@@ -404,6 +406,7 @@ out2_value = "{out2_value}"
 anchor = "{anchor}"
 input_commitment = "{input_commitment}"
 nullifier = "{nullifier}"
+tx_binding = "{tx_binding}"
 public_amount = "{public_amount}"
 public_recipient = "{public_recipient}"
 public_asset_id = "{public_asset_id}"
@@ -411,6 +414,7 @@ public_asset_id = "{public_asset_id}"
 note_asset_id = "{note_asset_id}"
 note_amount = "{note_amount}"
 note_recipient = "{note_recipient}"
+note_diversifier_index = "{note_diversifier_index}"
 note_nullifier_nonce = "{note_nullifier_nonce}"
 note_randomness = "{note_randomness}"
 nk = "{nk}"
@@ -418,12 +422,14 @@ nk = "{nk}"
             anchor = fr_to_dec(public.anchor),
             input_commitment = fr_to_dec(public.input_commitment),
             nullifier = fr_to_dec(public.nullifier),
+            tx_binding = fr_to_dec(public.tx_binding),
             public_amount = public.public_amount,
             public_recipient = fr_to_dec(public.public_recipient),
             public_asset_id = fr_to_dec(public.public_asset_id),
             note_asset_id = fr_to_dec(private.note_asset_id),
             note_amount = private.note_amount,
             note_recipient = fr_to_dec(private.note_recipient),
+            note_diversifier_index = private.note_diversifier_index,
             note_nullifier_nonce = fr_to_dec(private.note_nullifier_nonce),
             note_randomness = fr_to_dec(private.note_randomness),
             nk = fr_to_dec(private.nk),
@@ -442,6 +448,7 @@ public_asset_id = "{public_asset_id}"
 public_amount = "{public_amount}"
 
 recipient = "{recipient}"
+diversifier_index = "{diversifier_index}"
 nullifier_nonce = "{nullifier_nonce}"
 note_randomness = "{note_randomness}"
 "#,
@@ -449,9 +456,110 @@ note_randomness = "{note_randomness}"
             public_asset_id = fr_to_dec(public.public_asset_id),
             public_amount = public.public_amount,
             recipient = fr_to_dec(private.note_recipient),
+            diversifier_index = private.note_diversifier_index,
             nullifier_nonce = fr_to_dec(private.note_nullifier_nonce),
             note_randomness = fr_to_dec(private.note_randomness),
         ))
+    }
+
+    /// Ensure the circuit JSON is present and up-to-date with respect to sources.
+    fn ensure_circuit_compiled(&self, circuit_type: CircuitType) -> Result<(), ProofSystemError> {
+        let circuit_dir = self.circuit_dir(circuit_type);
+        let circuit_json = self.circuit_json(circuit_type);
+
+        // Fast path: if json exists and is newer than sources, we're good.
+        fn newest_mtime(paths: &[PathBuf]) -> Option<std::time::SystemTime> {
+            paths
+                .iter()
+                .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+                .max()
+        }
+
+        // Collect relevant source files for this circuit and the shared masp_common dependency.
+        let mut sources: Vec<PathBuf> = Vec::new();
+        sources.push(circuit_dir.join("Nargo.toml"));
+        if let Ok(entries) = std::fs::read_dir(circuit_dir.join("src")) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("nr") {
+                    sources.push(p);
+                }
+            }
+        }
+        let common_dir = self.repo_root.join("circuits").join("masp").join("common");
+        sources.push(common_dir.join("Nargo.toml"));
+        if let Ok(entries) = std::fs::read_dir(common_dir.join("src")) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("nr") {
+                    sources.push(p);
+                }
+            }
+        }
+
+        let src_mtime = newest_mtime(&sources);
+        let json_mtime = std::fs::metadata(&circuit_json)
+            .and_then(|m| m.modified())
+            .ok();
+
+        let needs_compile = match (src_mtime, json_mtime) {
+            (Some(src), Some(json)) => src > json,
+            (Some(_), None) => true,
+            _ => !circuit_json.exists(),
+        };
+
+        if !needs_compile {
+            return Ok(());
+        }
+
+        // Simple lock to avoid parallel test races compiling the same circuit.
+        let lock_path = circuit_dir.join("target").join(".compile.lock");
+        std::fs::create_dir_all(circuit_dir.join("target"))
+            .map_err(|e| ProofSystemError::ProvingFailed(format!("create target dir: {e}")))?;
+
+        let mut attempts = 0;
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(_lock_file) => {
+                    // We own the lock; compile.
+                    let _ = Self::run_cmd(
+                        Command::new(&self.nargo_path)
+                            .current_dir(&circuit_dir)
+                            .arg("compile"),
+                        &format!("nargo compile ({})", self.nargo_path.display()),
+                    );
+                    let _ = std::fs::remove_file(&lock_path);
+                    break;
+                }
+                Err(_) => {
+                    // Someone else compiling; wait for circuit_json to appear/update.
+                    attempts += 1;
+                    if circuit_json.exists() {
+                        // If it exists, assume it'll be updated soon; sleep a bit.
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        if attempts > 200 {
+                            // Stale lock - force remove and retry.
+                            let _ = std::fs::remove_file(&lock_path);
+                            attempts = 0;
+                        }
+                        continue;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+
+        if !circuit_json.exists() {
+            return Err(ProofSystemError::ProvingFailed(format!(
+                "circuit json missing after compile: {}",
+                circuit_json.display()
+            )));
+        }
+        Ok(())
     }
 
     fn circuit_type_for(public_inputs: &ProofPublicInputs) -> CircuitType {
@@ -520,7 +628,10 @@ impl SpendProver for CliUltraPlonkProver {
         let circuit_type = Self::circuit_type_for(public_inputs);
         let circuit_dir = self.circuit_dir(circuit_type);
 
-        // 1. Check circuit is compiled
+        // 1. Ensure circuit is compiled (and recompile if sources changed)
+        self.ensure_circuit_compiled(circuit_type)?;
+
+        // 2. Check circuit is compiled
         let circuit_json = self.circuit_json(circuit_type);
         if !circuit_json.exists() {
             return Err(ProofSystemError::NotImplemented(format!(
@@ -529,14 +640,14 @@ impl SpendProver for CliUltraPlonkProver {
             )));
         }
 
-        // 2. Create proof directory
+        // 3. Create proof directory
         let proof_dir = self
             .manager
             .create_proof_dir(circuit_type)
             .map_err(|e| ProofSystemError::ProvingFailed(format!("create proof dir: {e}")))?;
 
         let result = (|| {
-            // 3. Write a per-proof prover TOML into the circuit package root.
+            // 4. Write a per-proof prover TOML into the circuit package root.
             // nargo execute looks for `<PROVER_NAME>.toml` in the package root.
             let prover_name = self.proof_prover_name(&proof_dir);
             let prover_toml = circuit_dir.join(format!("{prover_name}.toml"));
@@ -545,7 +656,7 @@ impl SpendProver for CliUltraPlonkProver {
                 ProofSystemError::ProvingFailed(format!("write {}: {e}", prover_toml.display()))
             })?;
 
-            // 4. Run nargo execute to generate witness
+            // 5. Run nargo execute to generate witness
             // Use a unique witness name per proof directory to avoid race conditions
             let witness_name = format!(
                 "witness_{}",
@@ -572,7 +683,7 @@ impl SpendProver for CliUltraPlonkProver {
                 )));
             }
 
-            // 5. Generate proof with bb
+            // 6. Generate proof with bb
             let proof_path = proof_dir.join("proof.bin");
 
             // VK MUST be generated once and reused - bb write_vk is non-deterministic!
@@ -595,11 +706,11 @@ impl SpendProver for CliUltraPlonkProver {
                 &format!("bb prove ({})", self.bb_path.display()),
             )?;
 
-            // 6. Read proof (has public inputs prepended)
+            // 7. Read proof (has public inputs prepended)
             let proof_with_pi = std::fs::read(&proof_path)
                 .map_err(|e| ProofSystemError::ProvingFailed(format!("read proof: {e}")))?;
 
-            // 7. Read VK to get num_inputs for stripping public input prefix
+            // 8. Read VK to get num_inputs for stripping public input prefix
             let vk_bytes = std::fs::read(vk_path)
                 .map_err(|e| ProofSystemError::ProvingFailed(format!("read vk: {e}")))?;
 

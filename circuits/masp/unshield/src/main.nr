@@ -9,7 +9,7 @@
 
 use dep::masp_common::{
     prove_membership_externally_verified, prove_note_preimage_hashes_to_commitment,
-    prove_nullifier_derivation,
+    prove_nullifier_derivation, prove_tx_binding,
 };
 
 // -----------------------------------------------------------------------------
@@ -43,6 +43,7 @@ struct Note {
     asset_id: Field,
     amount: u64,
     recipient: Field,
+    diversifier_index: u64,
     nullifier_nonce: Field,
     note_randomness: Field,
 }
@@ -51,6 +52,7 @@ struct UnshieldPublic {
     anchor: Field,
     input_commitment: Field,
     nullifier: Field,
+    tx_binding: Field,
     public_amount: u64,
     public_recipient: Field,
     public_asset_id: Field,
@@ -66,6 +68,7 @@ fn main(
     anchor: pub Field,
     input_commitment: pub Field,
     nullifier: pub Field,
+    tx_binding: pub Field,
     public_amount: pub u64,
     public_recipient: pub Field,
     public_asset_id: pub Field,
@@ -73,6 +76,7 @@ fn main(
     note_asset_id: Field,
     note_amount: u64,
     note_recipient: Field,
+    note_diversifier_index: u64,
     note_nullifier_nonce: Field,
     note_randomness: Field,
     nk: Field,
@@ -81,6 +85,7 @@ fn main(
         anchor,
         input_commitment,
         nullifier,
+        tx_binding,
         public_amount,
         public_recipient,
         public_asset_id,
@@ -90,6 +95,7 @@ fn main(
             asset_id: note_asset_id,
             amount: note_amount,
             recipient: note_recipient,
+            diversifier_index: note_diversifier_index,
             nullifier_nonce: note_nullifier_nonce,
             note_randomness,
         },
@@ -107,6 +113,7 @@ fn main(
         private.note.asset_id,
         private.note.amount,
         private.note.recipient,
+        private.note.diversifier_index,
         private.note.nullifier_nonce,
         private.note.note_randomness,
     );
@@ -114,6 +121,9 @@ fn main(
     // - "The nullifier is derived correctly from the owner's key material"
     prove_nullifier_derivation(public.nullifier, private.nk, private.note.nullifier_nonce);
     prove_ownership_authorization();
+    //
+    // - "This proof is bound to the intended unshield intent"
+    prove_tx_binding(public.tx_binding);
     //
     // - For unshield: "public withdrawal fields match the spent note"
     check_public_withdraw_binding(

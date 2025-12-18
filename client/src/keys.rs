@@ -75,6 +75,11 @@ pub struct SpendingKey {
 }
 
 impl SpendingKey {
+    /// Create from a BN254 field element (internal convenience).
+    pub(crate) fn from_field(sk: Fr) -> Self {
+        Self { sk }
+    }
+
     /// Generate a random spending key
     pub fn random<R: Rng>(rng: &mut R) -> Self {
         Self { sk: Fr::rand(rng) }

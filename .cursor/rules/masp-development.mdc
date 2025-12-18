@@ -10,8 +10,9 @@ alwaysApply: true
 
 1. **Read `tasks.md`** - Current status and open questions
 2. **Read `knowledge.md`** - Learnings and design decisions
-3. **Read `docs/circuit-security-requirements.md`** - ⚠️ CRITICAL for circuit work
-4. **Update these docs** as you make progress
+3. **Read `docs/protocol-soundness.md`** - ⚠️ CRITICAL: protocol soundness + privacy invariants (primary review doc)
+4. **Read `docs/circuit-security-requirements.md`** - ⚠️ CRITICAL for circuit work
+5. **Update these docs** as you make progress
 
 ## Project Structure
 

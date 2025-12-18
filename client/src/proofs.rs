@@ -32,6 +32,9 @@
 
 use crate::types::{Anchor, Commitment, Fr};
 
+use crate::domain::DomainTag;
+use crate::hash::{field_to_bytes, poseidon_hash};
+
 // ============================================================================
 // Membership Witness (backend-specific)
 // ============================================================================
@@ -186,7 +189,92 @@ use crate::traits::{
 };
 use async_trait::async_trait;
 
-const MOCK_PROOF_TRUE: &[u8] = b"true";
+fn mock_public_inputs_hash(public_inputs: &ProofPublicInputs) -> Fr {
+    // Bind mock proof bytes to the public inputs so the mock verifier cannot accept
+    // “the same proof” under different public inputs (prevents swap/malleability in mocks).
+    //
+    // This does NOT attempt to prove the private statements — those checks are performed by
+    // `MockSpendProver` when it is used.
+    let dom = DomainTag::TransactionBinding.to_field();
+    match public_inputs {
+        ProofPublicInputs::Shield(pi) => poseidon_hash(&[
+            dom,
+            Fr::from(1u64), // discriminator: shield
+            pi.new_commitment,
+            pi.public_asset_id,
+            Fr::from(pi.public_amount),
+        ]),
+        ProofPublicInputs::Transfer(pi) => {
+            let mut inputs = Vec::with_capacity(6 + pi.output_commitments.len());
+            inputs.push(dom);
+            inputs.push(Fr::from(2u64)); // discriminator: transfer
+            inputs.push(pi.anchor);
+            inputs.push(pi.input_commitment);
+            inputs.push(pi.nullifier);
+            inputs.push(pi.tx_binding);
+            inputs.push(Fr::from(pi.output_commitments.len() as u64));
+            inputs.extend_from_slice(&pi.output_commitments);
+            poseidon_hash(&inputs)
+        }
+        ProofPublicInputs::Unshield(pi) => poseidon_hash(&[
+            dom,
+            Fr::from(3u64), // discriminator: unshield
+            pi.anchor,
+            pi.input_commitment,
+            pi.nullifier,
+            pi.tx_binding,
+            Fr::from(pi.public_amount),
+            pi.public_recipient,
+            pi.public_asset_id,
+        ]),
+    }
+}
+
+/// Construct a mock proof payload that is valid **only** for the given public inputs.
+///
+/// This is useful for tests that need to exercise chain/mempool behavior without building
+/// full private inputs (i.e., without running `MockSpendProver`).
+pub fn mock_proof_for_public_inputs(public_inputs: &ProofPublicInputs) -> ProofBytes {
+    ProofBytes::new(field_to_bytes(&mock_public_inputs_hash(public_inputs)).to_vec())
+}
+
+/// Explicit "amount is a u64" range assertion.
+///
+/// In the host-language reference implementation, amounts are already `u64`, so this check is
+/// semantically a no-op. We keep it **explicit** here so the mock semantics match what the
+/// real circuit must enforce (i.e., range-checks must be constraints, not assumptions).
+fn mock_assert_amount_is_u64(amount: u64) -> Result<(), ProofSystemError> {
+    let max: u128 = 1u128 << 64;
+    if (amount as u128) >= max {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+    Ok(())
+}
+
+/// Spend authorization (ownership) check for v0 reference semantics.
+///
+/// Enforces: the prover knows the **SpendingKey** corresponding to the spent note’s recipient.
+/// This prevents a watch-only FullViewingKey from spending, even if it can decrypt notes and
+/// compute nullifiers.
+fn mock_check_spend_authorization(private: &SpendPrivateInputs) -> Result<(), ProofSystemError> {
+    let sk = crate::keys::SpendingKey::from_field(private.spending_key);
+    let fvk = sk.to_full_viewing_key();
+
+    // Bind the provided nk to the spending key material.
+    if fvk.nk_field() != private.nk {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+
+    // Bind the note recipient (part of the commitment preimage) to this spending key.
+    let expected_recipient = fvk
+        .diversified_address(private.note_diversifier_index)
+        .to_field();
+    if expected_recipient != private.note_recipient {
+        return Err(ProofSystemError::VerificationFailed);
+    }
+
+    Ok(())
+}
 
 fn mock_check_transfer(
     public: &crate::traits::SpendPublicInputs,
@@ -194,6 +282,20 @@ fn mock_check_transfer(
 ) -> Result<(), ProofSystemError> {
     use crate::note::Note;
     use crate::nullifier::compute_nullifier;
+
+    // Explicit range-check statement (no-op in Rust, but must exist in circuits).
+    mock_assert_amount_is_u64(private.note_amount)?;
+
+    // Transaction binding hash (anti-malleability / intent binding).
+    let expected_tx_binding = crate::tx_binding::tx_binding_transfer(
+        public.anchor,
+        public.input_commitment,
+        public.nullifier,
+        &public.output_commitments,
+    );
+    if public.tx_binding != expected_tx_binding {
+        return Err(ProofSystemError::VerificationFailed);
+    }
 
     // (1) "This note is a member of the commitment set for this anchor"
     // In the mock environment, this is a Merkle path check.
@@ -212,12 +314,16 @@ fn mock_check_transfer(
         private.note_asset_id,
         private.note_amount,
         private.note_recipient,
+        private.note_diversifier_index,
         private.note_nullifier_nonce,
         private.note_randomness,
     );
     if in_note.commitment() != public.input_commitment {
         return Err(ProofSystemError::VerificationFailed);
     }
+
+    // (2.5) "I am authorized to spend this note" (SpendingKey-only ownership).
+    mock_check_spend_authorization(private)?;
 
     // (3) "The nullifier is derived correctly from the owner's key material"
     if compute_nullifier(private.nk, private.note_nullifier_nonce) != public.nullifier {
@@ -229,11 +335,13 @@ fn mock_check_transfer(
         return Err(ProofSystemError::InvalidPublicInputs);
     }
     let mut sum_out: u64 = 0;
-    for (note, cm) in private
+    for (i, (note, cm)) in private
         .output_notes
         .iter()
         .zip(public.output_commitments.iter())
+        .enumerate()
     {
+        mock_assert_amount_is_u64(note.amount)?;
         if note.commitment() != *cm {
             return Err(ProofSystemError::VerificationFailed);
         }
@@ -241,6 +349,16 @@ fn mock_check_transfer(
         if note.asset_id != private.note_asset_id {
             return Err(ProofSystemError::VerificationFailed);
         }
+
+        // Output nullifier nonce derivation (ties outputs to this spend context).
+        //
+        // This matches the intended circuit statement:
+        //   out_i.nullifier_nonce == H(DOM_NULLIFIER_NONCE, input_commitment, output_index)
+        let expected_nonce = Note::derive_nullifier_nonce(public.input_commitment, i as u64);
+        if note.nullifier_nonce != expected_nonce {
+            return Err(ProofSystemError::VerificationFailed);
+        }
+
         sum_out = sum_out.saturating_add(note.amount);
     }
     if sum_out != private.note_amount {
@@ -256,6 +374,22 @@ fn mock_check_unshield(
 ) -> Result<(), ProofSystemError> {
     use crate::note::Note;
     use crate::nullifier::compute_nullifier;
+
+    mock_assert_amount_is_u64(private.note_amount)?;
+    mock_assert_amount_is_u64(public.public_amount)?;
+
+    // Transaction binding hash (anti-malleability / intent binding).
+    let expected_tx_binding = crate::tx_binding::tx_binding_unshield(
+        public.anchor,
+        public.input_commitment,
+        public.nullifier,
+        public.public_amount,
+        public.public_recipient,
+        public.public_asset_id,
+    );
+    if public.tx_binding != expected_tx_binding {
+        return Err(ProofSystemError::VerificationFailed);
+    }
 
     // (1) "This note is a member of the commitment set for this anchor"
     if private.membership_witness.root() != public.anchor {
@@ -273,12 +407,16 @@ fn mock_check_unshield(
         private.note_asset_id,
         private.note_amount,
         private.note_recipient,
+        private.note_diversifier_index,
         private.note_nullifier_nonce,
         private.note_randomness,
     );
     if in_note.commitment() != public.input_commitment {
         return Err(ProofSystemError::VerificationFailed);
     }
+
+    // (2.5) "I am authorized to spend this note" (SpendingKey-only ownership).
+    mock_check_spend_authorization(private)?;
 
     // (3) "The nullifier is derived correctly from the owner's key material"
     if compute_nullifier(private.nk, private.note_nullifier_nonce) != public.nullifier {
@@ -311,11 +449,15 @@ impl SpendProver for MockSpendProver {
             ProofPublicInputs::Shield(pi) => {
                 use crate::note::Note;
 
+                mock_assert_amount_is_u64(private_inputs.note_amount)?;
+                mock_assert_amount_is_u64(pi.public_amount)?;
+
                 // "I know the note plaintext that hashes to the commitment"
                 let note = Note::with_values(
                     private_inputs.note_asset_id,
                     private_inputs.note_amount,
                     private_inputs.note_recipient,
+                    private_inputs.note_diversifier_index,
                     private_inputs.note_nullifier_nonce,
                     private_inputs.note_randomness,
                 );
@@ -333,7 +475,7 @@ impl SpendProver for MockSpendProver {
             ProofPublicInputs::Transfer(pi) => mock_check_transfer(pi, private_inputs)?,
             ProofPublicInputs::Unshield(pi) => mock_check_unshield(pi, private_inputs)?,
         }
-        Ok(ProofBytes::new(MOCK_PROOF_TRUE.to_vec()))
+        Ok(mock_proof_for_public_inputs(public_inputs))
     }
 
     fn system_name(&self) -> &'static str {
@@ -351,12 +493,9 @@ impl ProofVerifier for MockProofVerifier {
         public_inputs: &ProofPublicInputs,
         proof: &ProofBytes,
     ) -> Result<bool, ProofSystemError> {
-        // Mock verifier does not have access to private inputs, so it cannot re-run
-        // the semantic checks. Those are done in `MockSpendProver`.
-        //
-        // Here we only validate the "proof=true" marker.
-        let _ = public_inputs; // keep signature aligned with real verifier
-        Ok(proof.as_bytes() == MOCK_PROOF_TRUE)
+        // Bind verification to the public inputs (prevents “swap public inputs under same proof” in mocks).
+        let expected = mock_proof_for_public_inputs(public_inputs);
+        Ok(proof.as_bytes() == expected.as_bytes())
     }
 
     fn system_name(&self) -> &'static str {
@@ -401,35 +540,54 @@ mod tests {
         let verifier = MockProofVerifier;
 
         // Use a real note commitment so the mock prover/verifier can validate preimage + nullifier.
+        let sk = crate::keys::SpendingKey::from_bytes(&[9u8; 32]);
+        let fvk = sk.to_full_viewing_key();
+        let recipient_addr = fvk.diversified_address(0);
+        let recipient = recipient_addr.to_field();
         let note = crate::note::Note::with_values(
             Fr::from(1u64),
             100,
-            Fr::from(2u64),
+            recipient,
+            recipient_addr.diversifier_index,
             Fr::from(3u64),
             Fr::from(4u64),
         );
         let cm = note.commitment();
-        let nk = Fr::from(789u64);
+        let nk = fvk.nk_field();
         let nf = crate::nullifier::compute_nullifier(nk, note.nullifier_nonce);
+
+        // Output note must satisfy the v0 "derived nullifier nonce" rule for spends.
+        let out_nonce = crate::note::Note::derive_nullifier_nonce(cm, 0);
+        let out_note = crate::note::Note::with_values(
+            note.asset_id,
+            note.amount,
+            note.recipient,
+            note.diversifier_index,
+            out_nonce,
+            note.note_randomness,
+        );
+        let out_cm = out_note.commitment();
 
         let public = SpendPublicInputs {
             // With an empty Merkle path, our MembershipWitness local check treats root==leaf.
             anchor: cm,
             input_commitment: cm,
             nullifier: nf,
-            output_commitments: vec![cm],
-            tx_binding: Fr::from(0u64),
+            output_commitments: vec![out_cm],
+            tx_binding: crate::tx_binding::tx_binding_transfer(cm, cm, nf, &[out_cm]),
         };
 
         let private = SpendPrivateInputs {
+            spending_key: sk.as_field(),
             note_asset_id: note.asset_id,
             note_amount: note.amount,
             note_recipient: note.recipient,
+            note_diversifier_index: note.diversifier_index,
             note_nullifier_nonce: note.nullifier_nonce,
             note_randomness: note.note_randomness,
             nk,
             membership_witness: MembershipWitness::merkle_path(vec![], vec![], cm),
-            output_notes: vec![note],
+            output_notes: vec![out_note],
         };
 
         let proof = prover

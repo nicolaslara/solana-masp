@@ -6,6 +6,7 @@ This document specifies everything that MUST be verified inside ZK circuits for 
 
 See also:
 
+- `docs/protocol-soundness.md` (**primary / normative**) for protocol soundness + privacy invariants
 - `docs/protocol.md` for the high-level protocol and responsibility split
 
 ---

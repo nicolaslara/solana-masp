@@ -233,9 +233,16 @@ where
     /// Build a shield request (without ciphertext - add separately)
     pub fn build_shield(&self, token_address: &TokenAddress, amount: u64) -> (Note, ShieldRequest) {
         let asset_id = compute_asset_id(token_address);
-        let recipient = self.get_address(0);
+        let recipient_addr = self.fvk.diversified_address(0);
+        let recipient = recipient_addr.to_field();
 
-        let note = Note::new(&mut OsRng, asset_id, amount, recipient);
+        let note = Note::new(
+            &mut OsRng,
+            asset_id,
+            amount,
+            recipient,
+            recipient_addr.diversifier_index,
+        );
         let commitment = note.commitment();
 
         // Build shield proof (mock/real depending on configured prover backend).
@@ -245,9 +252,11 @@ where
             public_amount: amount,
         };
         let private = crate::traits::SpendPrivateInputs {
+            spending_key: self.spending_key.as_field(),
             note_asset_id: note.asset_id,
             note_amount: note.amount,
             note_recipient: note.recipient,
+            note_diversifier_index: note.diversifier_index,
             note_nullifier_nonce: note.nullifier_nonce,
             note_randomness: note.note_randomness,
             nk: Fr::from(0u64),
@@ -282,7 +291,7 @@ where
     pub async fn build_transfer(
         &self,
         spend_commitment: Commitment,
-        recipient: Fr,
+        recipient: DiversifiedAddress,
         amount: u64,
     ) -> Result<TransferData, ClientError> {
         let (owned, witness, nullifier) = self.prepare_spend(spend_commitment).await?;
@@ -299,7 +308,8 @@ where
         let output = Note::with_values(
             owned.note.asset_id,
             amount,
-            recipient,
+            recipient.to_field(),
+            recipient.diversifier_index,
             output_nonce,
             Fr::rand(&mut OsRng),
         );
@@ -307,10 +317,12 @@ where
         // Create change note if needed
         let change = if owned.note.amount > amount {
             let change_nonce = Note::derive_nullifier_nonce(owned.commitment, 1);
+            let change_addr = self.fvk.diversified_address(0);
             Some(Note::with_values(
                 owned.note.asset_id,
                 owned.note.amount - amount,
-                self.get_address(0),
+                change_addr.to_field(),
+                change_addr.diversifier_index,
                 change_nonce,
                 Fr::rand(&mut OsRng),
             ))
@@ -411,7 +423,7 @@ where
 
         // 2. Build transfer
         let transfer_data = self
-            .build_transfer(spend_commitment, recipient.to_field(), amount)
+            .build_transfer(spend_commitment, recipient.clone(), amount)
             .await?;
 
         // 3. Encrypt outputs for recipients
@@ -436,7 +448,8 @@ where
         }
 
         // 4. Submit to chain
-        let (public, private) = transfer_data.spend_proof_inputs(self.fvk.nk_field());
+        let (public, private) =
+            transfer_data.spend_proof_inputs(self.spending_key.as_field(), self.fvk.nk_field());
         let spend_proof = self.prover.prove(
             &crate::traits::ProofPublicInputs::Transfer(public),
             &private,
@@ -502,6 +515,14 @@ where
             anchor: witness.root(),
             input_commitment: spend_commitment,
             nullifier,
+            tx_binding: crate::tx_binding::tx_binding_unshield(
+                witness.root(),
+                spend_commitment,
+                nullifier,
+                amount,
+                Fr::from_be_bytes_mod_order(&recipient),
+                asset_id,
+            ),
             public_amount: amount,
             // Stage-0: interpret the 32-byte recipient as a field element mod p.
             // In production this must match the circuit/program recipient encoding decision.
@@ -509,9 +530,11 @@ where
             public_asset_id: asset_id,
         };
         let private = crate::traits::SpendPrivateInputs {
+            spending_key: self.spending_key.as_field(),
             note_asset_id: owned.note.asset_id,
             note_amount: owned.note.amount,
             note_recipient: owned.note.recipient,
+            note_diversifier_index: owned.note.diversifier_index,
             note_nullifier_nonce: owned.note.nullifier_nonce,
             note_randomness: owned.note.note_randomness,
             nk: self.fvk.nk_field(),
@@ -697,9 +720,20 @@ where
     ) -> Option<Note> {
         // Convert to our EncryptedNote format
         let encrypted = EncryptedNote::from_bytes(&output.ciphertext).ok()?;
-        encryption
+        let note = encryption
             .try_decrypt(&encrypted, &self.fvk, diversifier_index)
-            .ok()
+            .ok()?;
+
+        // Critical wallet integrity check: ensure the decrypted plaintext corresponds to the
+        // commitment that was actually published alongside this ciphertext.
+        //
+        // Without this, a malicious/buggy indexer (or malformed ledger data) could cause the
+        // client to accept an unspendable note (griefing / fund-loss UX).
+        if note.commitment() != output.commitment {
+            return None;
+        }
+
+        Some(note)
     }
 
     /// Scan for notes in a specific transaction (for OOB fast-path)
@@ -790,10 +824,10 @@ pub struct TransferData {
 impl TransferData {
     /// Build spend proof inputs for this transfer (reference implementation).
     ///
-    /// Today we use a placeholder `tx_binding = 0`. When circuits are integrated,
-    /// this should be replaced with a real transaction binding hash.
+    /// Today we compute a v0 `tx_binding` via `crate::tx_binding::tx_binding_transfer(...)`.
     pub fn spend_proof_inputs(
         &self,
+        spending_key: Fr,
         nk: Fr,
     ) -> (
         crate::traits::SpendPublicInputs,
@@ -809,19 +843,28 @@ impl TransferData {
             v
         };
 
+        let tx_binding = crate::tx_binding::tx_binding_transfer(
+            self.anchor,
+            self.input_commitment,
+            self.nullifier,
+            &output_commitments,
+        );
+
         let public = SpendPublicInputs {
             anchor: self.anchor,
             input_commitment: self.input_commitment,
             nullifier: self.nullifier,
             output_commitments,
-            tx_binding: Fr::from(0u64),
+            tx_binding,
         };
 
         let note = &self.spend_note;
         let private = SpendPrivateInputs {
+            spending_key,
             note_asset_id: note.asset_id,
             note_amount: note.amount,
             note_recipient: note.recipient,
+            note_diversifier_index: note.diversifier_index,
             note_nullifier_nonce: note.nullifier_nonce,
             note_randomness: note.note_randomness,
             nk,
@@ -909,12 +952,12 @@ mod tests {
         let recipient = client.get_address(0);
 
         let mut rng = StdRng::seed_from_u64(12345);
-        let note1 = Note::new(&mut rng, asset_id, 100, recipient);
+        let note1 = Note::new(&mut rng, asset_id, 100, recipient, 0);
         let cm1 = note1.commitment();
         acc.insert(cm1, "tx_1");
         client.add_note(note1, "tx_1".to_string());
 
-        let note2 = Note::new(&mut rng, asset_id, 50, recipient);
+        let note2 = Note::new(&mut rng, asset_id, 50, recipient, 0);
         let cm2 = note2.commitment();
         acc.insert(cm2, "tx_2");
         client.add_note(note2, "tx_2".to_string());
@@ -933,7 +976,7 @@ mod tests {
         let recipient = client.get_address(0);
 
         let mut rng = StdRng::seed_from_u64(12345);
-        let note = Note::new(&mut rng, asset_id, 100, recipient);
+        let note = Note::new(&mut rng, asset_id, 100, recipient, 0);
         let cm = note.commitment();
         acc.insert(cm, "tx_1");
         client.add_note(note, "tx_1".to_string());
@@ -953,19 +996,23 @@ mod tests {
         let recipient = client.get_address(0);
 
         let mut rng = StdRng::seed_from_u64(12345);
-        let note = Note::new(&mut rng, asset_id, 100, recipient);
+        let note = Note::new(&mut rng, asset_id, 100, recipient, 0);
         let cm = note.commitment();
         acc.insert(cm, "tx_1");
         client.add_note(note, "tx_1".to_string());
 
-        let other_recipient = Fr::from(999u64);
+        let other_recipient = client.fvk.diversified_address(1);
         let transfer = client
-            .build_transfer(cm, other_recipient, 60)
+            .build_transfer(cm, other_recipient.clone(), 60)
             .await
             .unwrap();
 
         assert_eq!(transfer.output.amount, 60);
-        assert_eq!(transfer.output.recipient, other_recipient);
+        assert_eq!(transfer.output.recipient, other_recipient.to_field());
+        assert_eq!(
+            transfer.output.diversifier_index,
+            other_recipient.diversifier_index
+        );
         assert!(transfer.change.is_some());
         assert_eq!(transfer.change.unwrap().amount, 40);
     }
@@ -978,7 +1025,7 @@ mod tests {
         let recipient = client.get_address(0);
 
         let mut rng = StdRng::seed_from_u64(12345);
-        let note = Note::new(&mut rng, asset_id, 100, recipient);
+        let note = Note::new(&mut rng, asset_id, 100, recipient, 0);
         let cm = note.commitment();
 
         // Shield first
@@ -987,7 +1034,14 @@ mod tests {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm,
-                shield_proof: b"true".to_vec(),
+                shield_proof: crate::proofs::mock_proof_for_public_inputs(
+                    &crate::traits::ProofPublicInputs::Shield(crate::traits::ShieldPublicInputs {
+                        new_commitment: cm,
+                        public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
+                        public_amount: 100,
+                    }),
+                )
+                .into_bytes(),
                 ciphertext: None,
                 ephemeral_key: None,
             })
@@ -1010,7 +1064,7 @@ mod tests {
         let recipient = client.get_address(0);
 
         let mut rng = StdRng::seed_from_u64(12345);
-        let note = Note::new(&mut rng, asset_id, 100, recipient);
+        let note = Note::new(&mut rng, asset_id, 100, recipient, 0);
 
         let result = client.import_note(note, "fake_tx".to_string()).await;
         assert!(matches!(result, Err(ClientError::CommitmentNotFound)));

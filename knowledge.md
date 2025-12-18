@@ -12,6 +12,7 @@ This file captures learnings, design decisions, and discoveries as we develop th
 **Last Updated:** 2024-12-16
 
 ### Recent Completions
+
 - ✅ C_out (Outgoing Ciphertext) for sender audit trail
 - ✅ Outgoing Viewing Key (ovk) derivation
 - ✅ Full shielded sync from chain
@@ -23,10 +24,32 @@ This file captures learnings, design decisions, and discoveries as we develop th
   - `docs/protocol.md`
   - `docs/circuit-security-requirements.md` updated with “who checks what”
 - ✅ Noir circuits refactored for auditability (Stage-0): `main` calls one function per required statement
-- ✅ Membership proof model clarified:
-  - Membership is verified **outside** MASP spend circuits (MerklePath in mocks; Light validity proof on-chain in production).
-  - Spend circuits bind `input_commitment` (public) to note plaintext (preimage knowledge).
+- ✅ Commitment/membership model updated (privacy-critical):
+  - Commitment set is an append-only Merkle accumulator with anchor history (not Light CPI / content-addressed commitments).
+  - Membership is proven via Merkle paths inside the MASP proof (anchor is public; input commitment is private).
 - ✅ Documented balance enforcement decision (in-circuit baseline; optional future value commitments + on-chain homomorphic check)
+- ✅ Protocol review started: `docs/protocol-soundness.md` (soundness/privacy checklist + gap tracking)
+- ✅ Note format updated for address binding:
+  - `diversifier_index` is part of the note plaintext and commitment (and also carried in ciphertext header).
+
+### Critical Findings (Protocol Soundness)
+
+#### Spend authorization is not yet enforced (P0)
+
+We currently derive nullifiers as:
+
+`nf = H(DOM_NULLIFIER, nk.x, nullifier_nonce)`
+
+Where `nk` is a **public key** contained in the `FullViewingKey`. This means a **watch-only wallet** that can decrypt note plaintexts can also compute valid nullifiers and construct spends under the current “mock proof semantics”.
+
+This violates the intended Sapling-style separation:
+
+- `SpendingKey` can spend (has `ask`, `nsk`)
+- `FullViewingKey` can view but **must not** be able to spend
+
+**Implication:** the protocol is **not sound** (under the intended key separation model) until transfer/unshield proofs include an ownership/authorization statement that requires secret key material derived from the SpendingKey and binds it to the note recipient/address derivation.
+
+This likely requires updating the note format and/or circuit private inputs so the circuit can prove proper address ownership (not just knowledge of note plaintext + public `nk`).
 
 ---
 

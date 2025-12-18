@@ -503,6 +503,17 @@ impl Chain for MockChain {
             return Err(ChainError::InvalidAnchor);
         }
 
+        // Bind the membership witness to the same anchor the transaction claims to use.
+        //
+        // In production, the chain verifies membership externally (Merkle path or Light validity proof)
+        // against the transaction's anchor. The spend proof is also bound to this anchor via public inputs.
+        //
+        // In the mock environment, we keep this explicit check so a malformed witness can't be used with a
+        // different anchor (even if the prover/verifier are mocked).
+        if request.membership_witness.root() != request.anchor {
+            return Err(ChainError::InvalidProof);
+        }
+
         // Verify input commitment exists
         if !self
             .note_store
@@ -531,7 +542,12 @@ impl Chain for MockChain {
             input_commitment: request.input_commitment,
             nullifier: request.nullifier,
             output_commitments: request.output_commitments(),
-            tx_binding: Fr::from(0u64),
+            tx_binding: crate::tx_binding::tx_binding_transfer(
+                request.anchor,
+                request.input_commitment,
+                request.nullifier,
+                &request.output_commitments(),
+            ),
         };
         let proof = ProofBytes::new(request.spend_proof.clone());
         let ok = match self.verify_mode {
@@ -592,6 +608,11 @@ impl Chain for MockChain {
             return Err(ChainError::InvalidAnchor);
         }
 
+        // Bind the membership witness to the same anchor the transaction claims to use.
+        if request.membership_witness.root() != request.anchor {
+            return Err(ChainError::InvalidProof);
+        }
+
         // Verify input commitment exists
         if !self
             .note_store
@@ -620,6 +641,14 @@ impl Chain for MockChain {
             anchor: request.anchor,
             input_commitment: request.input_commitment,
             nullifier: request.nullifier,
+            tx_binding: crate::tx_binding::tx_binding_unshield(
+                request.anchor,
+                request.input_commitment,
+                request.nullifier,
+                request.amount,
+                Fr::from_be_bytes_mod_order(&request.recipient),
+                crate::note::compute_asset_id(&request.token_address),
+            ),
             public_amount: request.amount,
             // Stage-0 encoding: interpret 32-byte recipient as a field element mod p.
             public_recipient: Fr::from_be_bytes_mod_order(&request.recipient),
@@ -704,12 +733,21 @@ mod tests {
         let chain = MockChain::new(acc.clone(), 10);
 
         let cm = Fr::from(42u64);
+        let public_inputs = crate::traits::ShieldPublicInputs {
+            new_commitment: cm,
+            public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
+            public_amount: 100,
+        };
+        let shield_proof = crate::proofs::mock_proof_for_public_inputs(
+            &crate::traits::ProofPublicInputs::Shield(public_inputs),
+        )
+        .into_bytes();
         let result = chain
             .shield(ShieldRequest {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm,
-                shield_proof: b"true".to_vec(),
+                shield_proof,
                 ciphertext: None,
                 ephemeral_key: None,
             })
@@ -726,20 +764,35 @@ mod tests {
         let chain = MockChain::new(acc.clone(), 10);
 
         // Shield first (use a real note commitment so mock proof checks can validate preimage).
+        // Use a SpendingKey-derived recipient so spend-authorization checks can succeed.
+        let sk = crate::keys::SpendingKey::from_bytes(&[7u8; 32]);
+        let fvk = sk.to_full_viewing_key();
+        let recipient_addr = fvk.diversified_address(0);
+        let recipient = recipient_addr.to_field();
         let note_in = crate::note::Note::with_values(
             Fr::from(1u64),
             100,
-            Fr::from(2u64),
+            recipient,
+            recipient_addr.diversifier_index,
             Fr::from(3u64),
             Fr::from(4u64),
         );
         let cm1 = note_in.commitment();
+        let public_inputs = crate::traits::ShieldPublicInputs {
+            new_commitment: cm1,
+            public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
+            public_amount: 100,
+        };
+        let shield_proof = crate::proofs::mock_proof_for_public_inputs(
+            &crate::traits::ProofPublicInputs::Shield(public_inputs),
+        )
+        .into_bytes();
         chain
             .shield(ShieldRequest {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm1,
-                shield_proof: b"true".to_vec(),
+                shield_proof,
                 ciphertext: None,
                 ephemeral_key: None,
             })
@@ -750,13 +803,15 @@ mod tests {
         let witness = acc.get_witness(cm1).await.unwrap();
 
         // Transfer
-        let nk = Fr::from(777u64);
+        let nk = fvk.nk_field();
         let nf = crate::nullifier::compute_nullifier(nk, note_in.nullifier_nonce);
+        let out_nonce = crate::note::Note::derive_nullifier_nonce(cm1, 0);
         let note_out = crate::note::Note::with_values(
             note_in.asset_id,
             100,
             Fr::from(9u64),
-            Fr::from(10u64),
+            0,
+            out_nonce,
             Fr::from(11u64),
         );
         let cm2 = note_out.commitment();
@@ -771,12 +826,14 @@ mod tests {
             input_commitment: cm1,
             nullifier: nf,
             output_commitments: vec![cm2],
-            tx_binding: Fr::from(0u64),
+            tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm1, nf, &[cm2]),
         };
         let private = SpendPrivateInputs {
+            spending_key: sk.as_field(),
             note_asset_id: note_in.asset_id,
             note_amount: note_in.amount,
             note_recipient: note_in.recipient,
+            note_diversifier_index: note_in.diversifier_index,
             note_nullifier_nonce: note_in.nullifier_nonce,
             note_randomness: note_in.note_randomness,
             nk,
@@ -812,20 +869,35 @@ mod tests {
         let chain = MockChain::new(acc.clone(), 10);
 
         // Shield (use a real note commitment so mock proof checks can validate preimage).
+        // Use a SpendingKey-derived recipient so spend-authorization checks can succeed.
+        let sk = crate::keys::SpendingKey::from_bytes(&[7u8; 32]);
+        let fvk = sk.to_full_viewing_key();
+        let recipient_addr = fvk.diversified_address(0);
+        let recipient = recipient_addr.to_field();
         let note_in = crate::note::Note::with_values(
             Fr::from(1u64),
             100,
-            Fr::from(2u64),
+            recipient,
+            recipient_addr.diversifier_index,
             Fr::from(3u64),
             Fr::from(4u64),
         );
         let cm = note_in.commitment();
+        let public_inputs = crate::traits::ShieldPublicInputs {
+            new_commitment: cm,
+            public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
+            public_amount: 100,
+        };
+        let shield_proof = crate::proofs::mock_proof_for_public_inputs(
+            &crate::traits::ProofPublicInputs::Shield(public_inputs),
+        )
+        .into_bytes();
         chain
             .shield(ShieldRequest {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm,
-                shield_proof: b"true".to_vec(),
+                shield_proof,
                 ciphertext: None,
                 ephemeral_key: None,
             })
@@ -833,7 +905,7 @@ mod tests {
             .unwrap();
 
         let witness = acc.get_witness(cm).await.unwrap();
-        let nk = Fr::from(777u64);
+        let nk = fvk.nk_field();
         let nf = crate::nullifier::compute_nullifier(nk, note_in.nullifier_nonce);
         let anchor = chain.get_current_anchor().await.unwrap();
 
@@ -846,12 +918,19 @@ mod tests {
                 input_commitment: cm,
                 nullifier: nf,
                 output_commitments: vec![output_note.commitment()],
-                tx_binding: Fr::from(0u64),
+                tx_binding: crate::tx_binding::tx_binding_transfer(
+                    anchor,
+                    cm,
+                    nf,
+                    &[output_note.commitment()],
+                ),
             };
             let private = SpendPrivateInputs {
+                spending_key: sk.as_field(),
                 note_asset_id: note_in.asset_id,
                 note_amount: note_in.amount,
                 note_recipient: note_in.recipient,
+                note_diversifier_index: note_in.diversifier_index,
                 note_nullifier_nonce: note_in.nullifier_nonce,
                 note_randomness: note_in.note_randomness,
                 nk,
@@ -864,18 +943,21 @@ mod tests {
                 .into_bytes()
         };
 
+        let out_nonce = crate::note::Note::derive_nullifier_nonce(cm, 0);
         let out1 = crate::note::Note::with_values(
             note_in.asset_id,
             100,
             Fr::from(9u64),
-            Fr::from(10u64),
+            0,
+            out_nonce,
             Fr::from(11u64),
         );
         let out2 = crate::note::Note::with_values(
             note_in.asset_id,
             100,
             Fr::from(12u64),
-            Fr::from(13u64),
+            0,
+            out_nonce,
             Fr::from(14u64),
         );
         let cm_out1 = out1.commitment();
@@ -926,7 +1008,14 @@ mod tests {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm1,
-                shield_proof: b"true".to_vec(),
+                shield_proof: crate::proofs::mock_proof_for_public_inputs(
+                    &crate::traits::ProofPublicInputs::Shield(crate::traits::ShieldPublicInputs {
+                        new_commitment: cm1,
+                        public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
+                        public_amount: 100,
+                    }),
+                )
+                .into_bytes(),
                 ciphertext: Some(vec![1, 2, 3]),
                 ephemeral_key: Some([0u8; 64]),
             })
@@ -938,7 +1027,14 @@ mod tests {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm2,
-                shield_proof: b"true".to_vec(),
+                shield_proof: crate::proofs::mock_proof_for_public_inputs(
+                    &crate::traits::ProofPublicInputs::Shield(crate::traits::ShieldPublicInputs {
+                        new_commitment: cm2,
+                        public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
+                        public_amount: 100,
+                    }),
+                )
+                .into_bytes(),
                 ciphertext: Some(vec![4, 5, 6]),
                 ephemeral_key: Some([0u8; 64]),
             })
@@ -965,10 +1061,16 @@ mod tests {
         let acc = Arc::new(MockNoteStore::new(4));
         let chain = MockChain::new(acc.clone(), 10);
 
+        // Use a SpendingKey-derived recipient so spend-authorization checks can succeed.
+        let sk = crate::keys::SpendingKey::from_bytes(&[7u8; 32]);
+        let fvk = sk.to_full_viewing_key();
+        let recipient_addr = fvk.diversified_address(0);
+        let recipient = recipient_addr.to_field();
         let note_in = crate::note::Note::with_values(
             Fr::from(1u64),
             100,
-            Fr::from(2u64),
+            recipient,
+            recipient_addr.diversifier_index,
             Fr::from(3u64),
             Fr::from(4u64),
         );
@@ -980,7 +1082,14 @@ mod tests {
                 token_address: [0u8; 32],
                 amount: 100,
                 commitment: cm1,
-                shield_proof: b"true".to_vec(),
+                shield_proof: crate::proofs::mock_proof_for_public_inputs(
+                    &crate::traits::ProofPublicInputs::Shield(crate::traits::ShieldPublicInputs {
+                        new_commitment: cm1,
+                        public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
+                        public_amount: 100,
+                    }),
+                )
+                .into_bytes(),
                 ciphertext: None,
                 ephemeral_key: None,
             })
@@ -988,20 +1097,24 @@ mod tests {
             .unwrap();
 
         let witness = acc.get_witness(cm1).await.unwrap();
-        let nk = Fr::from(777u64);
+        let nk = fvk.nk_field();
         let nf = crate::nullifier::compute_nullifier(nk, note_in.nullifier_nonce);
+        let out2_nonce = crate::note::Note::derive_nullifier_nonce(cm1, 0);
+        let out3_nonce = crate::note::Note::derive_nullifier_nonce(cm1, 1);
         let out2 = crate::note::Note::with_values(
             note_in.asset_id,
             60,
             Fr::from(20u64),
-            Fr::from(21u64),
+            0,
+            out2_nonce,
             Fr::from(22u64),
         );
         let out3 = crate::note::Note::with_values(
             note_in.asset_id,
             40,
             Fr::from(23u64),
-            Fr::from(24u64),
+            0,
+            out3_nonce,
             Fr::from(25u64),
         );
         let cm2 = out2.commitment();
@@ -1017,12 +1130,14 @@ mod tests {
             input_commitment: cm1,
             nullifier: nf,
             output_commitments: vec![cm2, cm3],
-            tx_binding: Fr::from(0u64),
+            tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm1, nf, &[cm2, cm3]),
         };
         let private = SpendPrivateInputs {
+            spending_key: sk.as_field(),
             note_asset_id: note_in.asset_id,
             note_amount: note_in.amount,
             note_recipient: note_in.recipient,
+            note_diversifier_index: note_in.diversifier_index,
             note_nullifier_nonce: note_in.nullifier_nonce,
             note_randomness: note_in.note_randomness,
             nk,

@@ -22,11 +22,17 @@ fn prove_new_commitment_is_note_preimage_hash(
     asset_id: Field,
     amount: u64,
     recipient: Field,
+    diversifier_index: u64,
     nullifier_nonce: Field,
     note_randomness: Field,
 ) {
     assert(new_commitment == new_commitment);
-    let _ = asset_id + (amount as Field) + recipient + nullifier_nonce + note_randomness;
+    let _ = asset_id
+        + (amount as Field)
+        + recipient
+        + (diversifier_index as Field)
+        + nullifier_nonce
+        + note_randomness;
 }
 
 /// 1.2 Amount range check: implemented in `masp_common` (placeholder).
@@ -44,6 +50,7 @@ struct ShieldPublic {
 
 struct ShieldPrivate {
     recipient: Field,
+    diversifier_index: u64,
     nullifier_nonce: Field,
     note_randomness: Field,
 }
@@ -55,11 +62,12 @@ fn main(
     public_amount: pub u64,
     // Private inputs (production-shaped)
     recipient: Field,
+    diversifier_index: u64,
     nullifier_nonce: Field,
     note_randomness: Field,
 ) {
     let public = ShieldPublic { new_commitment, asset_id: public_asset_id, amount: public_amount };
-    let private = ShieldPrivate { recipient, nullifier_nonce, note_randomness };
+    let private = ShieldPrivate { recipient, diversifier_index, nullifier_nonce, note_randomness };
 
     // Protocol narrative (Stage-0 scaffolding):
     //
@@ -75,6 +83,7 @@ fn main(
         public.asset_id,
         public.amount,
         private.recipient,
+        private.diversifier_index,
         private.nullifier_nonce,
         private.note_randomness,
     );

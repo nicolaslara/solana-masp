@@ -7,8 +7,9 @@
 
 /// Statement: "This note is a member of the commitment set for this anchor."
 ///
-/// In production with Light Protocol, membership is proven by a separate validity proof
-/// (Groth16) verified on-chain. In mocks, membership is verified via Merkle path locally.
+/// In the current protocol design, membership is proven inside the MASP spend proof via a
+/// Merkle path against a public `anchor` (commitment-tree root). The chain separately checks
+/// that the provided anchor is a valid recent root.
 ///
 /// The MASP spend circuits still take `(anchor, input_commitment)` as public inputs so the
 /// spend proof is bound to the *same* membership context verified externally.
@@ -22,7 +23,15 @@ pub fn prove_membership_externally_verified(anchor: Field, input_commitment: Fie
 /// Statement: "I know the note plaintext that hashes to the commitment."
 ///
 /// Intended statement (Stage-1+):
-/// `input_commitment == Poseidon(DOM_NOTE_COMMIT, note_asset_id, note_amount, note_recipient, note_nullifier_nonce, note_randomness)`.
+/// `input_commitment == Poseidon(
+///     DOM_NOTE_COMMIT,
+///     note_asset_id,
+///     note_amount,
+///     note_recipient,
+///     note_diversifier_index,
+///     note_nullifier_nonce,
+///     note_randomness
+/// )`.
 ///
 /// Stage-0: This function does not enforce the hash yet; it exists to lock the interface + audit trail.
 pub fn prove_note_preimage_hashes_to_commitment(
@@ -30,12 +39,14 @@ pub fn prove_note_preimage_hashes_to_commitment(
     note_asset_id: Field,
     note_amount: u64,
     note_recipient: Field,
+    note_diversifier_index: u64,
     note_nullifier_nonce: Field,
     note_randomness: Field,
 ) {
     assert(input_commitment == input_commitment);
     let amount_f: Field = note_amount as Field;
-    let _ = note_asset_id + amount_f + note_recipient + note_nullifier_nonce + note_randomness;
+    let div_f: Field = note_diversifier_index as Field;
+    let _ = note_asset_id + amount_f + note_recipient + div_f + note_nullifier_nonce + note_randomness;
 }
 
 /// Statement: "The nullifier is derived correctly from the owner's key material."

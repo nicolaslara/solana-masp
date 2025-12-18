@@ -20,7 +20,8 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 - Poseidon hashing via `light-poseidon` crate
 - Multi-asset via Fiat-Shamir α tags
 - Trait-based client (Indexer + Chain abstractions)
-- Light Protocol for state compression (Milestone 3+)
+- Off-Chain note-commitment-tree (verified via merkle paths against on-chain merkle proofs)
+- Light Protocol for state compression **(nullifier set only; commitment tree is not Light)** (Milestone 3+)
 
 **Circuits:**
 
@@ -282,6 +283,24 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
   - `knowledge.md` “Status/Recent Completions”
   - ensure they match current decisions (e.g., whether C_out is in-scope right now)
 
+### 0.13.5 Protocol Soundness Review (Reference Implementation Audit)
+
+**Goal:** Create a single narrative doc that makes it easy to audit soundness/privacy end-to-end (client + chain + indexer + circuits).
+
+- [x] Create `docs/protocol-soundness.md` (soundness/privacy checklist + current gaps)
+- [x] MockChain: bind membership witness root to request anchor (transfer/unshield)
+- [x] MockSpendProver: enforce output nullifier nonce derivation for transfer outputs
+- [ ] P0: Define and enforce **spend authorization** so a watch-only `FullViewingKey` cannot spend
+  - Requires an explicit circuit statement binding secret key material (e.g. `nsk`/`ask`) to the note recipient/address derivation
+  - Likely requires updating note format and/or circuit private inputs (recipient currently only stores `pk_d.x`)
+- [ ] P1: Define `tx_binding_hash` inputs/layout and enforce it (currently `tx_binding=0`)
+  - Include **unshield recipient binding**: public recipient must be committed into `tx_binding_hash` (prevents swapping destination)
+- [ ] P1: Model transparent boundary checks in mocks (optional for now; required for on-chain POC soundness)
+  - Shield: ensure `(token_address, amount)` deposit is enforced by the chain/program (mock currently does not model SPL transfers)
+  - Unshield: ensure `(token_address, amount, recipient)` withdrawal is enforced by the chain/program (mock currently does not model SPL transfers)
+- [x] P1: Client scanning re-verifies `H(note_plaintext)==commitment` before accepting a decrypted note (prevents griefing/unspendable notes)
+- [ ] P2: Define and implement asset tags
+
 ---
 
 ## Milestone 0.14: Real Prover Backend Bringup (Local) — Mocks Everywhere Else
@@ -442,14 +461,17 @@ backend-light = []    # Light Protocol (production)
 
 ---
 
-## Milestone 3: Light Protocol for Commitments
+## Milestone 3: Privacy-Preserving Commitment Tree (No Light CPI)
 
-**Goal:** Stop storing big state ourselves.
+**Goal:** Commitment set storage that does **not** require referencing input commitments on-chain when spending (prevents linkability trails from shield → transfer/unshield).
 
-- [ ] Replace on-chain Merkle with Light-backed structure
-- [ ] Program stores only: anchor ring buffer + config
-- [ ] Indexer serves witnesses
-- [ ] Keep nullifiers as PDAs (for now)
+- [ ] Update protocol spec + interfaces: spends should reveal **nullifiers + anchor**, not the input commitment object
+- [ ] Commitments stored in an on-chain **append-only Merkle accumulator** (program-owned state)
+- [ ] Program maintains an **anchor history ring buffer** (recent roots)
+- [ ] Indexer serves Merkle path witnesses (off-chain)
+- [ ] Spend circuit verifies Merkle path membership against a public `anchor`
+- [ ] Chain enforces `anchor` is a valid recent root
+- [ ] Update mocks (chain/indexer/circuits) to match this model (no Light validity proofs for commitments)
 
 ---
 
@@ -492,6 +514,16 @@ backend-light = []    # Light Protocol (production)
 **Status:** Explicitly deferred until after we have E2E with real proofs + a Solana program POC. This is a major scalability/UX optimization, not required to validate core correctness.
 
 See `docs/payment-discovery-analysis.md` for full design.
+
+---
+
+## Future: Note Consolidation / UTXO Management (Research)
+
+**Problem:** many small notes can exceed Solana transaction limits when spending (too many inputs).
+
+- [ ] Research consolidation strategies (e.g., dedicated consolidation action/circuit like N→1)
+- [ ] Explore wallet heuristics (when to consolidate, privacy implications)
+- [ ] Evaluate Solana constraints (account/IX limits, CU) vs proof shape
 
 ### Current OOB Limitations
 

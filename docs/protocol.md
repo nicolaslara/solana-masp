@@ -2,6 +2,10 @@
 
 This document defines the **high-level MASP protocol** implemented by this repo. It is intentionally **implementation-oriented** (describes what the client/chain/indexer/circuits must do), while remaining **production-shaped** (so mocks can be swapped out without changing user flows).
 
+This repo’s authoritative protocol definition and soundness/privacy argument is:
+
+- `docs/protocol-soundness.md` (**primary / normative**)
+
 For the detailed “MUST prove” statements, see `docs/circuit-security-requirements.md`.
 
 ---

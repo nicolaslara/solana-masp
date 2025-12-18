@@ -31,6 +31,12 @@ pub struct Note {
     /// Only the holder of the corresponding spending key can spend
     pub recipient: Fr,
 
+    /// Diversifier index used to derive the recipient's diversified address.
+    ///
+    /// This is public metadata and is part of the committed plaintext note format.
+    /// It must match the diversifier used for encryption/decryption of this output.
+    pub diversifier_index: u64,
+
     /// Unique per note - ensures unique nullifier
     /// For outputs: derived as `H(DOM, spent_commitment, output_index)`
     /// Without this, same owner + same nk = same nullifier = linkable
@@ -47,17 +53,25 @@ pub struct NotePlaintext {
     pub asset_id: [u8; 32],
     pub amount: u64,
     pub recipient: [u8; 32],
+    pub diversifier_index: u64,
     pub nullifier_nonce: [u8; 32],
     pub note_randomness: [u8; 32],
 }
 
 impl Note {
     /// Create a new note with random nonce and randomness
-    pub fn new<R: Rng>(rng: &mut R, asset_id: Fr, amount: u64, recipient: Fr) -> Self {
+    pub fn new<R: Rng>(
+        rng: &mut R,
+        asset_id: Fr,
+        amount: u64,
+        recipient: Fr,
+        diversifier_index: u64,
+    ) -> Self {
         Self {
             asset_id,
             amount,
             recipient,
+            diversifier_index,
             nullifier_nonce: Fr::rand(rng),
             note_randomness: Fr::rand(rng),
         }
@@ -68,6 +82,7 @@ impl Note {
         asset_id: Fr,
         amount: u64,
         recipient: Fr,
+        diversifier_index: u64,
         nullifier_nonce: Fr,
         note_randomness: Fr,
     ) -> Self {
@@ -75,6 +90,7 @@ impl Note {
             asset_id,
             amount,
             recipient,
+            diversifier_index,
             nullifier_nonce,
             note_randomness,
         }
@@ -105,6 +121,7 @@ impl Note {
             self.asset_id,
             Fr::from(self.amount),
             self.recipient,
+            Fr::from(self.diversifier_index),
             self.nullifier_nonce,
             self.note_randomness,
         ])
@@ -116,6 +133,7 @@ impl Note {
             asset_id: field_to_bytes(&self.asset_id),
             amount: self.amount,
             recipient: field_to_bytes(&self.recipient),
+            diversifier_index: self.diversifier_index,
             nullifier_nonce: field_to_bytes(&self.nullifier_nonce),
             note_randomness: field_to_bytes(&self.note_randomness),
         }
@@ -127,6 +145,7 @@ impl Note {
             asset_id: field_from_bytes(&p.asset_id),
             amount: p.amount,
             recipient: field_from_bytes(&p.recipient),
+            diversifier_index: p.diversifier_index,
             nullifier_nonce: field_from_bytes(&p.nullifier_nonce),
             note_randomness: field_from_bytes(&p.note_randomness),
         }
@@ -150,7 +169,7 @@ mod tests {
     #[test]
     fn test_commitment_deterministic() {
         let mut rng = StdRng::seed_from_u64(12345);
-        let note = Note::new(&mut rng, Fr::from(1u64), 100, Fr::from(2u64));
+        let note = Note::new(&mut rng, Fr::from(1u64), 100, Fr::from(2u64), 0);
 
         let cm1 = note.commitment();
         let cm2 = note.commitment();
@@ -163,6 +182,7 @@ mod tests {
             Fr::from(1u64),
             100,
             Fr::from(2u64),
+            0,
             Fr::from(1u64),
             Fr::from(1u64),
         );
@@ -170,6 +190,7 @@ mod tests {
             Fr::from(1u64),
             100,
             Fr::from(2u64),
+            0,
             Fr::from(2u64),
             Fr::from(1u64),
         );
@@ -179,7 +200,7 @@ mod tests {
     #[test]
     fn test_plaintext_roundtrip() {
         let mut rng = StdRng::seed_from_u64(12345);
-        let note = Note::new(&mut rng, Fr::from(1u64), 100, Fr::from(2u64));
+        let note = Note::new(&mut rng, Fr::from(1u64), 100, Fr::from(2u64), 0);
         let recovered = Note::from_plaintext(&note.to_plaintext());
         assert_eq!(note, recovered);
     }

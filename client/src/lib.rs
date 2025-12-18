@@ -35,6 +35,7 @@ pub mod keys;
 pub mod note;
 pub mod nullifier;
 pub mod oob;
+pub mod tx_binding;
 pub mod types;
 
 // Proof abstractions

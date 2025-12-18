@@ -86,6 +86,7 @@ struct Note {
     asset_id: Field,
     amount: u64,
     recipient: Field,
+    diversifier_index: u64,
     nullifier_nonce: Field,
     note_randomness: Field,
 }
@@ -117,6 +118,7 @@ fn main(
     note_asset_id: Field,
     note_amount: u64,
     note_recipient: Field,
+    note_diversifier_index: u64,
     note_nullifier_nonce: Field,
     note_randomness: Field,
     nk: Field,
@@ -142,6 +144,7 @@ fn main(
             asset_id: note_asset_id,
             amount: note_amount,
             recipient: note_recipient,
+            diversifier_index: note_diversifier_index,
             nullifier_nonce: note_nullifier_nonce,
             note_randomness,
         },
@@ -161,6 +164,7 @@ fn main(
         private.note.asset_id,
         private.note.amount,
         private.note.recipient,
+        private.note.diversifier_index,
         private.note.nullifier_nonce,
         private.note.note_randomness,
     );

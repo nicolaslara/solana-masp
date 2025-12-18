@@ -57,20 +57,17 @@ fn prove_transfer(
     env: &TestEnv,
     client: &masp_client::MaspClient<dyn masp_client::Indexer, dyn masp_client::Chain>,
     td: &masp_client::client::TransferData,
+    seed: &[u8; 32],
 ) -> ProofBytes {
     let nk = client.full_viewing_key().nk_field();
-    let (public, private) = td.spend_proof_inputs(nk);
+    let sk = masp_client::SpendingKey::from_bytes(seed);
+    let (public, private) = td.spend_proof_inputs(sk.as_field(), nk);
     env.prover
         .prove(
             &masp_client::traits::ProofPublicInputs::Transfer(public),
             &private,
         )
         .expect("prover should succeed (scaffold)")
-}
-
-fn mock_proof() -> ProofBytes {
-    // Fallback for tests that don't yet build full proof inputs.
-    ProofBytes::new(vec![0u8; 32])
 }
 
 /// Helper: Shield a note with encryption (goes through chain properly)
@@ -94,9 +91,12 @@ async fn shield_with_encryption<E: masp_client::NoteEncryption>(
         public_amount: note.amount,
     };
     let private = masp_client::SpendPrivateInputs {
+        // Shield proofs do not require spend authorization; keep a sentinel.
+        spending_key: masp_client::Fr::from(0u64),
         note_asset_id: note.asset_id,
         note_amount: note.amount,
         note_recipient: note.recipient,
+        note_diversifier_index: note.diversifier_index,
         note_nullifier_nonce: note.nullifier_nonce,
         note_randomness: note.note_randomness,
         nk: masp_client::Fr::from(0u64),
@@ -164,11 +164,16 @@ async fn test_transfer_spends_and_creates_notes() {
 
     // Transfer 60 to self (creates output + change)
     let transfer_data = alice
-        .build_transfer(note.commitment(), alice.get_address(1), 60)
+        .build_transfer(
+            note.commitment(),
+            alice.full_viewing_key().diversified_address(1),
+            60,
+        )
         .await
         .unwrap();
 
-    let transfer_req = transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data));
+    let transfer_req =
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
 
     // Verify outputs exist in indexer
@@ -278,11 +283,16 @@ async fn test_multi_asset_transfer_preserves_type() {
 
     // Alice transfers 500 USDC to Bob
     let transfer_data = alice
-        .build_transfer(usdc_note.commitment(), bob.get_address(0), 500)
+        .build_transfer(
+            usdc_note.commitment(),
+            bob.full_viewing_key().diversified_address(0),
+            500,
+        )
         .await
         .unwrap();
 
-    let transfer_req = transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data));
+    let transfer_req =
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
 
     alice.mark_spent(usdc_note.commitment());
@@ -432,11 +442,16 @@ async fn test_sync_transfer_creates_multiple_commitments() {
 
     // Transfer with change
     let transfer_data = alice
-        .build_transfer(note.commitment(), alice.get_address(1), 60)
+        .build_transfer(
+            note.commitment(),
+            alice.full_viewing_key().diversified_address(1),
+            60,
+        )
         .await
         .unwrap();
 
-    let transfer_req = transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data));
+    let transfer_req =
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
 
     // Get commitments from transfer tx
@@ -482,11 +497,16 @@ async fn test_sync_detects_spent_notes_via_nullifier() {
     let (_, _, nullifier) = alice.prepare_spend(note.commitment()).await.unwrap();
 
     let transfer_data = alice
-        .build_transfer(note.commitment(), alice.get_address(1), 100)
+        .build_transfer(
+            note.commitment(),
+            alice.full_viewing_key().diversified_address(1),
+            100,
+        )
         .await
         .unwrap();
 
-    let transfer_req = transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data));
+    let transfer_req =
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
     env.chain.transfer(transfer_req).await.unwrap();
 
     // Verify nullifier is now spent
@@ -551,7 +571,7 @@ async fn test_sync_with_encrypted_notes() {
 
     // Alice transfers to Bob
     let transfer_data = alice
-        .build_transfer(note.commitment(), bob_addr.to_field(), 100)
+        .build_transfer(note.commitment(), bob_addr.clone(), 100)
         .await
         .unwrap();
 
@@ -559,7 +579,8 @@ async fn test_sync_with_encrypted_notes() {
     let encrypted = encrypt_note(&mut rng, &transfer_data.output, &bob_addr);
 
     // Submit transfer (in real system, ciphertext would be stored on-chain/indexer)
-    let transfer_req = transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data));
+    let transfer_req =
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
     alice.mark_spent(note.commitment());
 
@@ -620,7 +641,7 @@ async fn test_encrypted_note_wrong_recipient_fails() {
 
     // Alice transfers to Bob (not Charlie)
     let transfer_data = alice
-        .build_transfer(note.commitment(), bob_addr.to_field(), 100)
+        .build_transfer(note.commitment(), bob_addr.clone(), 100)
         .await
         .unwrap();
 
@@ -654,7 +675,13 @@ async fn test_verify_tampered_note_fails() {
     let addr = fvk.diversified_address(0);
 
     let asset_id = compute_asset_id(&tokens::usdc());
-    let note = masp_client::Note::new(&mut rng, asset_id, 100, addr.to_field());
+    let note = masp_client::Note::new(
+        &mut rng,
+        asset_id,
+        100,
+        addr.to_field(),
+        addr.diversifier_index,
+    );
     let real_commitment = note.commitment();
 
     // Tamper with the note (change amount)
@@ -662,6 +689,7 @@ async fn test_verify_tampered_note_fails() {
         note.asset_id,
         999, // Wrong amount!
         note.recipient,
+        note.diversifier_index,
         note.nullifier_nonce,
         note.note_randomness,
     );
@@ -691,7 +719,7 @@ async fn test_alice_pays_bob() {
     let mut bob = env.create_client(&[2u8; 32]);
 
     let usdc_asset = compute_asset_id(&tokens::usdc());
-    let bob_address = bob.get_address(0);
+    let bob_address = bob.full_viewing_key().diversified_address(0);
 
     // Alice shields 100 USDC
     let (note, shield_req) = alice.build_shield(&tokens::usdc(), 100);
@@ -703,11 +731,12 @@ async fn test_alice_pays_bob() {
 
     // Alice transfers 75 to Bob
     let transfer_data = alice
-        .build_transfer(note.commitment(), bob_address, 75)
+        .build_transfer(note.commitment(), bob_address.clone(), 75)
         .await
         .unwrap();
 
-    let transfer_req = transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data));
+    let transfer_req =
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
 
     // Alice: mark spent, add change
@@ -739,11 +768,16 @@ async fn test_bob_unshields_received_payment() {
     alice.add_note(note.clone(), shield_result.tx_sig);
 
     let transfer_data = alice
-        .build_transfer(note.commitment(), bob.get_address(0), 100)
+        .build_transfer(
+            note.commitment(),
+            bob.full_viewing_key().diversified_address(0),
+            100,
+        )
         .await
         .unwrap();
 
-    let transfer_req = transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data));
+    let transfer_req =
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
 
     alice.mark_spent(note.commitment());
@@ -776,11 +810,16 @@ async fn test_double_spend_rejected() {
 
     // First transfer succeeds
     let transfer_data = alice
-        .build_transfer(note.commitment(), alice.get_address(1), 50)
+        .build_transfer(
+            note.commitment(),
+            alice.full_viewing_key().diversified_address(1),
+            50,
+        )
         .await
         .unwrap();
 
-    let transfer_req = transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data));
+    let transfer_req =
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
     env.chain.transfer(transfer_req.clone()).await.unwrap();
 
     // Second transfer with SAME nullifier should fail
@@ -802,7 +841,11 @@ async fn test_insufficient_balance_rejected() {
 
     // Try to transfer 100 (more than we have)
     let result = alice
-        .build_transfer(note.commitment(), alice.get_address(1), 100)
+        .build_transfer(
+            note.commitment(),
+            alice.full_viewing_key().diversified_address(1),
+            100,
+        )
         .await;
 
     assert!(matches!(
@@ -828,12 +871,17 @@ async fn test_invalid_anchor_rejected() {
 
     // Build transfer
     let transfer_data = alice
-        .build_transfer(note.commitment(), alice.get_address(1), 50)
+        .build_transfer(
+            note.commitment(),
+            alice.full_viewing_key().diversified_address(1),
+            50,
+        )
         .await
         .unwrap();
 
     // Tamper with anchor
-    let mut bad_req = transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data));
+    let mut bad_req =
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
     bad_req.anchor = Fr::from(999999u64); // Invalid anchor
 
     let result = env.chain.transfer(bad_req).await;
@@ -871,11 +919,16 @@ async fn test_client_rejects_already_spent() {
 
     // Transfer (spend the note)
     let transfer_data = alice
-        .build_transfer(note.commitment(), alice.get_address(1), 50)
+        .build_transfer(
+            note.commitment(),
+            alice.full_viewing_key().diversified_address(1),
+            50,
+        )
         .await
         .unwrap();
 
-    let transfer_req = transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data));
+    let transfer_req =
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
     env.chain.transfer(transfer_req).await.unwrap();
     alice.mark_spent(note.commitment());
 
@@ -938,36 +991,56 @@ async fn test_cannot_spend_others_note_wrong_nullifier() {
     // 1. Alice's nullifier is different from Bob's
     // 2. If Alice "spends" with her nullifier, Bob can still spend with his
 
-    // Alice submits with her (wrong) nullifier
-    use masp_client::TransferOutput;
-    let alice_transfer = masp_client::TransferRequest {
-        anchor: alice_witness.root(),
+    // Alice tries to create a spend proof for Bob's note.
+    //
+    // This must fail because spend authorization is SpendingKey-only: Alice's spending key does not
+    // match the note recipient (which is derived from Bob's key).
+    let alice_anchor = alice_witness.root();
+    let alice_public = masp_client::SpendPublicInputs {
+        anchor: alice_anchor,
         input_commitment: bob_note.commitment(),
-        membership_witness: alice_witness,
         nullifier: alice_nullifier,
-        spend_proof: mock_proof().into_bytes(),
-        outputs: vec![TransferOutput::commitment_only(Fr::from(999u64))], // fake output
+        output_commitments: vec![],
+        tx_binding: masp_client::tx_binding::tx_binding_transfer(
+            alice_anchor,
+            bob_note.commitment(),
+            alice_nullifier,
+            &[],
+        ),
     };
-    let alice_result = env.chain.transfer(alice_transfer).await;
-    match env.config.proof_system {
-        masp_client::ProofSystemBackend::UltraPlonk => {
-            // With real proofs enabled, this should be rejected at proof verification.
-            assert!(alice_result.is_err());
-        }
-        _ => {
-            // In mock-proof mode, this "succeeds" (the goal of this test is nullifier semantics).
-            alice_result.unwrap();
-        }
-    }
+    let alice_private = masp_client::SpendPrivateInputs {
+        spending_key: masp_client::SpendingKey::from_bytes(&[1u8; 32]).as_field(),
+        note_asset_id: bob_note.asset_id,
+        note_amount: bob_note.amount,
+        note_recipient: bob_note.recipient,
+        note_diversifier_index: bob_note.diversifier_index,
+        note_nullifier_nonce: bob_note.nullifier_nonce,
+        note_randomness: bob_note.note_randomness,
+        nk: alice.full_viewing_key().nk_field(),
+        membership_witness: alice_witness,
+        output_notes: vec![],
+    };
+    let alice_proof_result = env.prover.prove(
+        &masp_client::ProofPublicInputs::Transfer(alice_public),
+        &alice_private,
+    );
+    assert!(
+        alice_proof_result.is_err(),
+        "Alice must not be able to prove a spend for Bob's note"
+    );
 
     // Bob can STILL spend the note because his nullifier is different
     // (Alice's "spend" didn't actually invalidate the note)
     let bob_transfer = bob
-        .build_transfer(bob_note.commitment(), bob.get_address(1), 100)
+        .build_transfer(
+            bob_note.commitment(),
+            bob.full_viewing_key().diversified_address(1),
+            100,
+        )
         .await
         .unwrap();
 
-    let bob_req = bob_transfer.to_request(prove_transfer(&env, &bob, &bob_transfer));
+    let bob_req = bob_transfer.to_request(prove_transfer(&env, &bob, &bob_transfer, &[2u8; 32]));
 
     // This succeeds because Bob's nullifier wasn't spent
     let result = env.chain.transfer(bob_req).await;
@@ -995,11 +1068,16 @@ async fn test_oob_note_import_via_tx_sig() {
     alice.add_note(note.clone(), shield_result.tx_sig);
 
     let transfer_data = alice
-        .build_transfer(note.commitment(), bob.get_address(0), 100)
+        .build_transfer(
+            note.commitment(),
+            bob.full_viewing_key().diversified_address(0),
+            100,
+        )
         .await
         .unwrap();
 
-    let transfer_req = transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data));
+    let transfer_req =
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
     alice.mark_spent(note.commitment());
 
@@ -1033,10 +1111,12 @@ async fn test_oob_fake_note_rejected() {
     let mut bob = env.create_client(&[2u8; 32]);
 
     // Create a fake note (never shielded)
+    let self_addr = bob.full_viewing_key().diversified_address(0);
     let fake_note = Note::with_values(
         Fr::from(1u64),
         100,
-        bob.get_address(0),
+        self_addr.to_field(),
+        self_addr.diversifier_index,
         Fr::from(123u64),
         Fr::from(456u64),
     );
@@ -1068,7 +1148,11 @@ async fn test_exact_amount_transfer_no_change() {
 
     // Transfer exactly 100 (no change)
     let transfer_data = alice
-        .build_transfer(note.commitment(), alice.get_address(1), 100)
+        .build_transfer(
+            note.commitment(),
+            alice.full_viewing_key().diversified_address(1),
+            100,
+        )
         .await
         .unwrap();
 
@@ -1126,10 +1210,15 @@ async fn test_shielded_sync_full_recovery() {
 
     // Spend note1
     let transfer_data = alice
-        .build_transfer(note1.commitment(), alice.get_address(1), 100)
+        .build_transfer(
+            note1.commitment(),
+            alice.full_viewing_key().diversified_address(1),
+            100,
+        )
         .await
         .unwrap();
-    let transfer_req = transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data));
+    let transfer_req =
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
     let _transfer_result = env.chain.transfer(transfer_req).await.unwrap();
     alice.mark_spent(note1.commitment());
 
@@ -1206,7 +1295,7 @@ async fn test_recovered_note_can_be_spent() {
 
     // Build transfer from recovered note
     let transfer_data = recovered_alice
-        .build_transfer(recovered_note.commitment, bob.get_address(0), 100)
+        .build_transfer(recovered_note.commitment, bob_addr.clone(), 100)
         .await
         .unwrap();
 
@@ -1220,7 +1309,7 @@ async fn test_recovered_note_can_be_spent() {
 
     // Submit transfer
     let transfer_req = transfer_data.to_request_with_outputs(
-        prove_transfer(&env, &recovered_alice, &transfer_data),
+        prove_transfer(&env, &recovered_alice, &transfer_data, &alice_seed),
         outputs,
     );
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
@@ -1307,10 +1396,15 @@ async fn test_refresh_spent_status_multi_device() {
 
     // Mobile spends the note (while desktop is offline)
     let transfer_data = mobile
-        .build_transfer(note.commitment(), mobile.get_address(1), 100)
+        .build_transfer(
+            note.commitment(),
+            mobile.full_viewing_key().diversified_address(1),
+            100,
+        )
         .await
         .unwrap();
-    let transfer_req = transfer_data.to_request(prove_transfer(&env, &mobile, &transfer_data));
+    let transfer_req =
+        transfer_data.to_request(prove_transfer(&env, &mobile, &transfer_data, &[1u8; 32]));
     env.chain.transfer(transfer_req).await.unwrap();
     mobile.mark_spent(note.commitment()); // Mobile updates local state
 
@@ -1350,7 +1444,11 @@ async fn test_oob_first_payment_encrypted() {
 
     // Alice transfers to Bob
     let transfer_data = alice
-        .build_transfer(note.commitment(), bob.get_address(0), 100)
+        .build_transfer(
+            note.commitment(),
+            bob.full_viewing_key().diversified_address(0),
+            100,
+        )
         .await
         .unwrap();
 
@@ -1366,8 +1464,10 @@ async fn test_oob_first_payment_encrypted() {
         encrypted.ephemeral_key,
     )];
 
-    let transfer_req = transfer_data
-        .to_request_with_outputs(prove_transfer(&env, &alice, &transfer_data), outputs);
+    let transfer_req = transfer_data.to_request_with_outputs(
+        prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]),
+        outputs,
+    );
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
     alice.mark_spent(note.commitment());
 
@@ -1409,13 +1509,13 @@ async fn test_oob_vs_full_sync_semantics() {
         .collect();
     let spend_note = alice_notes[0].clone();
 
+    let bob_addr = bob.full_viewing_key().diversified_address(0);
     let transfer_data = alice
-        .build_transfer(spend_note.commitment, bob.get_address(0), 10)
+        .build_transfer(spend_note.commitment, bob_addr.clone(), 10)
         .await
         .unwrap();
 
     // Encrypt for Bob
-    let bob_addr = bob.full_viewing_key().diversified_address(0);
     let enc = encryption.encrypt(&mut rand::thread_rng(), &transfer_data.output, &bob_addr);
 
     // Build transfer with ciphertext (chain stores it in indexer)
@@ -1426,8 +1526,10 @@ async fn test_oob_vs_full_sync_semantics() {
         enc.ephemeral_key,
     )];
 
-    let transfer_req = transfer_data
-        .to_request_with_outputs(prove_transfer(&env, &alice, &transfer_data), outputs);
+    let transfer_req = transfer_data.to_request_with_outputs(
+        prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]),
+        outputs,
+    );
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
 
     // Method 1: Full sync (scans ALL outputs)
