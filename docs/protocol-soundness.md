@@ -94,7 +94,6 @@ are documented in:
 
 - `docs/design-decisions/ciphertext-da-and-binding.md`
 
-
 ---
 
 ## What each party learns (privacy model)
