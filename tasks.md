@@ -31,20 +31,11 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 
 ---
 
-## Next priority order (authoritative)
+## Next priority order
 
 This section defines the **required implementation ordering** for the next milestones.
-We should **not** proceed to “real circuit implementation” work until items (1)–(4) are done.
 
-1. **Privacy-preserving commitment tree + anchors (and update mocks accordingly)**:
-   - See **Milestone 3**.
-2. **Note consolidation support (mocks + user flows + circuit scaffold)**:
-   - Add a consolidation flow to `client/tests/user_flows.rs` and keep the protocol interface stable.
-3. **Key model review / simplification**:
-   - Ensure the SpendingKey vs FullViewingKey split is clean and minimal (no accidental “watch-only spending” capability).
-4. **Asset rules (no mixing) in mocks + circuit scaffolds**:
-   - Enforce single-asset semantics (no cross-asset mixing within an Action).
-5. **Then: circuit implementation (incremental constraints)**:
+1. **Circuit implementation (incremental constraints)**:
    - Only after (1)–(4) are locked.
 
 ---

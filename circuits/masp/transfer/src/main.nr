@@ -296,8 +296,8 @@ fn verify_balance_conservation(
         }
     }
 
-    // Conservation
-    assert(input_sum == output_sum);
+    // Conservation. Includes range checks to ensure sums are still u64, not Field.
+    assert(input_sum as u64 == output_sum as u64);
 }
 
 /// Verify nullifier correctness for disabled slots (must be zero).
