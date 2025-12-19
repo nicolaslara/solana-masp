@@ -397,8 +397,6 @@ The real privacy risk is not `ct_hash` itself; it’s **any deterministic or str
 
 ---
 
-If you want, I’ll also give you **concrete field/byte layouts** for the “standard-primitive 1B” ciphertext (AAD contents, nonce rules, and exactly what gets hashed into `ct_hash`) so the protocol surface is frozen in a way that keeps 1A → 1B upgradeable without breaking wallet formats.
-
 [1]: https://solana.com/docs/core/transactions?utm_source=chatgpt.com "Transactions"
 [2]: https://solana.com/news/solana-network-upgrades?utm_source=chatgpt.com "Solana Network Upgrades"
 [3]: https://docs.jito.wtf/lowlatencytxnsend/ "⚡ Low Latency Transaction Send — Jito Labs Documentation - High Performance Solana Infrastructure"
