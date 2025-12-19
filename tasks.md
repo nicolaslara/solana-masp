@@ -305,7 +305,6 @@ This section defines the **required implementation ordering** for the next miles
   - Shield: ensure `(token_address, amount)` deposit is enforced by the chain/program (mock currently does not model SPL transfers)
   - Unshield: ensure `(token_address, amount, recipient)` withdrawal is enforced by the chain/program (mock currently does not model SPL transfers)
 - [x] P1: Client scanning re-verifies `H(note_plaintext)==commitment` before accepting a decrypted note (prevents griefing/unspendable notes)
-- [ ] P2: Define and implement asset tags
 
 ---
 
@@ -690,7 +689,7 @@ See `docs/payment-discovery-analysis.md` for why this matters.
 - [ ] Encrypt for sender: `C_out = Encrypt(ock, esk || note)`
   - `ock = KDF(ovk, epk, pk_d_recipient)`
 - [ ] Include in transaction alongside C_enc
-- [ ] ~64 bytes additional per output
+- [ ] ~200 bytes additional per output (current C_out format; exact bytes depend on ciphertext encoding)
 
 ### 9.3 Sender Recovery
 

@@ -85,6 +85,18 @@ The protocol is sound if the following are guaranteed:
 
 ---
 
+## Ciphertexts: data availability (DA) and binding to proofs
+
+Ciphertexts are required for **outputs only** (note discovery). They are not required for inputs.
+
+Solana’s transaction size constraints and the “ciphertext ↔ proof intent binding” design space
+are documented in:
+
+- `docs/design-decisions/ciphertext-da-and-binding.md`
+
+
+---
+
 ## What each party learns (privacy model)
 
 This section describes the intended privacy properties of the protocol and what information is necessarily revealed.
@@ -266,7 +278,7 @@ The proof MUST bind to the exact ordering of nullifiers and commitments. Reorder
 - **(T2b) Transaction binding hash (MASP circuit)**:
   - `tx_binding` is a public input computed as:
 
-    ```
+    ```text
     tx_binding = H(DOM_TX_BINDING, anchor_root, input_count, output_count, h_nf)
     ```
 
@@ -283,7 +295,7 @@ The proof MUST bind to the exact ordering of nullifiers and commitments. Reorder
 - **(T6) Output nonce derivation (MASP circuit)**:
   - Output note `nullifier_nonce` values are derived deterministically from `tx_binding`:
 
-    ```
+    ```text
     out_j.nullifier_nonce = H(DOM_NULLIFIER_NONCE, tx_binding, j)
     ```
 
@@ -293,7 +305,7 @@ The proof MUST bind to the exact ordering of nullifiers and commitments. Reorder
   - All **enabled** inputs and outputs MUST share the same `asset_id`.
   - Value conservation is enforced as an **integer equality**:
 
-    ```
+    ```text
     Σ(enabled_input_amounts) == Σ(enabled_output_amounts)
     ```
 

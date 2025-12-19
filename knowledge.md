@@ -482,6 +482,10 @@ Minimal public inputs:
 2. **TX size limit** - 1232 bytes on Solana
 3. **Forester dependency** - Light queues need draining (liveness risk)
 4. **Don't use Light nullifier queue** - Designed for compressed account lifecycle, not MASP spentness
+5. **Ciphertext size pressure** - current encryption format is hundreds of bytes per output; multi-output transfers cannot fit “inline everything” under the 1232-byte limit (especially once proofs are included).
+   - `C_enc` (recipient): **244 bytes/output**
+   - `C_out` (sender recovery): **236 bytes/output**
+   - **Optimization opportunity:** `C_out` currently duplicates `pk_d.x` even though the note plaintext already includes `recipient = pk_d.x` → can save **32 bytes/output** without changing protocol semantics.
 
 ### From E2E Testing
 

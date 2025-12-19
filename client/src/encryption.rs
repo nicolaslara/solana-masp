@@ -384,8 +384,16 @@ impl EncryptedNote {
 // ============================================================================
 
 /// Size of C_out plaintext
-/// esk(32) + pk_d_x(32) + note_plaintext(136) = 200 bytes
-pub const C_OUT_PLAINTEXT_SIZE: usize = 32 + 32 + PLAINTEXT_SIZE;
+///
+/// V2 (current): esk(32) + note_plaintext(144) = 176 bytes
+///
+/// Note: older versions (V1) also included `pk_d.x` explicitly, but that is redundant because
+/// the note plaintext already contains `recipient = pk_d.x`. We keep backward-compatible
+/// decoding for historical ciphertexts without adding an explicit version byte.
+pub const C_OUT_PLAINTEXT_SIZE: usize = 32 + PLAINTEXT_SIZE;
+
+/// Historical V1 size: esk(32) + pk_d_x(32) + note_plaintext(144) = 208 bytes
+pub const C_OUT_PLAINTEXT_SIZE_V1: usize = 32 + 32 + PLAINTEXT_SIZE;
 
 /// Total C_out size (nonce + ciphertext + tag)
 pub const C_OUT_SIZE: usize = NONCE_SIZE + C_OUT_PLAINTEXT_SIZE + TAG_SIZE;
@@ -423,7 +431,7 @@ pub struct OutgoingCiphertext {
 pub struct OutgoingPlaintext {
     /// Ephemeral secret key used for C_enc
     pub esk: Fr,
-    /// Recipient's pk_d.x
+    /// Recipient's pk_d.x (redundant with `note.recipient`, provided for convenience)
     pub recipient_pk_d_x: Fr,
     /// The note that was sent
     pub note: Note,
@@ -529,7 +537,6 @@ fn derive_outgoing_key(ovk: Fr, epk_x: Fr, commitment: Fr) -> [u8; 32] {
 /// * `ovk` - Sender's outgoing viewing key
 /// * `esk` - Ephemeral secret key used for C_enc
 /// * `epk` - Ephemeral public key (for key derivation)
-/// * `recipient_pk_d_x` - Recipient's pk_d.x coordinate
 /// * `note` - The note being sent
 /// * `commitment` - Note commitment (for key derivation)
 /// * `rng` - Random number generator for nonce
@@ -538,7 +545,6 @@ pub fn encrypt_outgoing<R: Rng + ?Sized>(
     ovk: Fr,
     esk: Fr,
     epk_bytes: &[u8; EPK_SIZE],
-    recipient_pk_d_x: Fr,
     note: &Note,
     commitment: Fr,
 ) -> OutgoingCiphertext {
@@ -546,10 +552,10 @@ pub fn encrypt_outgoing<R: Rng + ?Sized>(
     let epk_x = field_from_bytes(&epk_bytes[..32].try_into().unwrap());
     let ock = derive_outgoing_key(ovk, epk_x, commitment);
 
-    // 2. Build plaintext: esk || pk_d.x || note_plaintext
+    // 2. Build plaintext: esk || note_plaintext
+    // Note: `pk_d.x` is already contained in `note_plaintext.recipient`.
     let mut plaintext = Vec::with_capacity(C_OUT_PLAINTEXT_SIZE);
     plaintext.extend_from_slice(&field_to_bytes(&esk));
-    plaintext.extend_from_slice(&field_to_bytes(&recipient_pk_d_x));
     plaintext.extend_from_slice(&serialize_note(note));
 
     // 3. Generate nonce
@@ -611,20 +617,34 @@ pub fn decrypt_outgoing(
         )
         .map_err(|_| EncryptionError::DecryptionFailed)?;
 
-    // 3. Parse plaintext: esk(32) || pk_d.x(32) || note_plaintext(136)
-    if plaintext.len() < C_OUT_PLAINTEXT_SIZE {
-        return Err(EncryptionError::InvalidLength);
+    // 3. Parse plaintext (backward-compatible):
+    // - V2 (current): esk(32) || note_plaintext(144)
+    // - V1 (legacy):  esk(32) || pk_d.x(32) || note_plaintext(144)
+    if plaintext.len() == C_OUT_PLAINTEXT_SIZE {
+        let esk = field_from_bytes(&plaintext[..32].try_into().unwrap());
+        let note = deserialize_note(&plaintext[32..])?;
+        let recipient_pk_d_x = note.recipient;
+
+        return Ok(OutgoingPlaintext {
+            esk,
+            recipient_pk_d_x,
+            note,
+        });
     }
 
-    let esk = field_from_bytes(&plaintext[..32].try_into().unwrap());
-    let recipient_pk_d_x = field_from_bytes(&plaintext[32..64].try_into().unwrap());
-    let note = deserialize_note(&plaintext[64..])?;
+    if plaintext.len() == C_OUT_PLAINTEXT_SIZE_V1 {
+        let esk = field_from_bytes(&plaintext[..32].try_into().unwrap());
+        let recipient_pk_d_x = field_from_bytes(&plaintext[32..64].try_into().unwrap());
+        let note = deserialize_note(&plaintext[64..])?;
 
-    Ok(OutgoingPlaintext {
-        esk,
-        recipient_pk_d_x,
-        note,
-    })
+        return Ok(OutgoingPlaintext {
+            esk,
+            recipient_pk_d_x,
+            note,
+        });
+    }
+
+    return Err(EncryptionError::InvalidLength);
 }
 
 /// Try to decrypt C_out (for sender scanning)
@@ -857,16 +877,7 @@ impl NoteEncryption for ChaChaPolyEncryption {
         };
 
         // 10. Encrypt C_out for sender recovery
-        let recipient_pk_d_x = from_jubjub_base(recipient_addr.pk_d.x);
-        let c_out = encrypt_outgoing(
-            rng,
-            sender_ovk,
-            esk,
-            &ephemeral_key,
-            recipient_pk_d_x,
-            note,
-            commitment,
-        );
+        let c_out = encrypt_outgoing(rng, sender_ovk, esk, &ephemeral_key, note, commitment);
 
         OutputCiphertexts {
             c_enc,
@@ -986,12 +997,10 @@ impl NoteEncryption for MockEncryption {
 
         // Mock C_out: just store the note plaintext XOR'd with ovk-derived key
         let esk = Fr::rand(rng);
-        let recipient_pk_d_x = from_jubjub_base(recipient_addr.pk_d.x);
 
         // Build mock C_out plaintext
         let mut plaintext = Vec::with_capacity(C_OUT_PLAINTEXT_SIZE);
         plaintext.extend_from_slice(&field_to_bytes(&esk));
-        plaintext.extend_from_slice(&field_to_bytes(&recipient_pk_d_x));
         plaintext.extend_from_slice(&serialize_note(note));
 
         // Derive mock key from ovk
@@ -1021,19 +1030,30 @@ impl NoteEncryption for MockEncryption {
         let key = derive_mock_key(ovk, commitment);
         let plaintext = xor_crypt(&c_out.ciphertext, &key);
 
-        if plaintext.len() < C_OUT_PLAINTEXT_SIZE {
-            return Err(EncryptionError::InvalidLength);
+        // Support both V2 and legacy V1 formats (see decrypt_outgoing).
+        if plaintext.len() == C_OUT_PLAINTEXT_SIZE {
+            let esk = field_from_bytes(&plaintext[..32].try_into().unwrap());
+            let note = deserialize_note(&plaintext[32..])?;
+            let recipient_pk_d_x = note.recipient;
+            return Ok(OutgoingPlaintext {
+                esk,
+                recipient_pk_d_x,
+                note,
+            });
         }
 
-        let esk = field_from_bytes(&plaintext[..32].try_into().unwrap());
-        let recipient_pk_d_x = field_from_bytes(&plaintext[32..64].try_into().unwrap());
-        let note = deserialize_note(&plaintext[64..])?;
+        if plaintext.len() == C_OUT_PLAINTEXT_SIZE_V1 {
+            let esk = field_from_bytes(&plaintext[..32].try_into().unwrap());
+            let recipient_pk_d_x = field_from_bytes(&plaintext[32..64].try_into().unwrap());
+            let note = deserialize_note(&plaintext[64..])?;
+            return Ok(OutgoingPlaintext {
+                esk,
+                recipient_pk_d_x,
+                note,
+            });
+        }
 
-        Ok(OutgoingPlaintext {
-            esk,
-            recipient_pk_d_x,
-            note,
-        })
+        Err(EncryptionError::InvalidLength)
     }
 
     fn scheme_name(&self) -> &'static str {
