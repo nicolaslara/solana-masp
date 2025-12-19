@@ -103,6 +103,27 @@ pub fn prove_nullifier_derivation(nullifier: Field, nk: Field, note_nullifier_no
     assert(nullifier == nullifier);
 }
 
+/// Statement: "I am authorized to spend this note (SpendingKey-only)."
+///
+/// Intended statement (Stage-1+):
+/// - Prover knows `ask` such that `ak = ask * G`.
+/// - Derive `ivk = H(DOM_IVK, ak.x, nk_x)`.
+/// - Derive `g_d` from `note_diversifier_index`.
+/// - Check that the note recipient corresponds to the diversified address:
+///   `pk_d = ivk * g_d` and `note_recipient == pk_d.x` (or equivalent binding per note format).
+///
+/// Stage-0: no-op; exists to lock the interface + audit trail.
+pub fn prove_spend_authorization(
+    ask: Field,
+    nk: Field,
+    note_recipient: Field,
+    note_diversifier_index: u64,
+) {
+    let div_f: Field = note_diversifier_index as Field;
+    let _ = ask + nk + note_recipient + div_f;
+    assert(true);
+}
+
 /// Statement: "This proof is bound to the intended transaction."
 ///
 /// Intended statement (Stage-1+):
@@ -113,13 +134,17 @@ pub fn prove_tx_binding(tx_binding: Field) {
     assert(tx_binding == tx_binding);
 }
 
-/// Statement: "Amounts are range-checked (u64)."
-pub fn prove_amount_range(_amount: u64) {
-    // Stage-0: no-op. In practice we must enforce `< 2^64` to prevent wraparound.
-    assert(true);
-}
-
 /// Statement: "Asset id is correctly bound to the transparent token boundary."
 pub fn prove_asset_id_binding(asset_id: Field) {
     assert(asset_id == asset_id);
 }
+
+// -----------------------------------------------------------------------------
+// Note on Amount Range Checks
+// -----------------------------------------------------------------------------
+//
+// Amount range checks (`amount < 2^64`) are enforced by Noir's type system.
+// All amount parameters in our circuits are typed as `u64`, which automatically
+// generates range constraints. No explicit `prove_amount_range()` function is needed.
+//
+// See `docs/protocol-soundness.md` for the full security rationale.

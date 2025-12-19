@@ -86,7 +86,6 @@ where
     C: Chain,
 {
     /// User's spending key
-    #[allow(dead_code)]
     spending_key: SpendingKey,
 
     /// Full viewing key
@@ -110,7 +109,7 @@ where
     I: Indexer,
     C: Chain,
 {
-    /// Create a new client with the given spending key
+    /// Create a **spending** client with the given spending key.
     pub fn new(
         spending_key: SpendingKey,
         indexer: Arc<I>,
@@ -943,6 +942,8 @@ impl TransferData {
 mod tests {
     use super::*;
     use crate::mock::{MockChain, MockNoteStore};
+    use std::sync::Arc;
+
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 

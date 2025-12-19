@@ -13,21 +13,12 @@
 // - output_commitment_2: fee note (optional, 0 if unused)
 
 use dep::masp_common::{
-    prove_merkle_membership, prove_note_preimage_hashes_to_commitment,
-    prove_nullifier_derivation, prove_tx_binding,
+    prove_merkle_membership, prove_note_preimage_hashes_to_commitment, prove_nullifier_derivation,
+    prove_spend_authorization, prove_tx_binding,
 };
-
 // -----------------------------------------------------------------------------
 // Statement check functions (Stage-0 placeholders)
 // -----------------------------------------------------------------------------
-
-/// Statement: "The spender is authorized to spend this note."
-///
-/// This will eventually be the full Orchard/Sapling-style ownership authorization proof.
-/// Stage-0: no-op (scaffolding), but we keep it as a named statement for auditability.
-fn check_ownership_authorization() {
-    assert(true);
-}
 
 /// Statement: "Each output has a correctly derived nullifier nonce."
 ///
@@ -101,6 +92,7 @@ struct TransferPublic {
 struct TransferPrivate {
     note: Note,
     nk: Field,
+    ask: Field,
     out_values: [u64; 3],
 }
 
@@ -125,6 +117,7 @@ fn main(
     note_nullifier_nonce: Field,
     note_randomness: Field,
     nk: Field,
+    ask: Field,
     // Private inputs for output notes (simplified for stage 0)
     // In production, each output would have full note fields
     out0_value: u64,
@@ -151,6 +144,7 @@ fn main(
             note_randomness,
         },
         nk,
+        ask,
         out_values: [out0_value, out1_value, out2_value],
     };
 
@@ -172,7 +166,12 @@ fn main(
     //
     // - "The nullifier is derived correctly from the owner's key material"
     prove_nullifier_derivation(public.nullifier, private.nk, private.note.nullifier_nonce);
-    check_ownership_authorization();
+    prove_spend_authorization(
+        private.ask,
+        private.nk,
+        private.note.recipient,
+        private.note.diversifier_index,
+    );
     //
     // - "Outputs are well-formed and balance is conserved"
     prove_output_commitments_well_formed(

@@ -236,24 +236,16 @@ pub fn mock_proof_for_public_inputs(public_inputs: &ProofPublicInputs) -> ProofB
     ProofBytes::new(field_to_bytes(&mock_public_inputs_hash(public_inputs)).to_vec())
 }
 
-/// Explicit "amount is a u64" range assertion.
-///
-/// In the host-language reference implementation, amounts are already `u64`, so this check is
-/// semantically a no-op. We keep it **explicit** here so the mock semantics match what the
-/// real circuit must enforce (i.e., range-checks must be constraints, not assumptions).
-fn mock_assert_amount_is_u64(amount: u64) -> Result<(), ProofSystemError> {
-    let max: u128 = 1u128 << 64;
-    if (amount as u128) >= max {
-        return Err(ProofSystemError::VerificationFailed);
-    }
-    Ok(())
-}
-
 /// Spend authorization (ownership) check for v0 reference semantics.
 ///
-/// Enforces: the prover knows the **SpendingKey** corresponding to the spent note’s recipient.
+/// Enforces: the prover knows the **SpendingKey** corresponding to the spent note's recipient.
+///
 /// This prevents a watch-only FullViewingKey from spending, even if it can decrypt notes and
 /// compute nullifiers.
+///
+/// Checks:
+/// 1. `fvk(spending_key).nk_field() == private.nk`
+/// 2. `fvk(spending_key).diversified_address(note_diversifier_index).to_field() == private.note_recipient`
 fn mock_check_spend_authorization(private: &SpendPrivateInputs) -> Result<(), ProofSystemError> {
     let sk = crate::keys::SpendingKey::from_field(private.spending_key);
     let fvk = sk.to_full_viewing_key();
@@ -281,8 +273,8 @@ fn mock_check_transfer(
     use crate::note::Note;
     use crate::nullifier::compute_nullifier;
 
-    // Explicit range-check statement (no-op in Rust, but must exist in circuits).
-    mock_assert_amount_is_u64(private.note_amount)?;
+    // Note: Amount range checks are enforced by Noir's u64 type system in the real circuits.
+    // In Rust, amounts are already `u64`, so no explicit check is needed here.
 
     // Derive input commitment from private note fields (not a public input).
     let in_note = Note::with_values(
@@ -337,7 +329,7 @@ fn mock_check_transfer(
         .zip(public.output_commitments.iter())
         .enumerate()
     {
-        mock_assert_amount_is_u64(note.amount)?;
+        // Note: Amount range checks are enforced by Noir's u64 type system.
         if note.commitment() != *cm {
             return Err(ProofSystemError::VerificationFailed);
         }
@@ -371,8 +363,8 @@ fn mock_check_unshield(
     use crate::note::Note;
     use crate::nullifier::compute_nullifier;
 
-    mock_assert_amount_is_u64(private.note_amount)?;
-    mock_assert_amount_is_u64(public.public_amount)?;
+    // Note: Amount range checks are enforced by Noir's u64 type system in the real circuits.
+    // In Rust, amounts are already `u64`, so no explicit check is needed here.
 
     // Derive input commitment from private note fields (not a public input).
     let in_note = Note::with_values(
@@ -443,8 +435,8 @@ impl SpendProver for MockSpendProver {
             ProofPublicInputs::Shield(pi) => {
                 use crate::note::Note;
 
-                mock_assert_amount_is_u64(private_inputs.note_amount)?;
-                mock_assert_amount_is_u64(pi.public_amount)?;
+                // Note: Amount range checks are enforced by Noir's u64 type system.
+                // In Rust, amounts are already `u64`, so no explicit check is needed.
 
                 // "I know the note plaintext that hashes to the commitment"
                 let note = Note::with_values(

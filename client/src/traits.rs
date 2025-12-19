@@ -243,13 +243,15 @@ pub enum ProofPublicInputs {
 /// Private inputs for spend proof
 #[derive(Debug, Clone)]
 pub struct SpendPrivateInputs {
-    /// Spending key secret (root) as a field element.
+    /// Spending key (root secret) as a field element.
     ///
-    /// This is required for **spend authorization** in the reference semantics:
-    /// a watch-only FullViewingKey must not be able to satisfy spend constraints.
+    /// This is the **SpendingKey-only** secret required for spend authorization in the
+    /// reference semantics: a watch-only FullViewingKey must not be able to satisfy spend
+    /// constraints.
     ///
-    /// In production, equivalent secret material must be provided to the prover and proven
-    /// inside the circuit (ZK-native ownership).
+    /// The mock prover derives `fvk(spending_key)` and checks:
+    /// - `fvk.nk_field() == private.nk`
+    /// - `fvk.diversified_address(note_diversifier_index).to_field() == private.note_recipient`
     pub spending_key: Fr,
 
     /// Note fields
@@ -260,7 +262,10 @@ pub struct SpendPrivateInputs {
     pub note_nullifier_nonce: Fr,
     pub note_randomness: Fr,
 
-    /// Nullifier key (from spending key)
+    /// Nullifier key (Sapling: `nk.x` as a field element).
+    ///
+    /// This is view-only material (present in FullViewingKey), and is used for nullifier
+    /// derivation + incoming-viewing-key derivation (ivk).
     pub nk: Fr,
 
     /// Membership witness

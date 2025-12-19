@@ -216,8 +216,9 @@ This section does **not** apply to the commitment tree membership model describe
   - `cm == H(DOM_NOTE_COMMIT, asset_id, amount, recipient, nullifier_nonce, note_randomness)`.
 - **(S3) Asset binding (circuit + chain)**:
   - `asset_id` corresponds to `token_address` used in the transparent transfer.
-- **(S4) Amount range (circuit)**:
+- **(S4) Amount range (circuit, via type system)**:
   - `amount < 2^64`.
+  - In Noir circuits, this is enforced automatically by using `u64` types for all amount parameters.
 
 #### Responsibility split (Shield)
 
@@ -372,8 +373,8 @@ If something is “NOT IMPLEMENTED”, it is a required protocol check that the 
   - `client/src/mock.rs`: `MockChain::shield()` computes `public_asset_id = compute_asset_id(token_address)` for the proof public inputs.
   - `client/src/proofs.rs`: `MockSpendProver` checks `pi.public_asset_id == private_inputs.note_asset_id`.
 - **(S4) Amount range**:
-  - `client/src/proofs.rs`: `mock_assert_amount_is_u64()` is called by `MockSpendProver` for Shield/Transfer/Unshield checks.
-    - This is a documented no-op in Rust (amounts are already `u64`), but preserves the fact that **real circuits must enforce range checks** as constraints.
+  - Enforced by Noir's `u64` type system in real circuits: all amount parameters (`public_amount`, `note_amount`, output values) are typed as `u64`, which automatically generates range constraints.
+  - In Rust mocks, amounts are already `u64`, so no explicit check is needed.
 
 #### Transfer (T1–T9)
 

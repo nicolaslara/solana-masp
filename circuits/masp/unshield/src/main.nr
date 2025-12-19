@@ -9,17 +9,8 @@
 
 use dep::masp_common::{
     prove_merkle_membership, prove_note_preimage_hashes_to_commitment,
-    prove_nullifier_derivation, prove_tx_binding,
+    prove_nullifier_derivation, prove_spend_authorization, prove_tx_binding,
 };
-
-// -----------------------------------------------------------------------------
-// Statement check functions (Stage-0 placeholders)
-// -----------------------------------------------------------------------------
-
-/// Statement: "The spender is authorized to spend this note."
-fn prove_ownership_authorization() {
-    assert(true);
-}
 
 /// 3.5 Public output binding (Stage-0 partial)
 ///
@@ -60,6 +51,7 @@ struct UnshieldPublic {
 struct UnshieldPrivate {
     note: Note,
     nk: Field,
+    ask: Field,
 }
 
 fn main(
@@ -83,6 +75,7 @@ fn main(
     note_nullifier_nonce: Field,
     note_randomness: Field,
     nk: Field,
+    ask: Field,
 ) {
     let public = UnshieldPublic {
         anchor,
@@ -102,6 +95,7 @@ fn main(
             note_randomness,
         },
         nk,
+        ask,
     };
 
     // Protocol narrative (Stage-0 scaffolding):
@@ -122,7 +116,12 @@ fn main(
     //
     // - "The nullifier is derived correctly from the owner's key material"
     prove_nullifier_derivation(public.nullifier, private.nk, private.note.nullifier_nonce);
-    prove_ownership_authorization();
+    prove_spend_authorization(
+        private.ask,
+        private.nk,
+        private.note.recipient,
+        private.note.diversifier_index,
+    );
     //
     // - "This proof is bound to the intended unshield intent"
     prove_tx_binding(public.tx_binding);

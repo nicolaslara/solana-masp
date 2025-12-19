@@ -7,7 +7,7 @@
 //
 // Security requirements: see `docs/circuit-security-requirements.md`.
 
-use dep::masp_common::{prove_amount_range, prove_asset_id_binding};
+use dep::masp_common::prove_asset_id_binding;
 
 // -----------------------------------------------------------------------------
 // Statement check functions (Stage-0 placeholders)
@@ -35,7 +35,7 @@ fn prove_new_commitment_is_note_preimage_hash(
         + note_randomness;
 }
 
-/// 1.2 Amount range check: implemented in `masp_common` (placeholder).
+/// 1.2 Amount range check: enforced by Noir's u64 type system (public_amount: pub u64).
 /// 1.3 Asset binding: implemented in `masp_common` (placeholder).
 
 // -----------------------------------------------------------------------------
@@ -71,8 +71,7 @@ fn main(
 
     // Protocol narrative (Stage-0 scaffolding):
     //
-    // - "Amounts are range-checked (u64)"
-    prove_amount_range(public.amount);
+    // - "Amounts are range-checked (u64)" - enforced by Noir's type system (public_amount: pub u64)
     //
     // - "Asset id is correctly bound to the transparent token boundary"
     prove_asset_id_binding(public.asset_id);

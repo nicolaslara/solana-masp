@@ -432,6 +432,7 @@ note_diversifier_index = "{note_diversifier_index}"
 note_nullifier_nonce = "{note_nullifier_nonce}"
 note_randomness = "{note_randomness}"
 nk = "{nk}"
+ask = "{ask}"
 
 out0_value = "{out0_value}"
 out1_value = "{out1_value}"
@@ -453,6 +454,8 @@ out2_value = "{out2_value}"
             note_nullifier_nonce = fr_to_dec(private.note_nullifier_nonce),
             note_randomness = fr_to_dec(private.note_randomness),
             nk = fr_to_dec(private.nk),
+            // Derive ask from spending_key for the Noir circuit
+            ask = fr_to_dec(crate::keys::SpendingKey::from_field(private.spending_key).ask()),
             out0_value = out0_value,
             out1_value = out1_value,
             out2_value = out2_value,
@@ -515,6 +518,7 @@ note_diversifier_index = "{note_diversifier_index}"
 note_nullifier_nonce = "{note_nullifier_nonce}"
 note_randomness = "{note_randomness}"
 nk = "{nk}"
+ask = "{ask}"
 "#,
             anchor = fr_to_dec(public.anchor),
             input_commitment = fr_to_dec(input_commitment),
@@ -532,6 +536,8 @@ nk = "{nk}"
             note_nullifier_nonce = fr_to_dec(private.note_nullifier_nonce),
             note_randomness = fr_to_dec(private.note_randomness),
             nk = fr_to_dec(private.nk),
+            // Derive ask from spending_key for the Noir circuit
+            ask = fr_to_dec(crate::keys::SpendingKey::from_field(private.spending_key).ask()),
         ))
     }
 
