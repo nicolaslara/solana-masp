@@ -335,8 +335,11 @@ pub struct UnshieldPublicInputs {
     /// Amount being withdrawn (public)
     pub public_amount: u64,
 
-    /// Transparent recipient address (public, encoded as a field element)
-    pub public_recipient: Fr,
+    /// Transparent recipient address (public), encoded as 4×u64 limbs (little-endian).
+    ///
+    /// This is injective (no collisions) and avoids the unsafe many-to-one mapping of
+    /// `pubkey_bytes -> Fr mod p`.
+    pub public_recipient_limbs: [u64; 4],
 
     /// Asset id (public)
     pub public_asset_id: Fr,

@@ -587,14 +587,15 @@ impl Chain for MockChain {
         // Responsibility split (production-shape):
         // - Circuit proves membership/preimage/nullifier/ownership and binds public withdrawal fields.
         // - Chain enforces: anchor validity + nullifier uniqueness + proof verification + token transfer.
-        use ark_ff::PrimeField;
+        let public_recipient_limbs =
+            crate::tx_binding::recipient_to_u64_limbs_le(&request.recipient);
         let public_inputs = UnshieldPublicInputs {
             anchor: request.anchor,
             nullifier: request.nullifier,
             tx_binding: request.tx_binding,
             public_amount: request.amount,
             // Stage-0 encoding: interpret 32-byte recipient as a field element mod p.
-            public_recipient: Fr::from_be_bytes_mod_order(&request.recipient),
+            public_recipient_limbs,
             public_asset_id: crate::note::compute_asset_id(&request.token_address),
         };
         let proof = ProofBytes::new(request.spend_proof.clone());

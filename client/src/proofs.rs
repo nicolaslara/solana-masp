@@ -228,7 +228,10 @@ fn mock_public_inputs_hash(public_inputs: &ProofPublicInputs) -> Fr {
             pi.nullifier,
             pi.tx_binding,
             Fr::from(pi.public_amount),
-            pi.public_recipient,
+            Fr::from(pi.public_recipient_limbs[0]),
+            Fr::from(pi.public_recipient_limbs[1]),
+            Fr::from(pi.public_recipient_limbs[2]),
+            Fr::from(pi.public_recipient_limbs[3]),
             pi.public_asset_id,
         ]),
     }
@@ -463,7 +466,7 @@ fn mock_check_unshield(
         input_commitment,
         public.nullifier,
         public.public_amount,
-        public.public_recipient,
+        public.public_recipient_limbs,
         public.public_asset_id,
     );
     if public.tx_binding != expected_tx_binding {
@@ -822,11 +825,11 @@ mod tests {
                 cm,
                 nf,
                 50,
-                Fr::from(999u64),
+                [999u64, 0u64, 0u64, 0u64],
                 Fr::from(2u64), // different public asset
             ),
             public_amount: 50,
-            public_recipient: Fr::from(999u64),
+            public_recipient_limbs: [999u64, 0u64, 0u64, 0u64],
             public_asset_id: Fr::from(2u64), // different from note.asset_id
         };
 

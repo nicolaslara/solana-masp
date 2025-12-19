@@ -169,13 +169,24 @@ impl NoirRsUltraPlonkVerifier {
         let vk_onchain = self.get_vk_onchain(&self.vk_bb_path("unshield"))?;
 
         // Order must match unshield circuit:
-        // anchor, nullifier, tx_binding, public_amount, public_recipient, public_asset_id
+        // anchor, nullifier, tx_binding, public_amount, public_recipient_limbs[4], public_asset_id
         let pis: Vec<[u8; 32]> = vec![
             fr_to_be32(public_inputs.anchor),
             fr_to_be32(public_inputs.nullifier),
             fr_to_be32(public_inputs.tx_binding),
             fr_to_be32(crate::types::Fr::from(public_inputs.public_amount)),
-            fr_to_be32(public_inputs.public_recipient),
+            fr_to_be32(crate::types::Fr::from(
+                public_inputs.public_recipient_limbs[0],
+            )),
+            fr_to_be32(crate::types::Fr::from(
+                public_inputs.public_recipient_limbs[1],
+            )),
+            fr_to_be32(crate::types::Fr::from(
+                public_inputs.public_recipient_limbs[2],
+            )),
+            fr_to_be32(crate::types::Fr::from(
+                public_inputs.public_recipient_limbs[3],
+            )),
             fr_to_be32(public_inputs.public_asset_id),
         ];
 

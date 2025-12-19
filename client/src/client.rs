@@ -520,7 +520,7 @@ where
         }
 
         // 4. Prove unshield (real ZK when prover backend supports it)
-        use ark_ff::PrimeField;
+        let public_recipient_limbs = crate::tx_binding::recipient_to_u64_limbs_le(&recipient);
         let public = crate::traits::UnshieldPublicInputs {
             anchor: witness.root(),
             nullifier,
@@ -529,13 +529,11 @@ where
                 spend_commitment,
                 nullifier,
                 amount,
-                Fr::from_be_bytes_mod_order(&recipient),
+                public_recipient_limbs,
                 asset_id,
             ),
             public_amount: amount,
-            // Stage-0: interpret the 32-byte recipient as a field element mod p.
-            // In production this must match the circuit/program recipient encoding decision.
-            public_recipient: Fr::from_be_bytes_mod_order(&recipient),
+            public_recipient_limbs,
             public_asset_id: asset_id,
         };
         let private =
@@ -564,7 +562,7 @@ where
             spend_commitment,
             nullifier,
             amount,
-            Fr::from_be_bytes_mod_order(&recipient),
+            public_recipient_limbs,
             asset_id,
         );
         let request = UnshieldRequest {

@@ -347,7 +347,14 @@ The proof MUST bind to the exact ordering of nullifiers and commitments. Reorder
 - **(U1) Public withdrawal amount/asset binding (MASP circuit)**:
   - the public `(asset_id, amount)` matches the spent note’s plaintext fields.
 - **(U2) Public recipient binding (MASP circuit)**:
-  - the public `recipient` is bound to the proof intent via the public `tx_binding`, so it cannot be swapped/malleated by an intermediary.
+  - the public `recipient` is bound to the proof intent via the public `tx_binding` and/or explicit public inputs, so it cannot be swapped/malleated by an intermediary.
+  - ⚠️ **Recipient encoding rule:**
+    - It is **NOT SAFE** to encode a 32-byte recipient (e.g., Solana pubkey) as a single `Field` using `Fr::from_be_bytes_mod_order`.
+    - Reason: BN254 scalar field has prime modulus \(p < 2^{254}\), so reduction mod \(p\) is a **many-to-one** mapping from 256-bit strings → field elements; distinct recipients can collide.
+    - This creates a malleability/collision class: the proof can be valid for multiple distinct 32-byte recipients that map to the same `Field`.
+    - **Instead**, represent the recipient as **4×u64 limbs** (little-endian) as public inputs:
+      - `public_recipient_limbs: [u64; 4]`
+    - The chain/program MUST recompute these limbs from the actual 32-byte recipient in the instruction data and reject if they do not match.
 - **(U3) Transparent withdrawal (chain)**:
   - the chain executes the actual token transfer to the public recipient.
 

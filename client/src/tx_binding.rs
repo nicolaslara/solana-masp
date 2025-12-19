@@ -61,13 +61,13 @@ pub fn tx_binding_transfer(
 /// Compute the transaction binding hash for an **Unshield** spend proof.
 ///
 /// Layout:
-/// `H(DOM_TX_BINDING, 3, anchor, input_commitment, nullifier, public_amount, public_recipient, public_asset_id)`
+/// `H(DOM_TX_BINDING, 3, anchor, input_commitment, nullifier, public_amount, public_recipient_limbs[4], public_asset_id)`
 pub fn tx_binding_unshield(
     anchor: Fr,
     input_commitment: Commitment,
     nullifier: Nullifier,
     public_amount: u64,
-    public_recipient: Fr,
+    public_recipient_limbs: [u64; 4],
     public_asset_id: Fr,
 ) -> Fr {
     // Unshield binding remains Poseidon (legacy) for now; it isn't wired to Noir yet.
@@ -79,9 +79,34 @@ pub fn tx_binding_unshield(
         input_commitment,
         nullifier,
         Fr::from(public_amount),
-        public_recipient,
+        Fr::from(public_recipient_limbs[0]),
+        Fr::from(public_recipient_limbs[1]),
+        Fr::from(public_recipient_limbs[2]),
+        Fr::from(public_recipient_limbs[3]),
         public_asset_id,
     ])
+}
+
+/// Convert a 32-byte recipient (e.g. Solana pubkey) to 4×u64 limbs (little-endian).
+///
+/// This encoding is injective and avoids the many-to-one `bytes -> Field mod p` issue.
+pub fn recipient_to_u64_limbs_le(recipient: &[u8; 32]) -> [u64; 4] {
+    let mut out = [0u64; 4];
+    for i in 0..4 {
+        let start = i * 8;
+        out[i] = u64::from_le_bytes(recipient[start..start + 8].try_into().expect("len 8"));
+    }
+    out
+}
+
+/// Convert 4×u64 limbs (little-endian) back into the original 32-byte recipient.
+pub fn recipient_from_u64_limbs_le(limbs: &[u64; 4]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for i in 0..4 {
+        let start = i * 8;
+        out[start..start + 8].copy_from_slice(&limbs[i].to_le_bytes());
+    }
+    out
 }
 
 /// Derive the output nullifier nonce for an N→M transfer.

@@ -46,7 +46,7 @@ struct UnshieldPublic {
     nullifier: Field,
     tx_binding: Field,
     public_amount: u64,
-    public_recipient: Field,
+    public_recipient_limbs: [u64; 4],
     public_asset_id: Field,
 }
 
@@ -62,7 +62,7 @@ fn main(
     nullifier: pub Field,
     tx_binding: pub Field,
     public_amount: pub u64,
-    public_recipient: pub Field,
+    public_recipient_limbs: pub [u64; 4],
     public_asset_id: pub Field,
     // Private-only (wallet-local): spent commitment (not a public input)
     input_commitment: Field,
@@ -84,7 +84,7 @@ fn main(
         nullifier,
         tx_binding,
         public_amount,
-        public_recipient,
+        public_recipient_limbs,
         public_asset_id,
     };
     let private = UnshieldPrivate {
@@ -137,5 +137,9 @@ fn main(
     );
 
     // Touch remaining public input (recipient encoding decision is deferred).
-    assert(public.public_recipient == public.public_recipient);
+    // Statement: "The public recipient bytes (limb encoding) are bound as public inputs."
+    assert(public.public_recipient_limbs[0] == public.public_recipient_limbs[0]);
+    assert(public.public_recipient_limbs[1] == public.public_recipient_limbs[1]);
+    assert(public.public_recipient_limbs[2] == public.public_recipient_limbs[2]);
+    assert(public.public_recipient_limbs[3] == public.public_recipient_limbs[3]);
 }
