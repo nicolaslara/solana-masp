@@ -372,6 +372,7 @@ If ciphertexts are posted out-of-band via Tx A, then Tx B MUST also bind to the 
 
     where `h_nf = H(nullifiers[0..MAX_INPUTS])`.
   - Output commitments are already explicit public inputs and are therefore already bound by proof verification; we intentionally do not include them in `tx_binding` so output nonces can be derived from `tx_binding` without circular dependency.
+  - ⚠️ **Known gap:** lacks context binding (`protocol_version`, `chain_id`, `program_id`); see [Context binding](#context-binding-cross-environment-replay) section.
 - **(T2c) Output ciphertext hash binding (proof-level binding; outputs-only)**:
   - For each **enabled** output `j`, Tx B MUST bind to `ct_hash[j] = H(DOM_CIPHERTEXT, ciphertext_bytes[j])` (either as an
     explicit public input or by inclusion in `tx_binding` that the circuit checks).
@@ -532,6 +533,37 @@ This table summarizes which layer is responsible for each class of check in the 
 | Token transfers at boundary | Chain (SPL programs) | required for shield/unshield soundness |
 | Ciphertext↔commitment acceptance | Wallet | wallet must not accept malformed notes |
 
+## Context binding (cross-environment replay)
+
+The current `tx_binding` does **not** include environment/deployment context. A proof generated for one deployment could theoretically be replayed on another deployment sharing the same verification key and anchor state.
+
+This is acceptable for the reference implementation but should be addressed for production.
+
+**Recommended additions for production `tx_binding`:**
+
+```text
+tx_binding = H(DOM_TX_BINDING,
+               protocol_version,      // e.g., 1
+               chain_id,              // Solana cluster identifier (mainnet/devnet/localnet)
+               program_id,            // or verifying_key_id
+               anchor_root,
+               input_count,
+               output_count,
+               h_nf)
+```
+
+| Field | Purpose |
+|-------|---------|
+| `protocol_version` | Prevents replay across protocol upgrades that change semantics |
+| `chain_id` | Prevents replay across Solana clusters (mainnet vs devnet vs localnet) |
+| `program_id` / `verifying_key_id` | Prevents replay across different program deployments or VK rotations |
+
+Without these, the same "intent" hash can be reused across environments in surprising ways—especially problematic during testing, devnet experimentation, local forks, and future program redeploys.
+
+**Current status:** NOT IMPLEMENTED in reference implementation.
+
+---
+
 ## Implementation status (reference implementation)
 
 This section tracks deviations between the current code and the normative protocol above.
@@ -540,6 +572,7 @@ This section tracks deviations between the current code and the normative protoc
 - **Nullifier set**: reference implementation uses an in-memory set; production target may use Light (address tree insert-once) or another bounded on-chain structure.
 - **Spend authorization**: enforced by the reference prover semantics; real circuits must implement equivalent constraints.
 - **Transaction binding hash**: enforced by the reference prover semantics with a concrete layout; may be extended to include ciphertext hashes / additional intent fields.
+- **Context binding**: NOT IMPLEMENTED. See [Context binding](#context-binding-cross-environment-replay) section.
 
 ### Mock implementation mapping (S1–U3)
 
@@ -573,6 +606,7 @@ If something is “NOT IMPLEMENTED”, it is a required protocol check that the 
   - `client/src/tx_binding.rs`: defines `tx_binding_transfer(...)` (binding for the single transfer type).
   - `client/src/proofs.rs`: `mock_check_transfer()` enforces `public.tx_binding == tx_binding_transfer(...)`.
   - The binding includes a hash of the full padded nullifier array plus counts.
+  - **Known gap:** lacks context binding; see [Context binding](#context-binding-cross-environment-replay).
 - **(T3) Input preimage knowledge**:
   - `client/src/proofs.rs`: `mock_check_transfer()` recomputes each enabled input commitment from note fields.
 - **(T4) Nullifier correctness**:
