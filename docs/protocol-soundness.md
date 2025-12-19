@@ -72,7 +72,7 @@ The protocol is sound if the following are guaranteed:
 - Output commitments created (by hash / commitment)
 - Nullifier(s) revealed
 - Anchor (commitment tree root / root context) used for membership
-- Encrypted output ciphertext payloads (calldata / instruction data)
+- Encrypted **output** ciphertext payloads (see “Ciphertexts: DA and binding” for how these are published)
 - Shield boundary: token mint/address and amount
 - Unshield boundary: token mint/address, amount, and public recipient
 
@@ -87,10 +87,86 @@ The protocol is sound if the following are guaranteed:
 
 ## Ciphertexts: data availability (DA) and binding to proofs
 
-Ciphertexts are required for **outputs only** (note discovery). They are not required for inputs.
+Ciphertexts are required for **outputs only** (note discovery). They are **not** required for inputs.
 
-Solana’s transaction size constraints and the “ciphertext ↔ proof intent binding” design space
-are documented in:
+**Normative rule (privacy):** the protocol must **never** publish or store ciphertexts for inputs/spends.
+Doing so is redundant (spends are already validated by proof + nullifiers) and can create avoidable
+linkability surface (e.g., any stable “input ciphertext reference” risks re-introducing a commitment↔spend trail).
+
+### Why outputs need ciphertexts, and inputs do not
+
+- **Outputs**: wallets discover received notes by scanning ciphertexts and attempting trial decryption; once decrypted,
+  the wallet must verify the plaintext is consistent with the corresponding public commitment.
+- **Inputs**: spends are validated by:
+  - revealed nullifier(s) (spentness/double-spend prevention), and
+  - a proof that binds to the input commitment preimage + membership under an anchor.
+  No input ciphertext is needed for soundness or wallet recovery, and publishing input ciphertexts is actively discouraged.
+
+### Two distinct “match the proof” properties
+
+We distinguish:
+
+1. **Binding (integrity / anti-swap):** the published ciphertext bytes correspond to the output notes proven in the
+   MASP state transition (“Tx B” below).
+2. **Decryptability (recipient success):** the receiver can decrypt and recover the note plaintext needed to spend.
+
+**Important (Zcash-style model):** unless we put key agreement + encryption correctness *inside the circuit*, third parties
+cannot validate decryptability. Ciphertext correctness is not consensus-critical; malformed ciphertext can “burn” funds
+(griefing). Wallets must treat decryptability as a receive-side correctness/UX property, not a consensus guarantee.
+
+### DA + binding under Solana constraints (normative baseline)
+
+Solana programs cannot introspect other transactions’ instruction data at execution time, and the transaction envelope is
+tight. Therefore the baseline protocol uses a **two-step publish + state transition** design:
+
+- **Tx A (ciphertext posting tx(s))**: publish ciphertext bytes for outputs (possibly chunked across multiple txs).
+  - This provides **ledger-history DA** (archive-retrievable bytes) without permanent state growth.
+- **Tx B (MASP state transition tx)**: includes proof + nullifiers + commitments and binds to the ciphertext bytes via hashes.
+
+This is the **baseline** because it works under current Solana limits and avoids permanent ciphertext accounts.
+
+### Binding construction: Option 1A (weak binding, recommended baseline)
+
+For each output `j`, Tx B includes (directly as public inputs, or indirectly inside `tx_binding`) a ciphertext hash:
+
+```text
+ct_hash[j] = H(DOM_CIPHERTEXT, ciphertext_bytes[j])
+```
+
+**What is enforced by the proof vs the wallet (1A):**
+
+- **Proof / circuit / verification MUST enforce binding:** the proof verification for Tx B MUST bind to the exact
+  `ct_hash[j]` values for the enabled output slots (either because `ct_hash` are explicit public inputs, or because they
+  are included in a `tx_binding` value that the circuit recomputes).
+- **Wallet MUST enforce decryptability + acceptance rules:** the wallet computes `H(DOM_CIPHERTEXT, ciphertext_bytes)` over
+  the fetched bytes and checks it equals the bound `ct_hash`, then attempts decryption and validates plaintext↔commitment.
+  Decryptability is **not** consensus-critical in 1A.
+
+Wallet/indexer verification rule:
+
+1. Fetch ciphertext bytes `C[j]` from Tx A (or redundancy backends).
+2. Compute `ct_hash[j] = H(DOM_CIPHERTEXT, C[j])`.
+3. Verify `ct_hash[j]` matches what Tx B bound to for output `j`.
+4. Attempt decryption (receiver-only); on success, verify plaintext↔commitment consistency (`H(note_plaintext)==cm[j]`).
+
+Failure handling:
+
+- If `ct_hash` matches but decryption fails: treat as sender griefing/burn (ciphertext not consensus-critical).
+- If ciphertext bytes are missing: treat as DA failure; try redundancy; otherwise the output is not discoverable.
+
+### Operational accelerators
+
+- **Bundling** (e.g., Jito bundles) can make “Tx A(s) + Tx B” land atomically in practice on some leaders, improving UX.
+  This is not a consensus primitive; the protocol must remain correct without it.
+- **Off-chain redundancy** (mirrors/IPFS/etc.) can improve availability, but must be “best-effort” and never the only DA story.
+
+### Future hardening: Option 1B “verifiable encryption”
+
+A future hardening milestone may move from “weak binding” to “decryptability binding” by having the circuit enforce that
+`ct_hash` is derived from correct encryption of the output plaintext to the receiver key. This is optional and gated by
+measured circuit cost and cryptographic review.
+
+Design space and detailed discussion:
 
 - `docs/design-decisions/ciphertext-da-and-binding.md`
 
@@ -230,6 +306,11 @@ This section does **not** apply to the commitment tree membership model describe
 - **(S4) Amount range (circuit, via type system)**:
   - `amount < 2^64`.
   - In Noir circuits, this is enforced automatically by using `u64` types for all amount parameters.
+- **(S5) Output ciphertext hash binding (proof-level binding; outputs-only)**:
+  - If the protocol uses Tx A/Tx B posting (Option 1A), the shield state-transition transaction MUST bind to the output
+    ciphertext bytes via `ct_hash = H(DOM_CIPHERTEXT, ciphertext_bytes)` (as an explicit public input or via an intent hash
+    the circuit checks).
+  - The circuit does **not** prove decryptability in 1A; it only binds the intended ciphertext hash value(s).
 
 #### Responsibility split (Shield)
 
@@ -261,6 +342,14 @@ The circuit accepts **exactly** `MAX_INPUTS` input slots and `MAX_OUTPUTS` outpu
 
 The proof MUST bind to the exact ordering of nullifiers and commitments. Reordering MUST invalidate the proof.
 
+**Ciphertext hashes (outputs-only, Option 1A baseline):**
+
+If ciphertexts are posted out-of-band via Tx A, then Tx B MUST also bind to the per-output ciphertext hash values
+`ct_hashes[MAX_OUTPUTS]` for enabled output slots. This can be done by:
+
+- adding `ct_hashes` as explicit public inputs (verification binds them “for free”), or
+- including `ct_hashes` inside `tx_binding` and having the circuit recompute `tx_binding` accordingly.
+
 **Output semantics (recommended wallet layout):**
 
 - Output 0: **payment** to recipient
@@ -283,6 +372,12 @@ The proof MUST bind to the exact ordering of nullifiers and commitments. Reorder
 
     where `h_nf = H(nullifiers[0..MAX_INPUTS])`.
   - Output commitments are already explicit public inputs and are therefore already bound by proof verification; we intentionally do not include them in `tx_binding` so output nonces can be derived from `tx_binding` without circular dependency.
+- **(T2c) Output ciphertext hash binding (proof-level binding; outputs-only)**:
+  - For each **enabled** output `j`, Tx B MUST bind to `ct_hash[j] = H(DOM_CIPHERTEXT, ciphertext_bytes[j])` (either as an
+    explicit public input or by inclusion in `tx_binding` that the circuit checks).
+  - For **disabled** outputs, the corresponding `ct_hash[j]` MUST be zero (or another fixed padding rule), to avoid
+    “hidden” ciphertexts in unused slots.
+  - This is an **integrity/anti-swap** binding. Decryptability is not proven in 1A.
 - **(T3) Input preimage knowledge (MASP circuit)**:
   - For each **enabled** input `i`: `input_commitment_i == H(note_fields_i...)`.
 - **(T4) Nullifier correctness (MASP circuit)**:
@@ -400,6 +495,7 @@ These are not “consensus soundness”, but are required for safety and UX:
 - **Ciphertext AEAD integrity**: tampered ciphertext must fail to decrypt.
 - **Recipient match**: decrypted note must correspond to one of the wallet’s addresses.
 - **Diversifier consistency**: encrypted outputs include a public `diversifier_index`, and wallets must enforce it matches the decrypted note plaintext.
+- **Ciphertext hash binding (outputs-only)**: when the protocol publishes `ct_hash` for an output, wallets MUST verify `ct_hash == H(DOM_CIPHERTEXT, ciphertext_bytes)` before attempting to accept the output.
 - **Commitment binding**: `H(note_plaintext) == output_commitment` before accepting a note.
 - **Spentness filtering**: do not treat notes as spendable if their nullifier is already present.
 
