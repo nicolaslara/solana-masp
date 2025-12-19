@@ -125,6 +125,25 @@ impl Indexer for LightIndexer {
         // Scaffold: delegate to mock
         self.inner.get_commitments_for_tx(tx_sig).await
     }
+
+    async fn get_ciphertext_by_hash(
+        &self,
+        ct_hash: &crate::types::CiphertextHash,
+    ) -> Result<Option<(String, u32, Vec<u8>, [u8; 64])>, IndexerError> {
+        // Scaffold: delegate to mock
+        self.inner.get_ciphertext_by_hash(ct_hash).await
+    }
+
+    async fn get_ciphertext_for_output(
+        &self,
+        tx_sig: &str,
+        output_index: u32,
+    ) -> Result<Option<(Vec<u8>, [u8; 64], crate::types::CiphertextHash)>, IndexerError> {
+        // Scaffold: delegate to mock
+        self.inner
+            .get_ciphertext_for_output(tx_sig, output_index)
+            .await
+    }
 }
 
 /// Light Protocol specific features (future)

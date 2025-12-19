@@ -22,8 +22,9 @@ use crate::note::{compute_asset_id, Note};
 use crate::nullifier::compute_nullifier;
 use crate::proofs::MembershipWitness;
 use crate::traits::{
-    Chain, ChainError, Indexer, IndexerError, OutputCiphertext, ProofBytes, ShieldRequest,
-    ShieldResult, StoreError, TransferRequest, TransferResult, UnshieldResult,
+    Chain, ChainError, Indexer, IndexerError, OutputCiphertext, ProofBytes, ShieldPublicInputs,
+    ShieldRequest, ShieldResult, StoreError, TransferPublicInputs, TransferRequest, TransferResult,
+    UnshieldResult,
 };
 use crate::types::{Anchor, Commitment, Fr, Nullifier, TokenAddress};
 use ark_ff::UniformRand;
@@ -249,6 +250,8 @@ where
             new_commitment: commitment,
             public_asset_id: asset_id,
             public_amount: amount,
+            // TODO: compute real ct_hash from ciphertext bytes (Phase 13)
+            ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
         };
         let private =
             crate::traits::ProofPrivateInputs::Shield(crate::traits::ShieldPrivateInputs {
@@ -275,6 +278,8 @@ where
                 // Ciphertext should be added by caller if needed for scanning
                 ciphertext: None,
                 ephemeral_key: None,
+                // TODO: compute real ct_hash from ciphertext bytes (Phase 13)
+                ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
             },
         )
     }
@@ -370,7 +375,7 @@ where
 
     /// Shield tokens into the pool
     ///
-    /// Complete flow: create note → encrypt → submit to chain → update local state
+    /// Complete flow: create note → encrypt → compute ct_hash → prove → submit → update state
     ///
     /// # Arguments
     /// * `encryption` - Encryption scheme (use `ChaChaPolyEncryption::new()`)
@@ -385,19 +390,65 @@ where
         token_address: &TokenAddress,
         amount: u64,
     ) -> Result<(Note, ShieldResult), ClientError> {
-        // 1. Create note
-        let (note, mut request) = self.build_shield(token_address, amount);
+        // 1. Create note (but don't build proof yet - need ct_hash first)
+        let asset_id = compute_asset_id(token_address);
+        let recipient_addr = self.fvk.diversified_address(0);
+        let recipient = recipient_addr.to_field();
+
+        let note = Note::new(
+            &mut OsRng,
+            asset_id,
+            amount,
+            recipient,
+            recipient_addr.diversifier_index,
+        );
 
         // 2. Encrypt for self-scanning
-        let addr = self.fvk.diversified_address(0);
-        let encrypted = encryption.encrypt(&mut OsRng, &note, &addr);
-        request.ciphertext = Some(encrypted.to_bytes());
-        request.ephemeral_key = Some(encrypted.ephemeral_key);
+        let encrypted = encryption.encrypt(&mut OsRng, &note, &recipient_addr);
+        let ciphertext_bytes = encrypted.to_bytes();
 
-        // 3. Submit to chain
+        // 3. Compute ct_hash from ciphertext bytes (ephemeral_key || ciphertext)
+        let ct_blob = [&encrypted.ephemeral_key[..], &ciphertext_bytes[..]].concat();
+        let ct_hash = crate::hash::ciphertext_hash(&ct_blob);
+
+        // 4. Build shield proof with real ct_hash
+        let commitment = note.commitment();
+        let public = crate::traits::ShieldPublicInputs {
+            new_commitment: commitment,
+            public_asset_id: asset_id,
+            public_amount: amount,
+            ct_hash,
+        };
+        let private =
+            crate::traits::ProofPrivateInputs::Shield(crate::traits::ShieldPrivateInputs {
+                note_asset_id: note.asset_id,
+                note_amount: note.amount,
+                note_recipient: note.recipient,
+                note_diversifier_index: note.diversifier_index,
+                note_nullifier_nonce: note.nullifier_nonce,
+                note_randomness: note.note_randomness,
+            });
+        let shield_proof = self
+            .prover
+            .prove(&crate::traits::ProofPublicInputs::Shield(public), &private)
+            .expect("shield prover should succeed")
+            .into_bytes();
+
+        // 5. Build request
+        let request = ShieldRequest {
+            token_address: *token_address,
+            amount,
+            commitment,
+            shield_proof,
+            ciphertext: Some(ciphertext_bytes),
+            ephemeral_key: Some(encrypted.ephemeral_key),
+            ct_hash,
+        };
+
+        // 6. Submit to chain
         let result = self.chain.shield(request).await?;
 
-        // 4. Update local state
+        // 7. Update local state
         self.add_note(note.clone(), result.tx_sig.clone());
 
         Ok((note, result))
@@ -405,7 +456,7 @@ where
 
     /// Transfer to another user
     ///
-    /// Complete flow: build transfer → encrypt for recipient → submit → update state
+    /// Complete flow: build transfer → encrypt → compute ct_hashes → prove → submit → update state
     ///
     /// # Arguments
     /// * `encryption` - Encryption scheme
@@ -421,6 +472,8 @@ where
         amount: u64,
         asset_id: Fr,
     ) -> Result<TransferResult, ClientError> {
+        use crate::traits::TransferOutput;
+
         // 1. Find a note to spend
         let notes = self.unspent_notes(asset_id);
         let spend_note = notes.iter().find(|n| n.note.amount >= amount).ok_or(
@@ -431,44 +484,60 @@ where
         )?;
         let spend_commitment = spend_note.commitment;
 
-        // 2. Build transfer
+        // 2. Build transfer (creates notes with placeholder ct_hashes)
         let transfer_data = self
             .build_transfer(spend_commitment, recipient.clone(), amount)
             .await?;
 
-        // 3. Encrypt outputs for recipients
-        use crate::traits::TransferOutput;
-
+        // 3. Encrypt outputs and compute real ct_hashes
         let output_encrypted = encryption.encrypt(&mut OsRng, &transfer_data.output, recipient);
+        let output_ct_bytes = output_encrypted.to_bytes();
+        let output_ct_blob = [&output_encrypted.ephemeral_key[..], &output_ct_bytes[..]].concat();
+        let output_ct_hash = crate::hash::ciphertext_hash(&output_ct_blob);
+
         let mut outputs = vec![TransferOutput::with_ciphertext(
             transfer_data.output.commitment(),
-            output_encrypted.to_bytes(),
+            output_ct_bytes,
             output_encrypted.ephemeral_key,
         )];
+
+        // Build ct_hashes array (real hashes for enabled outputs)
+        let mut ct_hashes = [Fr::from(0u64); crate::traits::MAX_OUTPUTS];
+        ct_hashes[0] = output_ct_hash;
 
         // Encrypt change for self
         if let Some(ref change_note) = transfer_data.change {
             let self_addr = self.fvk.diversified_address(0);
             let change_encrypted = encryption.encrypt(&mut OsRng, change_note, &self_addr);
+            let change_ct_bytes = change_encrypted.to_bytes();
+            let change_ct_blob =
+                [&change_encrypted.ephemeral_key[..], &change_ct_bytes[..]].concat();
+            let change_ct_hash = crate::hash::ciphertext_hash(&change_ct_blob);
+
             outputs.push(TransferOutput::with_ciphertext(
                 change_note.commitment(),
-                change_encrypted.to_bytes(),
+                change_ct_bytes,
                 change_encrypted.ephemeral_key,
             ));
+            ct_hashes[1] = change_ct_hash;
         }
 
-        // 4. Submit to chain
-        let (public, private) =
-            transfer_data.spend_proof_inputs(self.spending_key.as_field(), self.fvk.nk_field());
+        // 4. Build proof with real ct_hashes
+        let (public, private) = transfer_data.spend_proof_inputs(
+            self.spending_key.as_field(),
+            self.fvk.nk_field(),
+            ct_hashes,
+        );
         let spend_proof = self.prover.prove(
             &crate::traits::ProofPublicInputs::Transfer(public),
             &private,
         )?;
 
+        // 5. Submit to chain
         let request = transfer_data.to_request_with_outputs(spend_proof, outputs);
         let result = self.chain.transfer(request).await?;
 
-        // 5. Update local state
+        // 6. Update local state
         self.mark_spent(spend_commitment);
         if let Some(change_note) = transfer_data.change {
             self.add_note(change_note, result.tx_sig.clone());
@@ -526,7 +595,6 @@ where
             nullifier,
             tx_binding: crate::tx_binding::tx_binding_unshield(
                 witness.root(),
-                spend_commitment,
                 nullifier,
                 amount,
                 public_recipient_limbs,
@@ -559,7 +627,6 @@ where
         // 5. Build unshield request
         let tx_binding = crate::tx_binding::tx_binding_unshield(
             witness.root(),
-            spend_commitment,
             nullifier,
             amount,
             public_recipient_limbs,
@@ -726,6 +793,11 @@ where
     }
 
     /// Try to decrypt an output ciphertext with our ivk
+    ///
+    /// This method performs critical wallet integrity checks:
+    /// 1. Decrypt the ciphertext with ivk
+    /// 2. Verify commitment matches (note plaintext → commitment)
+    /// 3. Verify ct_hash binding (ciphertext → ct_hash from proof)
     fn try_decrypt_output<E: NoteEncryption + ?Sized>(
         &self,
         encryption: &E,
@@ -738,7 +810,7 @@ where
             .try_decrypt(&encrypted, &self.fvk, diversifier_index)
             .ok()?;
 
-        // Critical wallet integrity check: ensure the decrypted plaintext corresponds to the
+        // Critical wallet integrity check #1: ensure the decrypted plaintext corresponds to the
         // commitment that was actually published alongside this ciphertext.
         //
         // Without this, a malicious/buggy indexer (or malformed ledger data) could cause the
@@ -746,6 +818,33 @@ where
         if note.commitment() != output.commitment {
             return None;
         }
+
+        // Critical wallet integrity check #2: verify ct_hash binding (Option 1A weak binding).
+        //
+        // The proof binds ct_hash = H(DOM_CIPHERTEXT, ephemeral_key || ciphertext_bytes).
+        // The wallet MUST verify that the ciphertext from Tx A hashes to the ct_hash from Tx B's
+        // public inputs.
+        //
+        // This ensures:
+        // - The ciphertext was posted by the sender (not substituted by a malicious indexer)
+        // - The ciphertext matches what the proof committed to
+        //
+        // Note: In Option 1A (weak binding), the circuit does NOT verify decryptability.
+        // The wallet trusts that if ct_hash matches, the ciphertext is authentic.
+        if let Some(committed_ct_hash) = output.committed_ct_hash {
+            // ct_hash is computed over ephemeral_key || ciphertext
+            let ct_blob = [&output.ephemeral_key[..], &output.ciphertext[..]].concat();
+            let local_ct_hash = crate::hash::ciphertext_hash(&ct_blob);
+            if local_ct_hash != committed_ct_hash {
+                // Ciphertext doesn't match what the proof committed to.
+                // This could indicate:
+                // - Malicious indexer substituting ciphertext
+                // - Data corruption
+                // - Tx A / Tx B mismatch
+                return None;
+            }
+        }
+        // If committed_ct_hash is None, we skip verification (legacy single-tx model).
 
         Some(note)
     }
@@ -840,10 +939,16 @@ pub struct TransferData {
 
 impl TransferData {
     /// Build transfer proof inputs for this transfer (reference implementation).
+    ///
+    /// # Arguments
+    /// * `spending_key` - The spending key for authorization
+    /// * `nk` - The nullifier key
+    /// * `ct_hashes` - Ciphertext hashes for output binding (computed from encrypted outputs)
     pub fn spend_proof_inputs(
         &self,
         spending_key: Fr,
         nk: Fr,
+        ct_hashes: [crate::types::CiphertextHash; crate::traits::MAX_OUTPUTS],
     ) -> (
         crate::traits::TransferPublicInputs,
         crate::traits::ProofPrivateInputs,
@@ -870,6 +975,8 @@ impl TransferData {
             output_commitments: [out0, out1, out2],
             input_count,
             output_count,
+            // Use the provided ct_hashes (computed from encrypted outputs)
+            ct_hashes,
             tx_binding,
         };
 
@@ -946,6 +1053,9 @@ impl TransferData {
             nullifiers,
             input_count,
             output_count,
+            // Placeholder ct_hashes: non-zero for enabled outputs
+            // TODO: compute real ct_hashes from ciphertext bytes (Phase 13)
+            ct_hashes: TransferPublicInputs::placeholder_ct_hashes(output_count),
             tx_binding,
             spend_proof: spend_proof.into_bytes(),
             outputs,
@@ -994,6 +1104,9 @@ impl TransferData {
             nullifiers,
             input_count,
             output_count,
+            // Placeholder ct_hashes: non-zero for enabled outputs
+            // TODO: compute real ct_hashes from ciphertext bytes (Phase 13)
+            ct_hashes: TransferPublicInputs::placeholder_ct_hashes(output_count),
             tx_binding,
             spend_proof: spend_proof.into_bytes(),
             outputs,
@@ -1122,11 +1235,13 @@ mod tests {
                         new_commitment: cm,
                         public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
                         public_amount: 100,
+                        ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
                     }),
                 )
                 .into_bytes(),
                 ciphertext: None,
                 ephemeral_key: None,
+                ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
             })
             .await
             .unwrap();

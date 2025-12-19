@@ -379,6 +379,13 @@ Noir provides:
 * HMAC-SHA256 over representative message sizes,
   and record `nargo info` deltas in this doc whenever Noir/backend versions change.
 
+**Measured datapoint (UltraPlonk OLD_API, bb 0.82.2 / nargo 1.0.0-beta.3):**
+using the harness at `circuits/crypto_costs/aes128_bench` (single AES128 blackbox call + equality check),
+we measured **proving** a circuit that checks encryption for a **600-byte payload** at roughly
+**~1.3s wall time** and **~7s CPU time** on a developer laptop (raw: `real=1.16s`, `user=6.48s`).
+This is meant as an order-of-magnitude anchor for “verifiable encryption” style costs; exact numbers will vary with machine,
+and AES is only a proxy for the eventual symmetric primitive choice (our production notes currently use ChaCha20-Poly1305).
+
 ## A5. The “ct_hash privacy” question under 1B
 
 Storing `ct_hash` remains safe for privacy **as long as**:

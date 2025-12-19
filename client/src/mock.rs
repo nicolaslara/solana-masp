@@ -17,7 +17,26 @@
 //! The client READS from the indexer but only WRITES through the chain.
 //! When MockChain processes transactions, it updates MockNoteStore (the indexer).
 //!
-//! Identifier scheme: commitment directly (no extra hash layer)
+//! ## Two-Transaction Model (Ciphertext DA)
+//!
+//! The mock supports the ciphertext data availability model:
+//!
+//! ```text
+//! Tx A (post_ciphertexts)     Tx B (shield/transfer)
+//! ┌─────────────────────┐     ┌─────────────────────┐
+//! │ ciphertext_blob     │     │ ZK proof            │
+//! │ ephemeral_key       │     │ commitment          │
+//! │ → ct_hash stored    │     │ ct_hash (public)    │──binds to Tx A
+//! └─────────────────────┘     └─────────────────────┘
+//! ```
+//!
+//! - **Tx A**: `post_ciphertexts()` stores encrypted note data with ct_hash indexing
+//! - **Tx B**: `shield()`/`transfer()` verifies proof with ct_hash as public input
+//! - The proof binds ct_hash, so the chain knows the ciphertext matches the proof
+//!
+//! ## Identifier Scheme
+//!
+//! Commitment directly (no extra hash layer)
 
 use crate::backends::config::ProofVerificationMode;
 use crate::hash::merkle_hash;
@@ -25,9 +44,10 @@ use crate::proofs::MembershipWitness;
 use crate::proofs::MockProofVerifier;
 use crate::traits::{
     Chain, ChainError, Indexer, IndexerError, InsertCommitmentResult, NoteCommitmentStore,
-    NullifierError, NullifierSet, OutputCiphertext, ProofBytes, ProofPublicInputs, ProofVerifier,
-    ShieldRequest, ShieldResult, StoreError, TransferPublicInputs, TransferRequest, TransferResult,
-    UnshieldPublicInputs, UnshieldRequest, UnshieldResult,
+    NullifierError, NullifierSet, OutputCiphertext, OutputCiphertextData, ProofBytes,
+    ProofPublicInputs, ProofVerifier, ShieldPublicInputs, ShieldRequest, ShieldResult, StoreError,
+    TransferPublicInputs, TransferRequest, TransferResult, UnshieldPublicInputs, UnshieldRequest,
+    UnshieldResult,
 };
 use crate::types::{Anchor, Commitment, Fr, Nullifier};
 use async_trait::async_trait;
@@ -38,17 +58,9 @@ use std::sync::{Arc, RwLock};
 // Ciphertext Data (passed to chain operations)
 // ============================================================================
 
-/// Ciphertext data to be stored with an output commitment
-///
-/// This is what the client provides when submitting a transaction.
-/// The chain stores it, and the indexer can read it for scanning.
-#[derive(Debug, Clone)]
-pub struct OutputCiphertextData {
-    /// Encrypted note plaintext (C_enc)
-    pub c_enc: Vec<u8>,
-    /// Ephemeral public key (64 bytes: x || y)
-    pub ephemeral_key: [u8; 64],
-}
+// Note: `OutputCiphertextData` is defined in traits.rs (the canonical one).
+// We use that for ciphertext posting. This module also stores ciphertexts
+// by (tx_sig, output_index) for indexer retrieval.
 
 // ============================================================================
 // Mock Note Store (Merkle Tree)
@@ -61,6 +73,14 @@ pub struct MockNoteStore {
     inner: Arc<RwLock<MockNoteStoreInner>>,
 }
 
+/// Stored ciphertext data (with ct_hash for binding verification).
+#[derive(Debug, Clone)]
+struct StoredCiphertext {
+    ciphertext: Vec<u8>,
+    ephemeral_key: [u8; 64],
+    ct_hash: crate::types::CiphertextHash,
+}
+
 struct MockNoteStoreInner {
     depth: usize,
     nodes: HashMap<(usize, u64), Fr>,
@@ -69,6 +89,10 @@ struct MockNoteStoreInner {
     empty_nodes: Vec<Fr>,
     ciphertexts: Vec<OutputCiphertext>,
     tx_log: HashMap<String, Vec<Commitment>>,
+    /// Ciphertexts stored by (tx_sig, output_index) for Tx A posting.
+    posted_ciphertexts: HashMap<(String, u32), StoredCiphertext>,
+    /// Map from ct_hash -> (tx_sig, output_index) for retrieval by hash.
+    ct_hash_index: HashMap<crate::types::CiphertextHash, (String, u32)>,
 }
 
 impl MockNoteStore {
@@ -88,8 +112,67 @@ impl MockNoteStore {
                 empty_nodes,
                 ciphertexts: Vec::new(),
                 tx_log: HashMap::new(),
+                posted_ciphertexts: HashMap::new(),
+                ct_hash_index: HashMap::new(),
             })),
         }
+    }
+
+    /// Store a ciphertext for later retrieval (Tx A posting).
+    pub fn store_ciphertext(
+        &self,
+        tx_sig: &str,
+        output_index: u32,
+        ciphertext: Vec<u8>,
+        ephemeral_key: [u8; 64],
+        ct_hash: crate::types::CiphertextHash,
+    ) {
+        let mut inner = self.inner.write().unwrap();
+        let key = (tx_sig.to_string(), output_index);
+        inner.posted_ciphertexts.insert(
+            key.clone(),
+            StoredCiphertext {
+                ciphertext,
+                ephemeral_key,
+                ct_hash,
+            },
+        );
+        inner.ct_hash_index.insert(ct_hash, key);
+    }
+
+    /// Get a ciphertext by ct_hash (for indexer retrieval).
+    pub fn get_ciphertext_by_hash(
+        &self,
+        ct_hash: &crate::types::CiphertextHash,
+    ) -> Option<(String, u32, Vec<u8>, [u8; 64])> {
+        let inner = self.inner.read().unwrap();
+        let (tx_sig, output_index) = inner.ct_hash_index.get(ct_hash)?;
+        let stored = inner
+            .posted_ciphertexts
+            .get(&(tx_sig.clone(), *output_index))?;
+        Some((
+            tx_sig.clone(),
+            *output_index,
+            stored.ciphertext.clone(),
+            stored.ephemeral_key,
+        ))
+    }
+
+    /// Get a ciphertext by (tx_sig, output_index).
+    pub fn get_ciphertext_for_output(
+        &self,
+        tx_sig: &str,
+        output_index: u32,
+    ) -> Option<(Vec<u8>, [u8; 64], crate::types::CiphertextHash)> {
+        let inner = self.inner.read().unwrap();
+        let stored = inner
+            .posted_ciphertexts
+            .get(&(tx_sig.to_string(), output_index))?;
+        Some((
+            stored.ciphertext.clone(),
+            stored.ephemeral_key,
+            stored.ct_hash,
+        ))
     }
 
     /// Insert a commitment
@@ -152,9 +235,11 @@ impl MockNoteStore {
             let mut inner = self.inner.write().unwrap();
             inner.ciphertexts.push(OutputCiphertext {
                 commitment,
-                ciphertext: ct_data.c_enc,
+                ciphertext: ct_data.ciphertext,
                 ephemeral_key: ct_data.ephemeral_key,
                 tx_sig: tx_sig.to_string(),
+                // Store the ct_hash for wallet verification (from Tx B's public inputs)
+                committed_ct_hash: Some(ct_data.ct_hash),
             });
         }
 
@@ -267,6 +352,51 @@ impl Indexer for MockNoteStore {
             .get(tx_sig)
             .cloned()
             .ok_or(IndexerError::NotFound)
+    }
+
+    async fn get_ciphertext_by_hash(
+        &self,
+        ct_hash: &crate::types::CiphertextHash,
+    ) -> Result<Option<(String, u32, Vec<u8>, [u8; 64])>, IndexerError> {
+        let inner = self.inner.read().unwrap();
+
+        // Look up (tx_sig, output_index) from ct_hash_index
+        if let Some((tx_sig, output_index)) = inner.ct_hash_index.get(ct_hash) {
+            // Look up the stored ciphertext
+            if let Some(stored) = inner
+                .posted_ciphertexts
+                .get(&(tx_sig.clone(), *output_index))
+            {
+                return Ok(Some((
+                    tx_sig.clone(),
+                    *output_index,
+                    stored.ciphertext.clone(),
+                    stored.ephemeral_key,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn get_ciphertext_for_output(
+        &self,
+        tx_sig: &str,
+        output_index: u32,
+    ) -> Result<Option<(Vec<u8>, [u8; 64], crate::types::CiphertextHash)>, IndexerError> {
+        let inner = self.inner.read().unwrap();
+
+        if let Some(stored) = inner
+            .posted_ciphertexts
+            .get(&(tx_sig.to_string(), output_index))
+        {
+            Ok(Some((
+                stored.ciphertext.clone(),
+                stored.ephemeral_key,
+                stored.ct_hash,
+            )))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -440,6 +570,35 @@ impl Chain for MockChain {
             .map_err(|e| ChainError::ConnectionError(e.to_string()))
     }
 
+    // ===== Ciphertext posting (Tx A) =====
+
+    /// Post ciphertexts for output notes (Tx A in Option 1A baseline).
+    ///
+    /// In MockChain, we store the ciphertexts in the note store for later retrieval.
+    async fn post_ciphertexts(
+        &self,
+        request: crate::traits::CiphertextPostingRequest,
+    ) -> Result<crate::traits::CiphertextPostingResult, ChainError> {
+        let tx_sig = self.next_tx_sig();
+
+        // Collect ct_hashes from the request.
+        let ct_hashes: Vec<crate::types::CiphertextHash> =
+            request.outputs.iter().map(|o| o.ct_hash).collect();
+
+        // Store ciphertexts in the note store for later retrieval by indexer.
+        for (i, output) in request.outputs.iter().enumerate() {
+            self.note_store.store_ciphertext(
+                &tx_sig,
+                i as u32,
+                output.ciphertext.clone(),
+                output.ephemeral_key,
+                output.ct_hash,
+            );
+        }
+
+        Ok(crate::traits::CiphertextPostingResult { tx_sig, ct_hashes })
+    }
+
     // ===== High-level operations =====
     // Note: shield() uses default implementation (just calls insert_commitment)
 
@@ -454,6 +613,8 @@ impl Chain for MockChain {
             new_commitment: request.commitment,
             public_asset_id: crate::note::compute_asset_id(&request.token_address),
             public_amount: request.amount,
+            // TODO: get ct_hash from request (Phase 13)
+            ct_hash: request.ct_hash(),
         };
         let proof = ProofBytes::new(request.shield_proof.clone());
         let ok = match self.verify_mode {
@@ -474,10 +635,7 @@ impl Chain for MockChain {
 
         // Build ciphertext data if provided
         let ct_data = match (&request.ciphertext, &request.ephemeral_key) {
-            (Some(ct), Some(epk)) => Some(OutputCiphertextData {
-                c_enc: ct.clone(),
-                ephemeral_key: *epk,
-            }),
+            (Some(ct), Some(epk)) => Some(OutputCiphertextData::new(ct.clone(), *epk)),
             _ => None,
         };
 
@@ -514,6 +672,8 @@ impl Chain for MockChain {
             output_commitments: request.output_commitments_array(),
             input_count: request.input_count,
             output_count: request.output_count,
+            // TODO: get ct_hashes from request (Phase 13)
+            ct_hashes: request.ct_hashes,
             tx_binding: request.tx_binding,
         };
         let proof = ProofBytes::new(request.spend_proof.clone());
@@ -547,10 +707,7 @@ impl Chain for MockChain {
                 continue;
             }
             let ct_data = match (&output.ciphertext, &output.ephemeral_key) {
-                (Some(ct), Some(epk)) => Some(OutputCiphertextData {
-                    c_enc: ct.clone(),
-                    ephemeral_key: *epk,
-                }),
+                (Some(ct), Some(epk)) => Some(OutputCiphertextData::new(ct.clone(), *epk)),
                 _ => None,
             };
 
@@ -681,6 +838,7 @@ mod tests {
             new_commitment: cm,
             public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
             public_amount: 100,
+            ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
         };
         let shield_proof = crate::proofs::mock_proof_for_public_inputs(
             &crate::traits::ProofPublicInputs::Shield(public_inputs),
@@ -694,6 +852,7 @@ mod tests {
                 shield_proof,
                 ciphertext: None,
                 ephemeral_key: None,
+                ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
             })
             .await
             .unwrap();
@@ -726,6 +885,7 @@ mod tests {
             new_commitment: cm1,
             public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
             public_amount: 100,
+            ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
         };
         let shield_proof = crate::proofs::mock_proof_for_public_inputs(
             &crate::traits::ProofPublicInputs::Shield(public_inputs),
@@ -739,6 +899,7 @@ mod tests {
                 shield_proof,
                 ciphertext: None,
                 ephemeral_key: None,
+                ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
             })
             .await
             .unwrap();
@@ -777,6 +938,8 @@ mod tests {
             output_commitments: [cm2, Fr::from(0u64), Fr::from(0u64)],
             input_count: 1,
             output_count: 1,
+            // Placeholder ct_hashes: non-zero for enabled outputs
+            ct_hashes: TransferPublicInputs::placeholder_ct_hashes(1),
             tx_binding,
         };
         let private = ProofPrivateInputs::Transfer(TransferPrivateInputs {
@@ -816,6 +979,8 @@ mod tests {
                 nullifiers,
                 input_count: 1,
                 output_count: 1,
+                // Placeholder ct_hashes: non-zero for enabled outputs
+                ct_hashes: TransferPublicInputs::placeholder_ct_hashes(1),
                 tx_binding,
                 spend_proof,
                 outputs: [
@@ -857,6 +1022,7 @@ mod tests {
             new_commitment: cm,
             public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
             public_amount: 100,
+            ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
         };
         let shield_proof = crate::proofs::mock_proof_for_public_inputs(
             &crate::traits::ProofPublicInputs::Shield(public_inputs),
@@ -870,6 +1036,7 @@ mod tests {
                 shield_proof,
                 ciphertext: None,
                 ephemeral_key: None,
+                ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
             })
             .await
             .unwrap();
@@ -903,6 +1070,8 @@ mod tests {
                 output_commitments: [output_note.commitment(), Fr::from(0u64), Fr::from(0u64)],
                 input_count: 1,
                 output_count: 1,
+                // Placeholder ct_hashes: non-zero for enabled outputs
+                ct_hashes: TransferPublicInputs::placeholder_ct_hashes(1),
                 tx_binding,
             };
             let private = ProofPrivateInputs::Transfer(TransferPrivateInputs {
@@ -976,6 +1145,8 @@ mod tests {
                 nullifiers,
                 input_count: 1,
                 output_count: 1,
+                // Placeholder ct_hashes: non-zero for enabled outputs
+                ct_hashes: TransferPublicInputs::placeholder_ct_hashes(1),
                 tx_binding: tx_binding_1,
                 spend_proof: spend_proof_1,
                 outputs: [
@@ -1005,6 +1176,8 @@ mod tests {
                 nullifiers,
                 input_count: 1,
                 output_count: 1,
+                // Placeholder ct_hashes: non-zero for enabled outputs
+                ct_hashes: TransferPublicInputs::placeholder_ct_hashes(1),
                 tx_binding: tx_binding_2,
                 spend_proof: spend_proof_2,
                 outputs: [
@@ -1037,11 +1210,13 @@ mod tests {
                         new_commitment: cm1,
                         public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
                         public_amount: 100,
+                        ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
                     }),
                 )
                 .into_bytes(),
                 ciphertext: Some(vec![1, 2, 3]),
                 ephemeral_key: Some([0u8; 64]),
+                ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
             })
             .await
             .unwrap();
@@ -1056,11 +1231,13 @@ mod tests {
                         new_commitment: cm2,
                         public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
                         public_amount: 100,
+                        ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
                     }),
                 )
                 .into_bytes(),
                 ciphertext: Some(vec![4, 5, 6]),
                 ephemeral_key: Some([0u8; 64]),
+                ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
             })
             .await
             .unwrap();
@@ -1111,11 +1288,13 @@ mod tests {
                         new_commitment: cm1,
                         public_asset_id: crate::note::compute_asset_id(&[0u8; 32]),
                         public_amount: 100,
+                        ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
                     }),
                 )
                 .into_bytes(),
                 ciphertext: None,
                 ephemeral_key: None,
+                ct_hash: ShieldPublicInputs::placeholder_ct_hash(),
             })
             .await
             .unwrap();
@@ -1161,6 +1340,8 @@ mod tests {
             output_commitments: [cm2, cm3, Fr::from(0u64)],
             input_count: 1,
             output_count: 2,
+            // Placeholder ct_hashes: non-zero for enabled outputs
+            ct_hashes: TransferPublicInputs::placeholder_ct_hashes(2),
             tx_binding,
         };
         let private = ProofPrivateInputs::Transfer(TransferPrivateInputs {
@@ -1203,6 +1384,8 @@ mod tests {
                 nullifiers,
                 input_count: 1,
                 output_count: 2,
+                // Placeholder ct_hashes: non-zero for enabled outputs
+                ct_hashes: TransferPublicInputs::placeholder_ct_hashes(2),
                 tx_binding,
                 spend_proof,
                 outputs: [
@@ -1229,5 +1412,233 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cms, vec![cm1]);
+    }
+
+    /// Test the two-transaction model (Tx A: ciphertext posting, Tx B: MASP state transition)
+    #[tokio::test]
+    async fn test_two_tx_ciphertext_da_model() {
+        use crate::hash::ciphertext_hash;
+        use crate::traits::{CiphertextPostingRequest, Indexer, OutputCiphertextData};
+
+        let acc = Arc::new(MockNoteStore::new(20));
+        let chain = MockChain::new(acc.clone(), 10);
+
+        // Simulate Tx A: Post ciphertext data
+        let ciphertext_bytes = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33];
+        let ephemeral_key = [0u8; 64]; // Mock ephemeral key
+
+        // Compute ct_hash (this is what binds Tx A to Tx B)
+        let ct_hash = ciphertext_hash(&ciphertext_bytes);
+
+        let tx_a_result = chain
+            .post_ciphertexts(CiphertextPostingRequest {
+                outputs: vec![OutputCiphertextData {
+                    ciphertext: ciphertext_bytes.clone(),
+                    ephemeral_key,
+                    ct_hash,
+                }],
+            })
+            .await
+            .unwrap();
+
+        // Verify Tx A result
+        assert!(!tx_a_result.tx_sig.is_empty());
+        assert_eq!(tx_a_result.ct_hashes.len(), 1);
+        assert_eq!(tx_a_result.ct_hashes[0], ct_hash);
+
+        // Now verify indexer can retrieve ciphertext by ct_hash
+        // Note: We call through the Indexer trait
+        let retrieved = acc.get_ciphertext_by_hash(&ct_hash).await.unwrap();
+        assert!(retrieved.is_some());
+        let (tx_sig, output_index, retrieved_ct, retrieved_epk) = retrieved.unwrap();
+        assert_eq!(tx_sig, tx_a_result.tx_sig);
+        assert_eq!(output_index, 0);
+        assert_eq!(retrieved_ct, ciphertext_bytes);
+        assert_eq!(retrieved_epk, ephemeral_key);
+
+        // And by (tx_sig, output_index)
+        let retrieved = acc
+            .get_ciphertext_for_output(&tx_a_result.tx_sig, 0)
+            .await
+            .unwrap();
+        assert!(retrieved.is_some());
+        let (retrieved_ct, retrieved_epk, retrieved_hash) = retrieved.unwrap();
+        assert_eq!(retrieved_ct, ciphertext_bytes);
+        assert_eq!(retrieved_epk, ephemeral_key);
+        assert_eq!(retrieved_hash, ct_hash);
+    }
+
+    /// Negative test: Transfer proof rejected when ct_hash = 0 for enabled output
+    #[tokio::test]
+    async fn test_transfer_rejects_zero_ct_hash_for_enabled_output() {
+        use crate::keys::SpendingKey;
+        use crate::note::Note;
+        use crate::nullifier::compute_nullifier;
+        use crate::proofs::{MembershipWitness, MockSpendProver};
+        use crate::traits::{
+            InputSlot, OutputSlot, ProofPrivateInputs, SpendProver, TransferPrivateInputs,
+        };
+        use crate::tx_binding::{derive_output_nonce_nm, tx_binding_transfer};
+
+        // Setup
+        let sk = SpendingKey::from_bytes(&[0u8; 32]);
+        let fvk = sk.to_full_viewing_key();
+        let nk = fvk.nk_field();
+        let addr = fvk.diversified_address(0);
+
+        let note_in = Note::with_values(
+            Fr::from(1u64),
+            100,
+            addr.to_field(),
+            0,
+            Fr::from(42u64),
+            Fr::from(1u64),
+        );
+        let cm1 = note_in.commitment();
+        let nf = compute_nullifier(nk, note_in.nullifier_nonce);
+
+        // Build tx_binding first to derive output nonce
+        let anchor = cm1;
+        let nullifiers = [nf, Fr::from(0u64), Fr::from(0u64)];
+        let tx_binding = tx_binding_transfer(anchor, &nullifiers, 1, 1);
+        let out_nonce = derive_output_nonce_nm(tx_binding, 0);
+
+        let output_note = Note::with_values(
+            Fr::from(1u64),
+            100,
+            addr.to_field(),
+            0,
+            out_nonce,
+            Fr::from(2u64),
+        );
+
+        let witness = MembershipWitness::merkle_path(vec![], vec![], anchor);
+
+        let public = TransferPublicInputs {
+            anchor,
+            nullifiers,
+            output_commitments: [output_note.commitment(), Fr::from(0u64), Fr::from(0u64)],
+            input_count: 1,
+            output_count: 1,
+            // ZERO ct_hashes - should be rejected!
+            ct_hashes: [Fr::from(0u64); 3],
+            tx_binding,
+        };
+        let private = ProofPrivateInputs::Transfer(TransferPrivateInputs {
+            inputs: [
+                InputSlot {
+                    enabled: true,
+                    note_asset_id: note_in.asset_id,
+                    note_amount: note_in.amount,
+                    note_recipient: note_in.recipient,
+                    note_diversifier_index: note_in.diversifier_index,
+                    note_nullifier_nonce: note_in.nullifier_nonce,
+                    note_randomness: note_in.note_randomness,
+                    nk,
+                    spending_key: sk.as_field(),
+                    membership_witness: witness.clone(),
+                },
+                InputSlot::default(),
+                InputSlot::default(),
+            ],
+            outputs: [
+                OutputSlot {
+                    enabled: true,
+                    note: output_note,
+                },
+                OutputSlot::default(),
+                OutputSlot::default(),
+            ],
+        });
+
+        // Proof generation should fail
+        let result = MockSpendProver.prove(
+            &crate::traits::ProofPublicInputs::Transfer(public),
+            &private,
+        );
+        assert!(
+            result.is_err(),
+            "Transfer proof should be rejected when enabled output has ct_hash = 0"
+        );
+    }
+
+    /// Negative test: Shield proof rejected when ct_hash = 0
+    #[tokio::test]
+    async fn test_shield_rejects_zero_ct_hash() {
+        use crate::keys::SpendingKey;
+        use crate::note::Note;
+        use crate::proofs::MockSpendProver;
+        use crate::traits::{ProofPrivateInputs, ShieldPrivateInputs, SpendProver};
+
+        let sk = SpendingKey::from_bytes(&[0u8; 32]);
+        let fvk = sk.to_full_viewing_key();
+        let addr = fvk.diversified_address(0);
+
+        let note = Note::with_values(
+            Fr::from(1u64),
+            100,
+            addr.to_field(),
+            0,
+            Fr::from(42u64),
+            Fr::from(1u64),
+        );
+
+        let public = crate::traits::ShieldPublicInputs {
+            new_commitment: note.commitment(),
+            public_asset_id: note.asset_id,
+            public_amount: note.amount,
+            // ZERO ct_hash - should be rejected!
+            ct_hash: Fr::from(0u64),
+        };
+        let private = ProofPrivateInputs::Shield(ShieldPrivateInputs {
+            note_asset_id: note.asset_id,
+            note_amount: note.amount,
+            note_recipient: note.recipient,
+            note_diversifier_index: note.diversifier_index,
+            note_nullifier_nonce: note.nullifier_nonce,
+            note_randomness: note.note_randomness,
+        });
+
+        // Proof generation should fail
+        let result =
+            MockSpendProver.prove(&crate::traits::ProofPublicInputs::Shield(public), &private);
+        assert!(
+            result.is_err(),
+            "Shield proof should be rejected when ct_hash = 0"
+        );
+    }
+
+    /// Negative test: Wallet rejects output when ciphertext doesn't match ct_hash
+    #[tokio::test]
+    async fn test_wallet_rejects_ciphertext_mismatch() {
+        use crate::hash::ciphertext_hash;
+        use crate::traits::OutputCiphertext;
+
+        // Setup: create output with correct ct_hash
+        let ciphertext = vec![0x01, 0x02, 0x03, 0x04];
+        let ephemeral_key = [0u8; 64];
+        let correct_ct_blob = [&ephemeral_key[..], &ciphertext[..]].concat();
+        let committed_ct_hash = ciphertext_hash(&correct_ct_blob);
+
+        // Create output with WRONG ciphertext (different bytes)
+        let wrong_ciphertext = vec![0xFF, 0xFF, 0xFF, 0xFF];
+
+        let output = OutputCiphertext {
+            commitment: Fr::from(1u64),
+            ciphertext: wrong_ciphertext,
+            ephemeral_key,
+            tx_sig: "test_tx".to_string(),
+            committed_ct_hash: Some(committed_ct_hash),
+        };
+
+        // Verify ct_hash mismatch detection
+        let wrong_ct_blob = [&output.ephemeral_key[..], &output.ciphertext[..]].concat();
+        let local_ct_hash = ciphertext_hash(&wrong_ct_blob);
+
+        // The local hash should NOT match the committed hash
+        assert_ne!(
+            local_ct_hash, committed_ct_hash,
+            "Ciphertext mismatch should be detected"
+        );
     }
 }

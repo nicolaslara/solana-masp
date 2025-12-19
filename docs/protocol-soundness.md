@@ -452,9 +452,15 @@ If ciphertexts are posted out-of-band via Tx A, then Tx B MUST also bind to the 
 
 - Same as Transfer for (T1)–(T4) and (T8)–(T9), plus:
 - **(U1) Public withdrawal amount/asset binding (MASP circuit)**:
-  - the public `(asset_id, amount)` matches the spent note’s plaintext fields.
-- **(U2) Public recipient binding (MASP circuit)**:
-  - the public `recipient` is bound to the proof intent via the public `tx_binding` and/or explicit public inputs, so it cannot be swapped/malleated by an intermediary.
+  - the public `(asset_id, amount)` matches the spent note's plaintext fields.
+- **(U2) Public recipient binding via tx_binding (MASP circuit)**:
+  - the public `recipient` is bound to the proof intent via `tx_binding`:
+
+    ```text
+    tx_binding = H(DOM_TX_BINDING, 3, anchor, nullifier, public_amount, public_recipient_limbs[4], public_asset_id)
+    ```
+
+  - **Note:** `input_commitment` is intentionally **NOT** included. It is private (witness-only); the proof already binds to it via preimage knowledge (T3). Including it would create a value the chain cannot recompute.
   - ⚠️ **Recipient encoding rule:**
     - It is **NOT SAFE** to encode a 32-byte recipient (e.g., Solana pubkey) as a single `Field` using `Fr::from_be_bytes_mod_order`.
     - Reason: BN254 scalar field has prime modulus \(p < 2^{254}\), so reduction mod \(p\) is a **many-to-one** mapping from 256-bit strings → field elements; distinct recipients can collide.
@@ -633,8 +639,8 @@ If something is “NOT IMPLEMENTED”, it is a required protocol check that the 
 
 - **(U1) Public withdrawal amount/asset binding**:
   - `client/src/proofs.rs`: `mock_check_unshield()` enforces `public_amount == note_amount` and `public_asset_id == note_asset_id`.
-- **(U2) Public recipient binding**: implemented in mocks (and is the standard ZK meaning of public inputs).
-  - `client/src/proofs.rs`: `MockProofVerifier` binds proof bytes to **all** public inputs, including `public_recipient`.
-  - `client/src/proofs.rs`: `mock_check_unshield()` also enforces `tx_binding == H(DOM_TX_BINDING, ...)` (current layout).
-    - This is a minimal, concrete intent-binding layout over the fields we already have today; future iterations can extend it to cover ciphertext hashes / additional intent fields.
+- **(U2) Public recipient binding**:
+  - `client/src/tx_binding.rs`: `tx_binding_unshield()` binds recipient via `public_recipient_limbs` (plus anchor, nullifier, amount, asset_id).
+  - `client/src/proofs.rs`: `mock_check_unshield()` recomputes and verifies the binding.
+  - **Note:** `input_commitment` is NOT included in tx_binding (witness-only; proof binds via preimage knowledge).
 - **(U3) Transparent withdrawal (chain)**: **NOT IMPLEMENTED** in mocks (no SPL transfers yet).

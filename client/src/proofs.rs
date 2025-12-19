@@ -436,6 +436,27 @@ fn mock_check_transfer(
         return Err(ProofSystemError::VerificationFailed);
     }
 
+    // (T8) Ciphertext hash binding (Option 1A weak binding).
+    // Statement: "Each enabled output has a non-zero ct_hash, each disabled output has ct_hash = 0."
+    //
+    // Note: In Option 1A, the circuit does NOT verify that ct_hash was correctly derived from
+    // the ciphertext. It only binds ct_hash as a public input. The wallet verifies the actual
+    // hash binding when accepting the note.
+    for j in 0..crate::traits::MAX_OUTPUTS {
+        let slot = &private.outputs[j];
+        if slot.enabled {
+            // Enabled outputs must have non-zero ct_hash (proof commits to the ciphertext binding)
+            if public.ct_hashes[j] == Fr::from(0u64) {
+                return Err(ProofSystemError::VerificationFailed);
+            }
+        } else {
+            // Disabled outputs must have zero ct_hash (no ciphertext for dummy slots)
+            if public.ct_hashes[j] != Fr::from(0u64) {
+                return Err(ProofSystemError::VerificationFailed);
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -461,9 +482,10 @@ fn mock_check_unshield(
     let input_commitment = in_note.commitment();
 
     // Transaction binding hash (anti-malleability / intent binding).
+    // Note: input_commitment is NOT included in tx_binding; it's private (witness-only)
+    // and the proof already binds to it via preimage knowledge.
     let expected_tx_binding = crate::tx_binding::tx_binding_unshield(
         public.anchor,
-        input_commitment,
         public.nullifier,
         public.public_amount,
         public.public_recipient_limbs,
@@ -544,6 +566,16 @@ impl SpendProver for MockSpendProver {
                     return Err(ProofSystemError::VerificationFailed);
                 }
                 if pi.public_asset_id != private_inputs.note_asset_id {
+                    return Err(ProofSystemError::VerificationFailed);
+                }
+
+                // (S5) Ciphertext hash binding (Option 1A weak binding).
+                // Statement: "Shield has a non-zero ct_hash, binding the output ciphertext to the proof."
+                //
+                // Note: In Option 1A, the circuit does NOT verify that ct_hash was correctly derived
+                // from the ciphertext. It only binds ct_hash as a public input. The wallet verifies
+                // the actual hash binding when accepting the note.
+                if pi.ct_hash == Fr::from(0u64) {
                     return Err(ProofSystemError::VerificationFailed);
                 }
             }
@@ -660,6 +692,8 @@ mod tests {
             output_commitments: [out_cm, Fr::from(0u64), Fr::from(0u64)],
             input_count: 1,
             output_count: 1,
+            // Placeholder ct_hashes: non-zero for enabled outputs
+            ct_hashes: TransferPublicInputs::placeholder_ct_hashes(1),
             tx_binding,
         };
 
@@ -759,6 +793,8 @@ mod tests {
             output_commitments: [out_cm, Fr::from(0u64), Fr::from(0u64)],
             input_count: 1,
             output_count: 1,
+            // Placeholder ct_hashes: non-zero for enabled outputs
+            ct_hashes: TransferPublicInputs::placeholder_ct_hashes(1),
             tx_binding,
         };
         let private = TransferPrivateInputs {
@@ -821,7 +857,6 @@ mod tests {
             anchor: cm,
             nullifier: nf,
             tx_binding: crate::tx_binding::tx_binding_unshield(
-                cm,
                 cm,
                 nf,
                 50,

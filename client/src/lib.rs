@@ -62,6 +62,7 @@ pub use encryption::{
     verify_note_ownership, ChaChaPolyEncryption, EncryptedNote, EncryptionError, MockEncryption,
     NoteEncryption, NoteVerification,
 };
+pub use hash::ciphertext_hash;
 pub use keys::{DiversifiedAddress, FullViewingKey, SpendingKey};
 pub use note::Note;
 pub use oob::{
@@ -70,12 +71,12 @@ pub use oob::{
 };
 pub use proofs::{MembershipWitness, StoreId};
 pub use traits::{
-    Chain, ChainError, Indexer, IndexerError, InsertCommitmentResult, NoteCommitmentStore,
-    InputSlot, NullifierError, NullifierSet, OutputCiphertext, OutputSlot, ProofBytes,
-    ProofPublicInputs,
-    ProofPrivateInputs, ProofSystemError, ProofVerifier, ScanParams, ScanResult, ShieldPrivateInputs,
-    ShieldPublicInputs, ShieldRequest, ShieldResult, SpendProver, StoreError, TransferOutput,
-    TransferPrivateInputs, TransferPublicInputs, TransferRequest, TransferResult, UnshieldPrivateInputs,
-    UnshieldRequest, UnshieldResult,
+    Chain, ChainError, CiphertextPostingRequest, CiphertextPostingResult, Indexer, IndexerError,
+    InputSlot, InsertCommitmentResult, NoteCommitmentStore, NullifierError, NullifierSet,
+    OutputCiphertext, OutputCiphertextData, OutputSlot, ProofBytes, ProofPrivateInputs,
+    ProofPublicInputs, ProofSystemError, ProofVerifier, ScanParams, ScanResult,
+    ShieldPrivateInputs, ShieldPublicInputs, ShieldRequest, ShieldResult, SpendProver, StoreError,
+    TransferOutput, TransferPrivateInputs, TransferPublicInputs, TransferRequest, TransferResult,
+    UnshieldPrivateInputs, UnshieldRequest, UnshieldResult,
 };
-pub use types::{Anchor, Commitment, Fr, Nullifier, TokenAddress};
+pub use types::{Anchor, CiphertextHash, Commitment, Fr, Nullifier, TokenAddress};

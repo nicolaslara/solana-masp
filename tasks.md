@@ -211,6 +211,14 @@ This section defines the **required implementation ordering** for the next miles
   - fetch outputs by `tx_sig` (OOB fast path)
   - witness retrieval (membership proof / Merkle path / Light proof)
   - optional “exists” checks (commitment presence)
+- [ ] **Update the client trait surface for two-transaction publishes (Tx A + Tx B)**:
+  - Ensure `Chain` exposes submission of **both**:
+    - **Tx A**: ciphertext posting transaction(s) (outputs-only bytes)
+    - **Tx B**: MASP state transition (proof + nullifiers + commitments + `ct_hash` binding)
+  - Decide what the client returns from submit calls (signatures, handles, or a structured receipt).
+  - Ensure the API shape works for:
+    - “send now” UX (submit both sequentially), and
+    - “recover later” UX (OOB provides enough information to locate both artifacts via an indexer).
 - [ ] Decide how to model “indexing latency” in the reference implementation:
   - Option A: `Indexer::wait_for_update()` (noop in real impl; sleeps/polls in mocks)
   - Option B: test-only helper (preferred if we want to keep `Indexer` pure/read-only)
@@ -276,6 +284,68 @@ This section defines the **required implementation ordering** for the next miles
   - tx signature and ordering
 - [ ] Decide how we represent “indexing latency” in tests (ties to 0.13.1):
   - client calls `wait_for_indexer_update()` between submit and scan
+
+#### Ciphertext DA + Binding (Outputs-only) — Implementation Plan (Option 1A baseline)
+
+**Goal:** implement the baseline from `docs/design-decisions/ciphertext-da-and-binding.md` and make it real in the client/indexer/program shape:
+
+- **Only outputs publish ciphertexts** (never inputs).
+- Ciphertexts are published in **Tx A** (posting tx(s), chunked as needed).
+- The MASP state transition **Tx B binds** to the posted bytes via `ct_hash` (per-output).
+
+**Plan (in recommended order):**
+
+- [x] **Decide the canonical hash and domain tag**:
+  - Pick `H` for `ct_hash = H(DOM_CIPHERTEXT, ephemeral_key || ciphertext_bytes)` and freeze `DOM_CIPHERTEXT = 7`.
+  - Ensure the hash choice is consistent across: wallet verification, tx binding, and (eventually) circuits.
+  - Record the decision in `knowledge.md` (and keep `docs/protocol-soundness.md` consistent).
+
+- [x] **Extend the protocol public-input layout / binding** (still mocks first):
+  - Add `ct_hashes[MAX_OUTPUTS]` to the Transfer public inputs (and `ct_hash` to Shield).
+  - `ct_hashes` are explicit public inputs to the proof (not inside `tx_binding` to avoid circularity with output nonce derivation).
+  - Update mock proof checks to enforce the chosen binding.
+
+- [x] **Define Tx A posting format** (production-shaped, even if mocked):
+  - Define a "ciphertext posting" transaction format that is indexer-parsable:
+    - `masp_tx_sig`: reference to the MASP state transition tx (Tx B)
+    - `output_index`: which output in Tx B this ciphertext corresponds to
+    - `ciphertext_blob`: `ephemeral_key || encrypted_note_plaintext`
+  - Define how the wallet/indexer links Tx A ↔ Tx B:
+    - via `ct_hash` matches
+    - via optional hints (OOB notification includes both Tx A and Tx B signatures)
+
+- [x] **Update OOB communication structs for a two-tx world**:
+  - Extended `PaymentNotification` with `masp_tx_sig` and `ciphertext_tx_sig` fields.
+  - Updated `OobNotificationBuilder` helpers to construct notifications with both signatures.
+  - Updated mocks + tests accordingly (OOB first-payment and subsequent payments).
+
+- [x] **Update Indexer APIs to serve Tx A bytes for outputs**:
+  - Added `get_ciphertext_by_hash(ct_hash)` method to `Indexer` trait.
+  - Added `get_ciphertext_for_output(tx_sig, output_index)` method to `Indexer` trait.
+  - Mock implementations model the separation:
+    - Tx A contains ciphertext bytes (outputs-only)
+    - Tx B contains commitments + bound `ct_hashes` (no ciphertext bytes)
+
+- [x] **Update wallet receive/sync flow to enforce output binding**:
+  - When scanning outputs:
+    - compute `ct_hash` over fetched ciphertext bytes and verify it matches Tx B's bound `ct_hash`.
+    - only then attempt trial decryption and perform plaintext↔commitment checks.
+  - Added negative tests:
+    - wrong ciphertext bytes (hash mismatch) rejected
+    - missing ciphertext treated as DA failure
+
+- [x] **Update client build_transfer/build_shield to compute and include ct_hashes**:
+  - Refactored `shield` and `transfer_to` client methods to compute `ct_hash`/`ct_hashes` from encrypted outputs *before* generating the proof.
+  - This resolves the circular dependency issue where proof generation needed ct_hash but ct_hash needed the ciphertext.
+
+- [ ] **Add multi-tx submit flow hooks (optional accelerator)**:
+  - Add a client flow that can submit "Tx A(s) + Tx B" as a single operation.
+  - Treat Jito bundling as an optional UX improvement (never a consensus assumption).
+
+- [ ] **Prepare for on-chain POC** (Milestone 1):
+  - Add a program instruction for posting ciphertext bytes (Tx A), designed for ledger-history DA (not permanent storage).
+  - Add Tx B instruction fields for `ct_hashes` and verify proof binding.
+  - Document any Solana-specific constraints (tx size, account metas) in `README.md` once the format is frozen.
 
 #### Witness/Anchor Validity (Abstracted by Stores)
 

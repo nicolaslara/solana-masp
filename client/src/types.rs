@@ -16,3 +16,7 @@ pub type Nullifier = Fr;
 
 /// Anchor (Merkle root)
 pub type Anchor = Fr;
+
+/// Ciphertext hash (binds ciphertext bytes to proof intent)
+/// `ct_hash = H(DOM_CIPHERTEXT, ciphertext_bytes...)`
+pub type CiphertextHash = Fr;

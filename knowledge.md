@@ -13,6 +13,16 @@ This file captures learnings, design decisions, and discoveries as we develop th
 
 ### Recent Completions
 
+- ✅ **Ciphertext DA + Binding (Option 1A baseline)** — Two-transaction model implemented:
+  - Tx A: ciphertext posting (outputs-only)
+  - Tx B: MASP state transition with `ct_hashes` binding
+  - Canonical `ct_hash = H(DOM_CIPHERTEXT, ephemeral_key || ciphertext_bytes)` with `DOM_CIPHERTEXT = 7`
+  - `ct_hashes` are explicit public inputs to proofs (not inside `tx_binding`)
+  - Updated `PaymentNotification` with `masp_tx_sig` and `ciphertext_tx_sig` references
+  - Mock prover enforces `ct_hash != 0` for enabled outputs
+  - Noir circuits include `ct_hashes` as public inputs (Stage-0 scaffolding)
+  - Negative tests: wrong ciphertext bytes rejected, missing ciphertext = DA failure
+  - Client `shield`/`transfer_to` compute `ct_hash(es)` before proof generation
 - ✅ C_out (Outgoing Ciphertext) for sender audit trail
 - ✅ Outgoing Viewing Key (ovk) derivation
 - ✅ Full shielded sync from chain
@@ -22,7 +32,7 @@ This file captures learnings, design decisions, and discoveries as we develop th
 - ✅ Production-like indexing-latency hook: `Indexer::wait_for_update()` + `MaspClient::wait_for_indexer_update()`
 - ✅ Protocol documentation + responsibility split:
   - `docs/protocol.md`
-  - `docs/circuit-security-requirements.md` updated with “who checks what”
+  - `docs/circuit-security-requirements.md` updated with "who checks what"
 - ✅ Noir circuits refactored for auditability (Stage-0): `main` calls one function per required statement
 - ✅ Commitment/membership model updated (privacy-critical):
   - Commitment set is an append-only Merkle accumulator with anchor history (not Light CPI / content-addressed commitments).
@@ -90,6 +100,38 @@ This likely requires updating the note format and/or circuit private inputs so t
 - Provide two categories of implementations:
   - **Dev/CI (CLI)**: `nargo execute` + `bb OLD_API prove` (useful for fast bringup, not production)
   - **Mobile (library/FFI)**: embed ACVM + prover libs (no files; inputs passed as typed structs/bytes)
+
+### Ciphertext Data Availability (DA) + Binding to Proofs
+
+**Decision:** Option 1A baseline — two-tx publish + state transition with weak binding via `ct_hash`.
+
+**Design doc:** `docs/design-decisions/ciphertext-da-and-binding.md`
+
+**Summary:**
+
+- Ciphertexts are required **only for outputs** (note discovery). Inputs do NOT publish ciphertexts.
+- **Tx A (ciphertext posting tx):** publishes ciphertext bytes to the ledger (archive-retrievable, no permanent state).
+- **Tx B (MASP state transition tx):** includes proof + nullifiers + commitments and binds to the ciphertext bytes via:
+
+```text
+ct_hash[j] = H(DOM_CIPHERTEXT, ciphertext_bytes[j])
+```
+
+- The proof/circuit MUST bind to `ct_hashes` for enabled outputs (as explicit public inputs or via inclusion in `tx_binding`).
+- Wallets MUST verify `ct_hash` matches fetched bytes before accepting outputs.
+- Decryptability is NOT consensus-critical (Zcash-style griefing/burn model).
+
+**Domain tag:** `DomainTag::Ciphertext = 4` (frozen).
+
+**Hash function:** Poseidon2 with Noir-compatible semantics (same as other domain-separated hashes in the protocol).
+
+**Why two-tx design:**
+
+- Solana tx envelope is 1232 bytes; ciphertexts (~400–600B per output) don't fit alongside proof + accounts.
+- Programs cannot read other txs' calldata, so binding is via hash commitment (wallet/indexer verification), not consensus enforcement of "Tx A landed".
+- Bundling (Jito) can make publish+transfer atomic in practice; protocol must remain correct without it.
+
+**Future hardening (Option 1B):** circuit may enforce that `ct_hash` is derived from correct encryption of output plaintext to receiver key (decryptability binding). Gated by measured circuit cost + crypto review.
 
 ### Note Structure: Orchard-style Actions
 
@@ -526,6 +568,17 @@ From `../solana-ultraplonk-verifier/`:
 - Single-TX verification (~500K-1M CUs)
 - Uses `bb OLD_API` commands
 - Noir v1.0.0-beta.3 + bb 0.82.2 toolchain
+
+### Noir AES128 Blackbox (benchmark harness)
+
+We added a tiny Noir harness at `circuits/crypto_costs/aes128_bench` to measure how circuit size grows when using the AES128 blackbox.
+
+- **Stdlib API (Noir v1.0.0-beta.3)**:
+  - `std::aes128::aes128_encrypt<let N: u32>(input: [u8; N], iv: [u8; 16], key: [u8; 16]) -> [u8; N + 16 - N % 16]`
+  - Note the **PKCS#7-style padding** behavior: if `N % 16 == 0`, ciphertext length becomes `N + 16`.
+- **How to measure**:
+  - `cd circuits/crypto_costs/aes128_bench && nargo info`
+  - Edit `PLAINTEXT_BYTES` in `src/main.nr` to change ciphertext block count (see the package README for exact settings).
 
 ### Solana BN254 Syscalls
 

@@ -6,6 +6,12 @@
 //! - Payment link/QR code
 //! - Payment protocol (like BIP70)
 //!
+//! ## Two-Transaction Model (Ciphertext DA)
+//!
+//! Following the ciphertext data availability design:
+//! - **Tx A** (ciphertext posting): Posts encrypted note data to the ledger
+//! - **Tx B** (MASP state transition): The actual shielded transfer with proof
+//!
 //! ## What Gets Communicated
 //!
 //! The OOB message contains minimal data - just enough for Bob to find
@@ -13,24 +19,26 @@
 //!
 //! ```text
 //! OobPaymentNotification {
-//!     tx_sig: "5K8Z...",           // Transaction signature
-//!     output_index: 0,              // Which output in the tx
+//!     tx_sig: "5K8Z...",           // Tx B: MASP state transition
+//!     output_index: 0,              // Which output in Tx B
+//!     ciphertext_tx_sig: "7Y3Q...", // Tx A: ciphertext posting (optional)
 //!     // Optional: note plaintext if not using ciphertext scanning
 //! }
 //! ```
 //!
 //! Bob then:
-//! 1. Fetches the transaction via RPC
-//! 2. Extracts the ciphertext from instruction data
+//! 1. Fetches Tx B (MASP transaction) via RPC
+//! 2. Fetches ciphertext from Tx A (or uses indexer lookup by ct_hash)
 //! 3. Decrypts with his viewing key
-//! 4. Verifies the commitment exists on-chain
+//! 4. Verifies ct_hash binding: H(DOM_CIPHERTEXT, ciphertext) == proof's ct_hash
+//! 5. Verifies the commitment exists on-chain
 //!
 //! ## Why This Design
 //!
-//! - **Minimal data**: Only tx_sig + output_index needed
+//! - **Minimal data**: tx_sig + output_index + optional ciphertext_tx_sig
 //! - **Privacy**: No note details in OOB message if using encryption
-//! - **Verifiable**: Bob verifies via indexer/chain
-//! - **Fallback**: If OOB fails, Bob can still scan all ciphertexts
+//! - **Verifiable**: Bob verifies ct_hash binding via indexer/chain
+//! - **Fallback**: If OOB fails, Bob can still scan all ciphertexts by ct_hash
 //!
 //! ## Trait Design
 //!
@@ -50,13 +58,33 @@ use thiserror::Error;
 // ============================================================================
 
 /// Minimal payment notification (just enough to find the note)
+///
+/// ## Two-Transaction Model
+///
+/// - `tx_sig`: The MASP state transition (Tx B) containing the proof + public inputs
+/// - `ciphertext_tx_sig`: The ciphertext posting (Tx A) containing encrypted note data
+///
+/// If `ciphertext_tx_sig` is None, the recipient can still find the ciphertext
+/// by looking up `ct_hash` from Tx B's public inputs via the indexer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentNotification {
-    /// Transaction signature containing the payment
+    /// Transaction signature for MASP state transition (Tx B)
+    ///
+    /// This is the main transaction containing the ZK proof and public inputs
+    /// (commitment, nullifiers, ct_hashes, etc.)
     pub tx_sig: String,
 
     /// Output index within the transaction (0 = first output, 1 = change, etc.)
     pub output_index: u32,
+
+    /// Optional: Transaction signature for ciphertext posting (Tx A)
+    ///
+    /// This is the separate transaction that posts encrypted note data for DA.
+    /// If provided, the recipient can fetch ciphertext directly from Tx A.
+    /// If not provided, the recipient uses the indexer's `get_ciphertext_by_hash()`
+    /// with the ct_hash from Tx B's public inputs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ciphertext_tx_sig: Option<String>,
 
     /// Optional: commitment for quick verification
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,11 +112,12 @@ pub struct PaymentDetails {
 }
 
 impl PaymentNotification {
-    /// Create a new payment notification
+    /// Create a new payment notification (minimal, no ciphertext tx reference)
     pub fn new(tx_sig: String, output_index: u32) -> Self {
         Self {
             tx_sig,
             output_index,
+            ciphertext_tx_sig: None,
             commitment: None,
         }
     }
@@ -99,7 +128,30 @@ impl PaymentNotification {
         Self {
             tx_sig,
             output_index,
+            ciphertext_tx_sig: None,
             commitment: Some(field_to_bytes(&commitment)),
+        }
+    }
+
+    /// Create with both Tx A (ciphertext) and Tx B (MASP) references
+    ///
+    /// # Arguments
+    /// * `masp_tx_sig` - Transaction signature for MASP state transition (Tx B)
+    /// * `ciphertext_tx_sig` - Transaction signature for ciphertext posting (Tx A)
+    /// * `output_index` - Which output in the MASP transaction
+    /// * `commitment` - The output commitment (optional, for quick verification)
+    pub fn with_ciphertext_tx(
+        masp_tx_sig: String,
+        ciphertext_tx_sig: String,
+        output_index: u32,
+        commitment: Option<Commitment>,
+    ) -> Self {
+        use crate::hash::field_to_bytes;
+        Self {
+            tx_sig: masp_tx_sig,
+            output_index,
+            ciphertext_tx_sig: Some(ciphertext_tx_sig),
+            commitment: commitment.map(|c| field_to_bytes(&c)),
         }
     }
 
@@ -107,6 +159,11 @@ impl PaymentNotification {
     pub fn get_commitment(&self) -> Option<Fr> {
         self.commitment
             .map(|bytes| crate::hash::field_from_bytes(&bytes))
+    }
+
+    /// Check if this notification includes a ciphertext transaction reference
+    pub fn has_ciphertext_tx(&self) -> bool {
+        self.ciphertext_tx_sig.is_some()
     }
 }
 
@@ -281,10 +338,14 @@ impl OobChannel for MockOobChannel {
 // ============================================================================
 
 /// Helper for building OOB notifications from transfer results
+///
+/// Supports both single-tx (legacy) and two-tx (ciphertext DA) models.
 pub struct OobNotificationBuilder;
 
 impl OobNotificationBuilder {
-    /// Create notification for a simple transfer output
+    /// Create notification for a simple transfer output (single-tx model)
+    ///
+    /// Use this when ciphertext is embedded in the same transaction as the proof.
     pub fn for_output(
         tx_sig: &str,
         output_index: u32,
@@ -297,6 +358,44 @@ impl OobNotificationBuilder {
     pub fn for_change(tx_sig: &str, commitment: Commitment) -> PaymentNotification {
         // Change is typically output index 1
         PaymentNotification::with_commitment(tx_sig.to_string(), 1, commitment)
+    }
+
+    /// Create notification with ciphertext DA (two-tx model)
+    ///
+    /// Use this when ciphertext is posted in a separate transaction (Tx A)
+    /// from the MASP state transition (Tx B).
+    ///
+    /// # Arguments
+    /// * `masp_tx_sig` - Transaction signature for MASP state transition (Tx B)
+    /// * `ciphertext_tx_sig` - Transaction signature for ciphertext posting (Tx A)
+    /// * `output_index` - Which output in the MASP transaction
+    /// * `commitment` - The output commitment
+    pub fn for_output_with_ciphertext_tx(
+        masp_tx_sig: &str,
+        ciphertext_tx_sig: &str,
+        output_index: u32,
+        commitment: Commitment,
+    ) -> PaymentNotification {
+        PaymentNotification::with_ciphertext_tx(
+            masp_tx_sig.to_string(),
+            ciphertext_tx_sig.to_string(),
+            output_index,
+            Some(commitment),
+        )
+    }
+
+    /// Create notification for change with ciphertext DA (two-tx model)
+    pub fn for_change_with_ciphertext_tx(
+        masp_tx_sig: &str,
+        ciphertext_tx_sig: &str,
+        commitment: Commitment,
+    ) -> PaymentNotification {
+        PaymentNotification::with_ciphertext_tx(
+            masp_tx_sig.to_string(),
+            ciphertext_tx_sig.to_string(),
+            1, // Change is typically output index 1
+            Some(commitment),
+        )
     }
 }
 

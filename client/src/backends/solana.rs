@@ -21,8 +21,9 @@
 use crate::backends::config::ProofVerificationMode;
 use crate::mock::{MockChain, MockChainOptions, MockNoteStore};
 use crate::traits::{
-    Chain, ChainError, InsertCommitmentResult, ProofVerifier, ShieldRequest, ShieldResult,
-    TransferRequest, TransferResult, UnshieldRequest, UnshieldResult,
+    Chain, ChainError, CiphertextPostingRequest, CiphertextPostingResult, InsertCommitmentResult,
+    ProofVerifier, ShieldRequest, ShieldResult, TransferRequest, TransferResult, UnshieldRequest,
+    UnshieldResult,
 };
 use crate::types::{Anchor, Commitment, Nullifier};
 use async_trait::async_trait;
@@ -107,6 +108,15 @@ impl Chain for SolanaChain {
         nullifiers: &[Nullifier],
     ) -> Result<Vec<bool>, ChainError> {
         self.inner.batch_check_nullifiers(nullifiers).await
+    }
+
+    // ===== Ciphertext posting (Tx A) =====
+
+    async fn post_ciphertexts(
+        &self,
+        request: CiphertextPostingRequest,
+    ) -> Result<CiphertextPostingResult, ChainError> {
+        self.inner.post_ciphertexts(request).await
     }
 
     // ===== High-level operations =====

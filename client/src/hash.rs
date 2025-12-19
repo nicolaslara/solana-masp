@@ -29,6 +29,49 @@ pub fn poseidon_hash(inputs: &[Fr]) -> Fr {
     Fr::from_le_bytes_mod_order(&result_bytes)
 }
 
+/// Hash an arbitrary ciphertext byte string into a field element, with domain separation.
+///
+/// This is used for **Option 1A** ciphertext binding.
+///
+/// In this model:
+///
+/// 1) Tx A publishes ciphertext bytes (outputs-only).
+/// 2) Tx B binds to those bytes via `ct_hash`.
+///
+/// Important notes: this function is intentionally deterministic and cheap in Rust. It does **not**
+/// attempt to be injective over bytes; we rely on hash collision resistance. When we move ciphertext
+/// binding into real circuits, we must ensure the circuit uses an equivalent hash construction for
+/// `ct_hash` (or explicitly document/bridge the difference).
+pub fn ciphertext_hash(ciphertext_bytes: &[u8]) -> Fr {
+    // We want Poseidon2 to match Noir stdlib, so we build a Field-vector and call
+    // `poseidon2_hash_noir()`.
+    //
+    // To avoid accidental byte-packing collisions, we pack bytes into **31-byte little-endian**
+    // chunks, which are guaranteed to fit into the BN254 scalar field without modular reduction.
+    //
+    // Input layout (all as Fields):
+    //   [ DOM_CIPHERTEXT, len_bytes, chunk0, chunk1, ... ]
+    let dom = DomainTag::Ciphertext.to_field();
+    let len_f = Fr::from(ciphertext_bytes.len() as u64);
+
+    let chunk_len = 31usize;
+    let chunk_count = ciphertext_bytes.len().div_ceil(chunk_len);
+
+    let mut inputs: Vec<Fr> = Vec::with_capacity(2 + chunk_count);
+    inputs.push(dom);
+    inputs.push(len_f);
+
+    for i in 0..chunk_count {
+        let start = i * chunk_len;
+        let end = ((i + 1) * chunk_len).min(ciphertext_bytes.len());
+        let mut le_bytes = [0u8; 32];
+        le_bytes[..(end - start)].copy_from_slice(&ciphertext_bytes[start..end]);
+        inputs.push(Fr::from_le_bytes_mod_order(&le_bytes));
+    }
+
+    poseidon2_hash_noir(&inputs, inputs.len() as u32)
+}
+
 /// Compute Merkle node hash with domain separation
 pub fn merkle_hash(left: Fr, right: Fr) -> Fr {
     // Noir circuits use `std::hash::poseidon2::Poseidon2::hash([dom, left, right], 3)` for Merkle
@@ -45,10 +88,10 @@ pub fn merkle_hash(left: Fr, right: Fr) -> Fr {
 /// Source of truth: Noir stdlib (`noir_stdlib/src/hash/poseidon2.nr`, noirc commit `ceaa198...`).
 ///
 /// Key details:
+///
 /// - Sponge RATE = 3 over a 4-element state
 /// - IV = (message_size as Field) * 2^64, stored in the capacity element (state[3])
 /// - If `message_size != input.len()`, append `1` (variable-length domain separation)
-/// Poseidon2 hash matching Noir stdlib `std::hash::poseidon2::Poseidon2::hash(input, message_size)`.
 ///
 /// This is the function to use whenever Rust must match Noir stdlib Poseidon2 exactly.
 pub fn poseidon2_hash_noir(inputs: &[Fr], message_size: u32) -> Fr {

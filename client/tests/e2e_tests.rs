@@ -61,7 +61,11 @@ fn prove_transfer(
 ) -> ProofBytes {
     let nk = client.full_viewing_key().nk_field();
     let sk = masp_client::SpendingKey::from_bytes(seed);
-    let (public, private) = td.spend_proof_inputs(sk.as_field(), nk);
+    // Use placeholder ct_hashes (non-zero for enabled outputs to pass mock prover checks)
+    // Output count = 1 (payment) + 1 if change exists
+    let output_count = if td.change.is_some() { 2u32 } else { 1u32 };
+    let ct_hashes = masp_client::TransferPublicInputs::placeholder_ct_hashes(output_count);
+    let (public, private) = td.spend_proof_inputs(sk.as_field(), nk, ct_hashes);
     env.prover
         .prove(
             &masp_client::traits::ProofPublicInputs::Transfer(public),
@@ -89,6 +93,9 @@ async fn shield_with_encryption<E: masp_client::NoteEncryption>(
         new_commitment: note.commitment(),
         public_asset_id: masp_client::note::compute_asset_id(token_address),
         public_amount: note.amount,
+        // Placeholder ct_hash for testing
+        // TODO: compute real ct_hash from ciphertext bytes (Phase 13)
+        ct_hash: masp_client::ShieldPublicInputs::placeholder_ct_hash(),
     };
     let private = masp_client::ProofPrivateInputs::Shield(masp_client::ShieldPrivateInputs {
         note_asset_id: note.asset_id,
@@ -111,6 +118,9 @@ async fn shield_with_encryption<E: masp_client::NoteEncryption>(
         shield_proof,
         ciphertext: Some(encrypted.to_bytes()),
         ephemeral_key: Some(encrypted.ephemeral_key),
+        // Placeholder ct_hash for testing
+        // TODO: compute real ct_hash from ciphertext bytes (Phase 13)
+        ct_hash: masp_client::ShieldPublicInputs::placeholder_ct_hash(),
     };
 
     env.chain.shield(request).await.unwrap()
@@ -987,7 +997,11 @@ async fn test_cannot_spend_others_note_wrong_nullifier() {
     // This must fail because spend authorization is SpendingKey-only: Alice's spending key does not
     // match the note recipient (which is derived from Bob's key).
     let alice_anchor = alice_witness.root();
-    let nullifiers = [alice_nullifier, masp_client::Fr::from(0u64), masp_client::Fr::from(0u64)];
+    let nullifiers = [
+        alice_nullifier,
+        masp_client::Fr::from(0u64),
+        masp_client::Fr::from(0u64),
+    ];
     let tx_binding = masp_client::tx_binding::tx_binding_transfer(alice_anchor, &nullifiers, 1, 1);
     let alice_public = masp_client::TransferPublicInputs {
         anchor: alice_anchor,
@@ -995,31 +1009,34 @@ async fn test_cannot_spend_others_note_wrong_nullifier() {
         output_commitments: [masp_client::Fr::from(0u64); 3],
         input_count: 1,
         output_count: 1,
+        // TODO: compute real ct_hashes from ciphertext bytes (Phase 13)
+        ct_hashes: [masp_client::Fr::from(0u64); 3],
         tx_binding,
     };
-    let alice_private = masp_client::ProofPrivateInputs::Transfer(masp_client::TransferPrivateInputs {
-        inputs: [
-            masp_client::InputSlot {
-                enabled: true,
-                note_asset_id: bob_note.asset_id,
-                note_amount: bob_note.amount,
-                note_recipient: bob_note.recipient,
-                note_diversifier_index: bob_note.diversifier_index,
-                note_nullifier_nonce: bob_note.nullifier_nonce,
-                note_randomness: bob_note.note_randomness,
-                nk: alice.full_viewing_key().nk_field(),
-                spending_key: masp_client::SpendingKey::from_bytes(&[1u8; 32]).as_field(),
-                membership_witness: alice_witness,
-            },
-            masp_client::InputSlot::default(),
-            masp_client::InputSlot::default(),
-        ],
-        outputs: [
-            masp_client::OutputSlot::default(),
-            masp_client::OutputSlot::default(),
-            masp_client::OutputSlot::default(),
-        ],
-    });
+    let alice_private =
+        masp_client::ProofPrivateInputs::Transfer(masp_client::TransferPrivateInputs {
+            inputs: [
+                masp_client::InputSlot {
+                    enabled: true,
+                    note_asset_id: bob_note.asset_id,
+                    note_amount: bob_note.amount,
+                    note_recipient: bob_note.recipient,
+                    note_diversifier_index: bob_note.diversifier_index,
+                    note_nullifier_nonce: bob_note.nullifier_nonce,
+                    note_randomness: bob_note.note_randomness,
+                    nk: alice.full_viewing_key().nk_field(),
+                    spending_key: masp_client::SpendingKey::from_bytes(&[1u8; 32]).as_field(),
+                    membership_witness: alice_witness,
+                },
+                masp_client::InputSlot::default(),
+                masp_client::InputSlot::default(),
+            ],
+            outputs: [
+                masp_client::OutputSlot::default(),
+                masp_client::OutputSlot::default(),
+                masp_client::OutputSlot::default(),
+            ],
+        });
     let alice_proof_result = env.prover.prove(
         &masp_client::ProofPublicInputs::Transfer(alice_public),
         &alice_private,

@@ -46,6 +46,8 @@ struct ShieldPublic {
     new_commitment: Field,
     asset_id: Field,
     amount: u64,
+    // Ciphertext hash for output binding (Option 1A weak binding)
+    ct_hash: Field,
 }
 
 struct ShieldPrivate {
@@ -60,13 +62,18 @@ fn main(
     new_commitment: pub Field,
     public_asset_id: pub Field,
     public_amount: pub u64,
+    // Ciphertext hash for output binding (Option 1A weak binding)
+    // `ct_hash = H(DOM_CIPHERTEXT, ciphertext_bytes)` - binds proof to the posted ciphertext
+    // Note: Circuit does NOT verify derivation; wallet verifies binding when accepting note.
+    ct_hash: pub Field,
     // Private inputs (production-shaped)
     recipient: Field,
     diversifier_index: u64,
     nullifier_nonce: Field,
     note_randomness: Field,
 ) {
-    let public = ShieldPublic { new_commitment, asset_id: public_asset_id, amount: public_amount };
+    let public =
+        ShieldPublic { new_commitment, asset_id: public_asset_id, amount: public_amount, ct_hash };
     let private = ShieldPrivate { recipient, diversifier_index, nullifier_nonce, note_randomness };
 
     // Protocol narrative (Stage-0 scaffolding):
@@ -86,4 +93,10 @@ fn main(
         private.nullifier_nonce,
         private.note_randomness,
     );
+    //
+    // - "Ciphertext hash is bound (Option 1A weak binding)"
+    // Shield always produces one output, so ct_hash must be non-zero.
+    // Note: Circuit does NOT verify ct_hash == H(DOM_CIPHERTEXT, ciphertext_bytes).
+    // The wallet is responsible for verifying that binding when accepting the note.
+    assert(public.ct_hash != 0);
 }

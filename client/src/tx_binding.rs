@@ -2,8 +2,8 @@
 //!
 //! In a real ZK system, the proof is verified *against* public inputs, so the proof is already
 //! bound to those inputs. The role of `tx_binding` is to additionally bind the proof to a
-//! well-defined transaction "intent" object, so that higher-level data (and in future, additional
-//! public inputs like ciphertext hashes) cannot be modified without invalidating the proof.
+//! well-defined transaction "intent" object, so that higher-level data cannot be modified
+//! without invalidating the proof.
 //!
 //! ## Transfer Binding (current)
 //!
@@ -12,13 +12,25 @@
 //! - `input_count`, `output_count` (explicit counts)
 //! - `h_nf = H(nullifiers[0..MAX_INPUTS])` (hash of padded nullifier array)
 //!
-//! Output commitments are already explicit public inputs to the transfer proof and therefore
-//! are already bound by proof verification; we intentionally do not include them in `tx_binding`
-//! so we can safely derive output nonces from `tx_binding` without circular dependency.
+//! ### What is NOT in `tx_binding` (and why)
+//!
+//! - **Output commitments:** already explicit public inputs, bound by proof verification.
+//! - **Ciphertext hashes (`ct_hashes`):** also explicit public inputs, bound by proof verification.
+//!
+//! We intentionally do NOT include output commitments or ct_hashes in `tx_binding` to avoid
+//! circular dependencies: output nonces are derived from `tx_binding`, so anything that depends
+//! on output note contents (which include nonces) cannot be included in `tx_binding`.
+//!
+//! ### Ciphertext binding (Option 1A baseline)
+//!
+//! Per `docs/design-decisions/ciphertext-da-and-binding.md`:
+//! - `ct_hashes[MAX_OUTPUTS]` are explicit public inputs (not inside `tx_binding`).
+//! - The circuit binds to these values directly (verification "gets them for free").
+//! - For disabled outputs, `ct_hashes[j] == 0`.
 
 use crate::domain::DomainTag;
 use crate::hash::poseidon2_hash_noir;
-use crate::types::{Commitment, Fr, Nullifier};
+use crate::types::{Fr, Nullifier};
 
 /// Maximum number of inputs in an N→M transfer (compile-time constant).
 pub const MAX_INPUTS: usize = 3;
@@ -61,10 +73,13 @@ pub fn tx_binding_transfer(
 /// Compute the transaction binding hash for an **Unshield** spend proof.
 ///
 /// Layout:
-/// `H(DOM_TX_BINDING, 3, anchor, input_commitment, nullifier, public_amount, public_recipient_limbs[4], public_asset_id)`
+/// `H(DOM_TX_BINDING, 3, anchor, nullifier, public_amount, public_recipient_limbs[4], public_asset_id)`
+///
+/// **Note:** `input_commitment` is intentionally NOT included. It is private (witness-only);
+/// the proof already binds to it via preimage knowledge. Including it would create a value
+/// the chain cannot recompute (chain only sees public inputs).
 pub fn tx_binding_unshield(
     anchor: Fr,
-    input_commitment: Commitment,
     nullifier: Nullifier,
     public_amount: u64,
     public_recipient_limbs: [u64; 4],
@@ -76,7 +91,6 @@ pub fn tx_binding_unshield(
         DomainTag::TransactionBinding.to_field(),
         Fr::from(3u64), // discriminator: unshield
         anchor,
-        input_commitment,
         nullifier,
         Fr::from(public_amount),
         Fr::from(public_recipient_limbs[0]),

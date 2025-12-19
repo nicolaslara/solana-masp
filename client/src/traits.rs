@@ -55,7 +55,7 @@
 //! - Proof verification (both, but different implementations)
 
 use crate::proofs::MembershipWitness;
-use crate::types::{Anchor, Commitment, Fr, Nullifier, TokenAddress};
+use crate::types::{Anchor, CiphertextHash, Commitment, Fr, Nullifier, TokenAddress};
 use async_trait::async_trait;
 use thiserror::Error;
 
@@ -204,7 +204,16 @@ pub struct TransferPublicInputs {
     /// Number of enabled outputs (1 ≤ output_count ≤ MAX_OUTPUTS)
     pub output_count: u32,
 
+    /// Ciphertext hashes for output binding (padded with 0 for disabled outputs)
+    ///
+    /// Each enabled output `j` has `ct_hashes[j] = H(DOM_CIPHERTEXT, ciphertext_bytes[j])`.
+    /// This binds the proof to the ciphertext bytes published in Tx A (Option 1A baseline).
+    /// See `docs/design-decisions/ciphertext-da-and-binding.md`.
+    pub ct_hashes: [CiphertextHash; MAX_OUTPUTS],
+
     /// Transaction binding hash (prevents malleability)
+    ///
+    /// Includes anchor, counts, nullifiers, and ct_hashes (see `tx_binding.rs`).
     pub tx_binding: Fr,
 }
 
@@ -217,6 +226,25 @@ impl TransferPublicInputs {
     /// Get the enabled output commitments (non-zero values based on output_count).
     pub fn enabled_output_commitments(&self) -> &[Commitment] {
         &self.output_commitments[..self.output_count as usize]
+    }
+
+    /// Create placeholder ct_hashes for testing.
+    ///
+    /// In production, ct_hashes should be computed from actual ciphertext bytes.
+    /// This helper creates non-zero placeholders for enabled outputs (0..output_count)
+    /// and zero for disabled outputs.
+    pub fn placeholder_ct_hashes(output_count: u32) -> [CiphertextHash; MAX_OUTPUTS] {
+        let mut ct_hashes = [Fr::from(0u64); MAX_OUTPUTS];
+        for i in 0..(output_count as usize).min(MAX_OUTPUTS) {
+            // Use a unique non-zero value for each enabled output
+            ct_hashes[i] = Fr::from((i + 1) as u64);
+        }
+        ct_hashes
+    }
+
+    /// Get the enabled ciphertext hashes (non-zero values based on output_count).
+    pub fn enabled_ct_hashes(&self) -> &[CiphertextHash] {
+        &self.ct_hashes[..self.output_count as usize]
     }
 }
 
@@ -356,6 +384,21 @@ pub struct ShieldPublicInputs {
     pub public_asset_id: Fr,
     /// Amount (public)
     pub public_amount: u64,
+    /// Ciphertext hash for the output note (Option 1A binding).
+    ///
+    /// `ct_hash = H(DOM_CIPHERTEXT, ciphertext_bytes)`.
+    /// See `docs/design-decisions/ciphertext-da-and-binding.md`.
+    pub ct_hash: CiphertextHash,
+}
+
+impl ShieldPublicInputs {
+    /// Create placeholder ct_hash for testing.
+    ///
+    /// In production, ct_hash should be computed from actual ciphertext bytes.
+    /// This helper creates a non-zero placeholder value.
+    pub fn placeholder_ct_hash() -> CiphertextHash {
+        Fr::from(1u64)
+    }
 }
 
 /// Public inputs for MASP proofs (per-circuit).
@@ -531,6 +574,19 @@ pub struct ShieldRequest {
     pub ciphertext: Option<Vec<u8>>,
     /// Ephemeral public key
     pub ephemeral_key: Option<[u8; 64]>,
+    /// Ciphertext hash for output binding (Option 1A).
+    ///
+    /// If `ciphertext` and `ephemeral_key` are present, this SHOULD be set to
+    /// `output_ciphertext_hash(ciphertext, ephemeral_key)`.
+    /// Zero if not yet computed.
+    pub ct_hash: CiphertextHash,
+}
+
+impl ShieldRequest {
+    /// Get the ciphertext hash (returns zero if not set).
+    pub fn ct_hash(&self) -> CiphertextHash {
+        self.ct_hash
+    }
 }
 
 /// Shield result
@@ -539,6 +595,72 @@ pub struct ShieldResult {
     pub tx_sig: String,
     pub commitment: Commitment,
 }
+
+// ============================================================================
+// Ciphertext Posting (Tx A) - Option 1A baseline
+// ============================================================================
+
+/// A single output ciphertext to be posted in Tx A.
+///
+/// In the Option 1A baseline, ciphertexts are posted in a separate transaction (Tx A)
+/// before the MASP state transition (Tx B). This struct represents one output's ciphertext data.
+#[derive(Debug, Clone)]
+pub struct OutputCiphertextData {
+    /// The encrypted note plaintext (C_enc)
+    pub ciphertext: Vec<u8>,
+
+    /// Ephemeral public key (64 bytes: x || y)
+    pub ephemeral_key: [u8; 64],
+
+    /// Precomputed ciphertext hash for binding.
+    /// `ct_hash = H(DOM_CIPHERTEXT, ephemeral_key || ciphertext)`
+    pub ct_hash: CiphertextHash,
+}
+
+impl OutputCiphertextData {
+    /// Create from raw ciphertext bytes and ephemeral key, computing the ct_hash.
+    pub fn new(ciphertext: Vec<u8>, ephemeral_key: [u8; 64]) -> Self {
+        let ct_hash = crate::hash::ciphertext_hash(&[&ephemeral_key[..], &ciphertext[..]].concat());
+        Self {
+            ciphertext,
+            ephemeral_key,
+            ct_hash,
+        }
+    }
+
+    /// Get the bytes that should be posted in Tx A (ephemeral_key || ciphertext).
+    pub fn posting_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(64 + self.ciphertext.len());
+        bytes.extend_from_slice(&self.ephemeral_key);
+        bytes.extend_from_slice(&self.ciphertext);
+        bytes
+    }
+}
+
+/// Request to post ciphertexts (Tx A) for later binding in Tx B.
+///
+/// This represents a "ciphertext posting transaction" in the Option 1A baseline.
+/// The posted ciphertexts become ledger-historical artifacts (archive-retrievable).
+#[derive(Debug, Clone)]
+pub struct CiphertextPostingRequest {
+    /// Ciphertexts to post (one per enabled output in the upcoming Tx B).
+    pub outputs: Vec<OutputCiphertextData>,
+}
+
+/// Result of posting ciphertexts (Tx A).
+#[derive(Debug, Clone)]
+pub struct CiphertextPostingResult {
+    /// Transaction signature of the ciphertext posting transaction.
+    pub tx_sig: String,
+
+    /// The ct_hashes for each posted output (in order).
+    /// These should be used in the corresponding Tx B's public inputs.
+    pub ct_hashes: Vec<CiphertextHash>,
+}
+
+// ============================================================================
+// Transfer Output
+// ============================================================================
 
 /// Output data for a transfer (commitment + optional ciphertext)
 #[derive(Debug, Clone)]
@@ -591,6 +713,11 @@ pub struct TransferRequest {
 
     /// Number of enabled outputs
     pub output_count: u32,
+
+    /// Ciphertext hashes for output binding (padded with 0 for disabled outputs)
+    ///
+    /// Each enabled output `j` has `ct_hashes[j] = H(DOM_CIPHERTEXT, ciphertext_bytes[j])`.
+    pub ct_hashes: [CiphertextHash; MAX_OUTPUTS],
 
     /// Transaction binding hash (public input to spend proof)
     pub tx_binding: Fr,
@@ -723,6 +850,19 @@ pub trait Chain: Send + Sync {
         Ok(results)
     }
 
+    // ===== Ciphertext posting (Tx A) =====
+
+    /// Post ciphertexts for output notes (Tx A in Option 1A baseline).
+    ///
+    /// This submits ciphertext bytes to the ledger for later binding in Tx B.
+    /// The ciphertexts become archive-retrievable historical artifacts.
+    ///
+    /// Returns the transaction signature and the ct_hashes for each output.
+    async fn post_ciphertexts(
+        &self,
+        request: CiphertextPostingRequest,
+    ) -> Result<CiphertextPostingResult, ChainError>;
+
     // ===== High-level operations =====
 
     /// Shield: deposit tokens + insert commitment
@@ -784,6 +924,15 @@ pub struct OutputCiphertext {
 
     /// Transaction that created this output
     pub tx_sig: String,
+
+    /// Ciphertext hash from the proof's public inputs.
+    ///
+    /// This is the `ct_hash` that was bound in Tx B's ZK proof.
+    /// Wallets MUST verify: `ciphertext_hash(&ciphertext) == committed_ct_hash`
+    /// before accepting the note.
+    ///
+    /// If None, the wallet should fetch ct_hash from the transaction's public inputs.
+    pub committed_ct_hash: Option<CiphertextHash>,
 }
 
 /// Scan parameters for shielded sync
@@ -872,6 +1021,31 @@ pub trait Indexer: NoteCommitmentStore {
         let outputs = self.scan_outputs_since(None).await?;
         Ok(outputs.into_iter().filter(|o| o.tx_sig == tx_sig).collect())
     }
+
+    // ===== Ciphertext retrieval (Option 1A baseline) =====
+
+    /// Get ciphertext bytes by ct_hash.
+    ///
+    /// This is used by wallets to fetch ciphertext data posted in Tx A
+    /// when they know the ct_hash (e.g., from Tx B's public inputs).
+    ///
+    /// Returns (tx_sig, output_index, ciphertext_bytes, ephemeral_key) if found.
+    async fn get_ciphertext_by_hash(
+        &self,
+        ct_hash: &CiphertextHash,
+    ) -> Result<Option<(String, u32, Vec<u8>, [u8; 64])>, IndexerError>;
+
+    /// Get ciphertext for a specific output in a transaction.
+    ///
+    /// This is used when the wallet knows the tx_sig and output_index
+    /// (e.g., from OOB notification).
+    ///
+    /// Returns (ciphertext_bytes, ephemeral_key, ct_hash) if found.
+    async fn get_ciphertext_for_output(
+        &self,
+        tx_sig: &str,
+        output_index: u32,
+    ) -> Result<Option<(Vec<u8>, [u8; 64], CiphertextHash)>, IndexerError>;
 }
 
 // ============================================================================
@@ -944,6 +1118,13 @@ impl<T: Chain + ?Sized> Chain for Arc<T> {
         (**self).batch_check_nullifiers(nullifiers).await
     }
 
+    async fn post_ciphertexts(
+        &self,
+        request: CiphertextPostingRequest,
+    ) -> Result<CiphertextPostingResult, ChainError> {
+        (**self).post_ciphertexts(request).await
+    }
+
     async fn shield(&self, request: ShieldRequest) -> Result<ShieldResult, ChainError> {
         (**self).shield(request).await
     }
@@ -983,6 +1164,23 @@ impl<T: Indexer + ?Sized> Indexer for Arc<T> {
         tx_sig: &str,
     ) -> Result<Vec<OutputCiphertext>, IndexerError> {
         (**self).get_outputs_for_tx(tx_sig).await
+    }
+
+    async fn get_ciphertext_by_hash(
+        &self,
+        ct_hash: &CiphertextHash,
+    ) -> Result<Option<(String, u32, Vec<u8>, [u8; 64])>, IndexerError> {
+        (**self).get_ciphertext_by_hash(ct_hash).await
+    }
+
+    async fn get_ciphertext_for_output(
+        &self,
+        tx_sig: &str,
+        output_index: u32,
+    ) -> Result<Option<(Vec<u8>, [u8; 64], CiphertextHash)>, IndexerError> {
+        (**self)
+            .get_ciphertext_for_output(tx_sig, output_index)
+            .await
     }
 }
 

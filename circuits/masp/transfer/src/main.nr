@@ -76,6 +76,8 @@ struct TransferPublic {
     output_commitments: [Field; MAX_OUTPUTS],
     input_count: u32,
     output_count: u32,
+    // Ciphertext hashes for output binding (Option 1A weak binding)
+    ct_hashes: [Field; MAX_OUTPUTS],
     tx_binding: Field,
 }
 
@@ -93,6 +95,10 @@ fn main(
     // Counts
     input_count: pub u32,
     output_count: pub u32,
+    // Ciphertext hashes for output binding (padded with 0 for disabled outputs)
+    // Option 1A (weak binding): circuit binds ct_hashes but does NOT verify derivation.
+    // Wallet verifies: H(DOM_CIPHERTEXT, ciphertext_bytes) == ct_hash.
+    ct_hashes: pub [Field; MAX_OUTPUTS],
     // Transaction binding
     tx_binding: pub Field,
     // ===== Private inputs =====
@@ -108,6 +114,7 @@ fn main(
         output_commitments,
         input_count,
         output_count,
+        ct_hashes,
         tx_binding,
     };
 
@@ -131,6 +138,14 @@ fn main(
     // (T5) Disabled output commitments must be zero
     // Statement: "Dummy output slots are fully zeroed in public state (commitment == 0)."
     verify_disabled_outputs(public, outputs_enabled);
+
+    // (T8) Ciphertext hash binding (Option 1A weak binding)
+    // Statement: "Each enabled output has non-zero ct_hash; each disabled output has ct_hash == 0."
+    //
+    // Note: In Option 1A, the circuit does NOT verify that ct_hash was correctly derived from the
+    // ciphertext (H(DOM_CIPHERTEXT, ciphertext_bytes)). It only binds ct_hash as a public input.
+    // The wallet is responsible for verifying the actual hash binding when accepting the note.
+    verify_ct_hashes(public, outputs_enabled);
 
     // (T2b) Transaction binding
     // Statement: "This proof is bound to the transaction intent (anchor + counts + padded nullifiers)
@@ -314,6 +329,25 @@ fn verify_disabled_outputs(public: TransferPublic, outputs_enabled: [bool; MAX_O
     for j in 0..MAX_OUTPUTS {
         if !outputs_enabled[j] {
             assert(public.output_commitments[j] == 0);
+        }
+    }
+}
+
+/// Verify ct_hash binding (Option 1A weak binding).
+///
+/// Enabled outputs must have non-zero ct_hash (proof commits to ciphertext binding).
+/// Disabled outputs must have zero ct_hash (no ciphertext for dummy slots).
+///
+/// Note: The circuit does NOT verify that ct_hash == H(DOM_CIPHERTEXT, ciphertext_bytes).
+/// The wallet is responsible for verifying that binding when accepting the note.
+fn verify_ct_hashes(public: TransferPublic, outputs_enabled: [bool; MAX_OUTPUTS]) {
+    for j in 0..MAX_OUTPUTS {
+        if outputs_enabled[j] {
+            // Enabled outputs must have non-zero ct_hash
+            assert(public.ct_hashes[j] != 0);
+        } else {
+            // Disabled outputs must have zero ct_hash
+            assert(public.ct_hashes[j] == 0);
         }
     }
 }
