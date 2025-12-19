@@ -265,9 +265,11 @@ The proof MUST bind to the exact ordering of nullifiers and commitments. Reorder
   - For each **enabled** input `i`, only the SpendingKey holder for that note's recipient/address can produce a valid spend proof.
 - **(T2b) Transaction binding hash (MASP circuit)**:
   - `tx_binding` is a public input computed as:
+
     ```
     tx_binding = H(DOM_TX_BINDING, anchor_root, input_count, output_count, h_nf)
     ```
+
     where `h_nf = H(nullifiers[0..MAX_INPUTS])`.
   - Output commitments are already explicit public inputs and are therefore already bound by proof verification; we intentionally do not include them in `tx_binding` so output nonces can be derived from `tx_binding` without circular dependency.
 - **(T3) Input preimage knowledge (MASP circuit)**:
@@ -280,17 +282,21 @@ The proof MUST bind to the exact ordering of nullifiers and commitments. Reorder
   - For **disabled** outputs: `public_output_commitments[j] == 0`.
 - **(T6) Output nonce derivation (MASP circuit)**:
   - Output note `nullifier_nonce` values are derived deterministically from `tx_binding`:
+
     ```
     out_j.nullifier_nonce = H(DOM_NULLIFIER_NONCE, tx_binding, j)
     ```
+
   - This is REQUIRED because there may be multiple inputs.
 - **(T7) Value conservation + asset rules (MASP circuit)**:
   - **Current semantics (hard-sound): single-asset per transfer.**
   - All **enabled** inputs and outputs MUST share the same `asset_id`.
   - Value conservation is enforced as an **integer equality**:
+
     ```
     Σ(enabled_input_amounts) == Σ(enabled_output_amounts)
     ```
+
   - Multi-asset-in-one-transfer is intentionally deferred to a later milestone (see `tasks.md` Milestone 5).
 - **(T7b) Count correctness + slot gating (MASP circuit)**:
   - `1 ≤ input_count ≤ MAX_INPUTS`
