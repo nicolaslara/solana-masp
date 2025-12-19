@@ -21,17 +21,18 @@ pub enum DomainTag {
     /// `asset_id = H(DOM, token_address)`
     AssetId = 3,
 
-    /// Multi-asset alpha challenge (Fiat-Shamir)
-    /// `α = H(DOM, tx_binding_hash)`
-    AssetAlpha = 4,
-
-    /// Per-asset balance tag
-    /// `tag = H(DOM, α, asset_id)`
-    AssetTag = 5,
-
     /// Ciphertext binding (optional)
     /// `c_hash = H(DOM, ciphertext_chunks...)`
-    Ciphertext = 6,
+    Ciphertext = 4,
+
+    /// Transaction binding hash
+    ///
+    /// Binds the proof to the transaction intent / ordering, preventing malleability.
+    TransactionBinding = 5,
+
+    /// Nullifier nonce derivation for outputs
+    /// `nullifier_nonce = H(DOM, tx_binding, output_index)`
+    NullifierNonce = 6,
 
     /// Merkle tree internal nodes
     /// `parent = H(DOM, left, right)`
@@ -49,23 +50,15 @@ pub enum DomainTag {
     /// `nsk = H(DOM, spending_key)`
     NullifierSecret = 10,
 
-    /// Nullifier nonce derivation for outputs
-    /// `nullifier_nonce = H(DOM, spent_commitment, output_index)`
-    NullifierNonce = 11,
-
-    /// Transaction binding hash
-    /// `tx_hash = H(DOM, anchor, nullifiers..., commitments...)`
-    TransactionBinding = 12,
-
     /// Outgoing viewing key derivation
     /// `ovk = H(DOM, ak_x, nk_x)`
     /// Used to decrypt C_out (notes sent BY this key)
-    OutgoingViewingKey = 13,
+    OutgoingViewingKey = 11,
 
     /// Outgoing ciphertext key derivation
     /// `ock = H(DOM, ovk, epk_x, commitment)`
     /// Symmetric key for C_out encryption
-    OutgoingCiphertextKey = 14,
+    OutgoingCiphertextKey = 12,
 }
 
 impl DomainTag {
@@ -91,8 +84,6 @@ mod tests {
             DomainTag::NoteCommitment,
             DomainTag::Nullifier,
             DomainTag::AssetId,
-            DomainTag::AssetAlpha,
-            DomainTag::AssetTag,
             DomainTag::Ciphertext,
             DomainTag::MerkleNode,
             DomainTag::IncomingViewingKey,

@@ -13,7 +13,7 @@ use std::hash::poseidon2::Poseidon2;
 /// Merkle path against a public `anchor` (commitment-tree root). The chain separately checks
 /// that the provided anchor is a valid recent root.
 ///
-/// In our v0 reference implementation, the spent `input_commitment` is a *private* value and the
+/// In our current reference implementation, the spent `input_commitment` is a *private* value and the
 /// Merkle path witness (siblings + indices) is also private. Only the `anchor` is public.
 ///
 /// Stage-0: historically this was a no-op. As of Milestone 3, we add the real Merkle path check.
@@ -31,9 +31,8 @@ fn merkle_hash(left: Field, right: Field) -> Field {
 
     // Noir stdlib Poseidon2.
     //
-    // NOTE: This currently does NOT match the Rust `merkle_hash` (which uses Circom Poseidon via
-    // `light-poseidon`). Until we align the hash function across Rust + Noir, we cannot enforce
-    // Merkle membership inside Noir without breaking the UltraPlonk prover tests.
+    // NOTE: Rust `client/src/hash.rs` implements the same Noir Poseidon2 sponge semantics for
+    // Merkle nodes, so Merkle membership can be enforced in-circuit.
     Poseidon2::hash([dom, left, right], 3)
 }
 
@@ -137,6 +136,48 @@ pub fn prove_tx_binding(tx_binding: Field) {
 /// Statement: "Asset id is correctly bound to the transparent token boundary."
 pub fn prove_asset_id_binding(asset_id: Field) {
     assert(asset_id == asset_id);
+}
+
+// -----------------------------------------------------------------------------
+// Value / Asset Rules (single-asset per action)
+// -----------------------------------------------------------------------------
+
+/// Statement: "Value is conserved for a single-asset action."
+///
+/// Current semantics:
+/// - Each Action spends exactly one note and creates up to 3 outputs.
+/// - All outputs MUST have the same `asset_id` as the spent note.
+/// - Value conservation is enforced as:
+///     input_amount == sum(output_amounts)
+///
+/// NOTE:
+/// - In the Stage-0 scaffolds, we do not yet plumb full output note plaintexts
+///   nor enforce `H(output_note_plaintext) == output_commitment`.
+/// - Therefore this function only enforces **amount** conservation.
+/// - Output asset-id preservation is enforced at the circuit entrypoint level (transfer) using explicit
+///   `out*_asset_id` inputs, since the commitment preimage is not yet checked in Stage-0.
+pub fn prove_balance_conservation_single_asset(input_amount: u64, output_amounts: [u64; 3]) {
+    // Convert to Field so we can add without u64 overflow concerns. Since all terms are < 2^64,
+    // the sum of three outputs is < 2^66, far below the BN254 field modulus.
+    let input_f: Field = input_amount as Field;
+    let out_sum_f: Field =
+        (output_amounts[0] as Field) + (output_amounts[1] as Field) + (output_amounts[2] as Field);
+    assert(out_sum_f == input_f);
+}
+
+/// Statement: "Public unshield withdrawal matches the spent note (single-asset)."
+///
+/// Enforces:
+/// - `public_asset_id == note_asset_id`
+/// - `public_amount == note_amount`
+pub fn check_public_withdraw_binding_single_asset(
+    note_asset_id: Field,
+    note_amount: u64,
+    public_asset_id: Field,
+    public_amount: u64,
+) {
+    assert(note_asset_id == public_asset_id);
+    assert(note_amount == public_amount);
 }
 
 // -----------------------------------------------------------------------------

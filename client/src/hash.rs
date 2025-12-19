@@ -48,7 +48,10 @@ pub fn merkle_hash(left: Fr, right: Fr) -> Fr {
 /// - Sponge RATE = 3 over a 4-element state
 /// - IV = (message_size as Field) * 2^64, stored in the capacity element (state[3])
 /// - If `message_size != input.len()`, append `1` (variable-length domain separation)
-fn poseidon2_hash_noir(inputs: &[Fr], message_size: u32) -> Fr {
+/// Poseidon2 hash matching Noir stdlib `std::hash::poseidon2::Poseidon2::hash(input, message_size)`.
+///
+/// This is the function to use whenever Rust must match Noir stdlib Poseidon2 exactly.
+pub fn poseidon2_hash_noir(inputs: &[Fr], message_size: u32) -> Fr {
     const RATE: usize = 3;
     const TWO_POW_64: u128 = 1u128 << 64;
 

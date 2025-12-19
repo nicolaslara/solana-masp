@@ -157,18 +157,23 @@ asset_id = Poseidon(DOM_ASSET, token_address)
 - Boundary deposits/withdrawals expose `token_address` (public)
 - Inside pool, `asset_id` remains private
 
-### Multi-Asset Balance: Fiat-Shamir α Tags
+### Multi-Asset Balance / “No Mixing” Rules
 
-**Decision:** Use random linear combination for balance checking
+**Current decision (hard-sound): single-asset per Action.**
 
-```
-α = Poseidon(DOM_ASSET_ALPHA, tx_binding_hash)
-tag_i = Poseidon(DOM_ASSET_TAG, α, asset_id_i)
+- Each Action (transfer/unshield) spends one note and creates outputs of the **same `asset_id`**.
+- Value conservation is enforced as an **integer equality** on `u64` amounts:
+  - `input_amount == Σ(output_amounts)`
 
-Conservation: Σ(amount_in * tag_in) - Σ(amount_out * tag_out) - Σ(Δ_public * tag_public) = 0
-```
+**Why we are NOT using probabilistic “tag-sum” schemes for consensus soundness:**
 
-**Rationale:** Single scalar equation proves balance across all assets without revealing which assets.
+- A single weighted-sum equation in the field \( \mathbb{F}_p \) is not a hard guarantee of per-asset conservation.
+- It is susceptible to “mixing” arguments (one equation standing in for a vector equality) and relies on probabilistic assumptions.
+- It also introduces mod-\(p\) wrap/collision concerns unless additional structure is added.
+
+**Future (Milestone 5):**
+
+- If we want true MASP semantics (multiple assets in one transaction/action), we should adopt a hard-binding construction such as **value commitments** (Pedersen-style, per-asset generators) plus range checks.
 
 ### Domain Separation Tags
 
@@ -181,14 +186,17 @@ enum DomainTag {
     AuthorizationSecret = 5,   // ask = H(DOM, spending_key)
     NullifierSecret = 6,       // nsk = H(DOM, spending_key)
     IncomingViewingKey = 7,    // ivk = H(DOM, ak.x, nk.x)
-    AssetAlpha = 8,        // α = H(DOM, tx_binding_hash)
-    AssetTag = 9,          // tag = H(DOM, α, asset_id)
+    // Reserved for future multi-asset construction (Milestone 5):
+    // - value commitment binding challenges
+    // - per-asset generator binding tags
+    AssetAlpha = 8,
+    AssetTag = 9,
     NullifierNonce = 10,   // nonce = H(DOM, spent_cm, index)
     TxBinding = 11,        // binding_hash = H(DOM, tx_fields...)
     Ciphertext = 12,       // c_hash = H(DOM, ciphertext...)
     // Future (Milestone 7+):
     LongTermKey = 13,      // lt_sk = H(DOM, spending_key)
-    DiscoveryTag = 14,     // tag = H(DOM, shared_secret, direction, counter)
+    DiscoveryTag = 14,     // discovery tag = H(DOM, shared_secret, direction, counter)
     OutgoingViewingKey = 15,   // ovk = H(DOM, spending_key)
     WalletBackup = 16,     // backup_key = H(DOM, spending_key)
 }
@@ -454,7 +462,7 @@ Minimal public inputs:
 - Merkle paths proving inclusion
 - Recipient data for outputs
 - Randomness for commitments/encryption
-- Multi-asset bookkeeping (α tags)
+- (Future Milestone 5) value commitments / multi-asset binding data
 
 ---
 
@@ -585,7 +593,9 @@ As real implementations are added, tests will automatically use them.
 
 1. ~~Note structure~~ → Actions (decided)
 2. ~~Commitment scheme~~ → Poseidon (decided)
-3. ~~Multi-asset~~ → α tags (decided)
+3. Multi-asset in one Action:
+   - current: intentionally not supported (single-asset per Action)
+   - Milestone 5: implement a hard-sound construction (value commitments preferred)
 4. ~~Key derivation~~ → Sapling-style on Baby JubJub (decided)
 5. ~~Exact ciphertext format~~ → ECIES with ChaCha20-Poly1305 (decided)
 6. Relayer fee structure details
@@ -715,7 +725,6 @@ sk (SpendingKey) - root secret, can spend
 | **g_d**             | Diversifier base point                                     |
 | **pk_d**            | Diversified payment address (ivk \* g_d)                   |
 | **MASP**            | Multi-Asset Shielded Pool                                  |
-| **α**               | Fiat-Shamir challenge for multi-asset balance              |
-| **tag**             | Asset-specific tag derived from α                          |
+| **Value commitment** | Binding commitment to (asset_id, amount) used for hard-sound multi-asset conservation (future) |
 | **Indexer**         | Service providing Merkle witnesses and ciphertexts         |
 | **Chain**           | Service for submitting transactions (Solana RPC)           |

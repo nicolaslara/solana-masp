@@ -20,7 +20,7 @@
 
 use crate::proofs::{MockProofVerifier, MockSpendProver};
 use crate::traits::{
-    ProofBytes, ProofPublicInputs, ProofSystemError, ProofVerifier, SpendPrivateInputs, SpendProver,
+    ProofBytes, ProofPrivateInputs, ProofPublicInputs, ProofSystemError, ProofVerifier, SpendProver,
 };
 use async_trait::async_trait;
 
@@ -44,7 +44,7 @@ impl SpendProver for UltraPlonkProverScaffold {
     fn prove(
         &self,
         public_inputs: &ProofPublicInputs,
-        private_inputs: &SpendPrivateInputs,
+        private_inputs: &ProofPrivateInputs,
     ) -> Result<ProofBytes, ProofSystemError> {
         // TODO: integrate Noir + bb proving flow
         self.inner.prove(public_inputs, private_inputs)
@@ -72,7 +72,7 @@ impl SpendProver for Groth16ProverScaffold {
     fn prove(
         &self,
         public_inputs: &ProofPublicInputs,
-        private_inputs: &SpendPrivateInputs,
+        private_inputs: &ProofPrivateInputs,
     ) -> Result<ProofBytes, ProofSystemError> {
         // TODO: integrate Noir Groth16 proving flow
         self.inner.prove(public_inputs, private_inputs)

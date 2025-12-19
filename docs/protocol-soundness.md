@@ -103,11 +103,11 @@ Privacy caveats (protocol-level):
 
 ## Core objects and derivations
 
-### Note plaintext (v0)
+### Note plaintext (current)
 
 - `asset_id: Field`
 - `amount: u64`
-- `recipient: Field` (v0; see Spend Authorization section for required binding)
+- `recipient: Field` (current; see Spend Authorization section for required binding)
 - `diversifier_index: u64` (committed; must match the diversifier used for encryption/decryption)
 - `nullifier_nonce: Field`
 - `note_randomness: Field`
@@ -226,47 +226,110 @@ This section does **not** apply to the commitment tree membership model describe
 - **Chain must enforce**: (S1) and append `cm` into the commitment tree (and publish/update the current root)
 - **Wallet must enforce**: ciphertext integrity and (if using scanning) plaintext↔commitment consistency before accepting notes
 
-### Transfer (shielded → shielded)
+### Transfer (shielded → shielded) — single proof, flexible inputs/outputs
 
-**Goal**: prove a valid spend of an existing commitment, create new commitments, and insert a nullifier.
+**Goal**: prove valid spends of one or more existing commitments, create new output commitments, and insert nullifiers — all in a single proof.
+
+#### Transaction shape (N inputs → M outputs)
+
+There is only **one** transfer type in this protocol: a single proof that supports flexible **N inputs → M outputs** within fixed compile-time maxima.
+
+- **`MAX_INPUTS = 3`** (recommended for main transfer)
+- **`MAX_OUTPUTS = 3`** (payment + change + fee)
+
+The circuit accepts **exactly** `MAX_INPUTS` input slots and `MAX_OUTPUTS` output slots, with boolean `enabled` flags marking the active subset. Disabled slots are padded with zeros and do not affect balances or validity.
+
+**Public inputs (canonical layout):**
+
+1. `anchor_root : Field` — shared anchor for all inputs
+2. `nullifiers[MAX_INPUTS] : [Field; MAX_INPUTS]` — padded with 0 for disabled inputs
+3. `output_commitments[MAX_OUTPUTS] : [Field; MAX_OUTPUTS]` — padded with 0 for disabled outputs
+4. `input_count : u32` (encoded as Field)
+5. `output_count : u32` (encoded as Field)
+6. `tx_binding : Field`
+
+The proof MUST bind to the exact ordering of nullifiers and commitments. Reordering MUST invalidate the proof.
+
+**Output semantics (recommended wallet layout):**
+
+- Output 0: **payment** to recipient
+- Output 1: **change** back to sender (disabled if no change)
+- Output 2: **fee note** to relayer/operator (disabled if no fee)
 
 #### Required checks (Transfer)
 
 - **(T1) Membership (MASP circuit + chain anchor validity)**:
-  - the prover supplies a Merkle path witness and the MASP circuit checks that the (private) input commitment is a member under the public `anchor_root`.
-  - the chain checks that `anchor_root` is a valid recent root for the commitment tree.
+  - For each **enabled** input `i`, the prover supplies a Merkle path witness and the circuit checks membership under the shared `anchor_root`.
+  - The chain checks that `anchor_root` is a valid recent root for the commitment tree.
 - **(T2) Spend authorization / ownership (MASP circuit)**:
-  - only the SpendingKey holder for the note’s recipient/address can produce a valid spend proof (see “Spend authorization” section).
+  - For each **enabled** input `i`, only the SpendingKey holder for that note's recipient/address can produce a valid spend proof.
 - **(T2b) Transaction binding hash (MASP circuit)**:
-  - `tx_binding` is a public input and must equal a well-defined hash of the transaction intent.
-  - The current protocol layout used by this repository is defined in `client/src/tx_binding.rs` (`tx_binding_transfer(...)`).
+  - `tx_binding` is a public input computed as:
+    ```
+    tx_binding = H(DOM_TX_BINDING, anchor_root, input_count, output_count, h_nf)
+    ```
+    where `h_nf = H(nullifiers[0..MAX_INPUTS])`.
+  - Output commitments are already explicit public inputs and are therefore already bound by proof verification; we intentionally do not include them in `tx_binding` so output nonces can be derived from `tx_binding` without circular dependency.
 - **(T3) Input preimage knowledge (MASP circuit)**:
-  - `input_commitment == H(note_fields...)`.
+  - For each **enabled** input `i`: `input_commitment_i == H(note_fields_i...)`.
 - **(T4) Nullifier correctness (MASP circuit)**:
-  - `nullifier == H(DOM_NULLIFIER, spend_auth_material, note_nullifier_nonce)` with `spend_auth_material` bound to ownership.
+  - For each **enabled** input `i`: `nullifier_i == H(DOM_NULLIFIER, spend_auth_material_i, note_nullifier_nonce_i)`.
+  - For **disabled** inputs: `public_nullifiers[i] == 0`.
 - **(T5) Output well-formedness (MASP circuit)**:
-  - each output commitment matches its output note plaintext.
+  - For each **enabled** output `j`: `output_commitment_j == H(output_note_plaintext_j...)`.
+  - For **disabled** outputs: `public_output_commitments[j] == 0`.
 - **(T6) Output nonce derivation (MASP circuit)**:
-  - output note `nullifier_nonce` values are derived exactly as specified in “Nullifier nonce (`nullifier_nonce`)”.
+  - Output note `nullifier_nonce` values are derived deterministically from `tx_binding`:
+    ```
+    out_j.nullifier_nonce = H(DOM_NULLIFIER_NONCE, tx_binding, j)
+    ```
+  - This is REQUIRED because there may be multiple inputs.
 - **(T7) Value conservation + asset rules (MASP circuit)**:
-  - conservation holds (single-asset now; multi-asset via α-tags later).
+  - **Current semantics (hard-sound): single-asset per transfer.**
+  - All **enabled** inputs and outputs MUST share the same `asset_id`.
+  - Value conservation is enforced as an **integer equality**:
+    ```
+    Σ(enabled_input_amounts) == Σ(enabled_output_amounts)
+    ```
+  - Multi-asset-in-one-transfer is intentionally deferred to a later milestone (see `tasks.md` Milestone 5).
+- **(T7b) Count correctness + slot gating (MASP circuit)**:
+  - `1 ≤ input_count ≤ MAX_INPUTS`
+  - `1 ≤ output_count ≤ MAX_OUTPUTS`
+  - `input_count == Σ(input_enabled[i])`
+  - `output_count == Σ(output_enabled[j])`
+  - All per-slot constraints are gated by enable flags.
 - **(T8) Nullifier uniqueness (chain, Light address tree)**:
-  - inserting the nullifier succeeds exactly once.
+  - Inserting each non-zero nullifier succeeds exactly once.
 - **(T9) Root/anchor binding (composition)**:
-  - the MASP spend proof is bound to the same anchor/root context used for membership (explicitly or via a binding hash).
+  - All enabled inputs prove membership against the same `anchor_root` (shared anchor).
 
 #### Responsibility split (Transfer)
 
-- **Chain must enforce**: anchor validity for (T1), (T8), and verify the MASP proof against its public inputs
-- **Circuit must prove**: membership/path validity for (T1), (T2)–(T7) and bind to the same root context as the anchor (T9)
-- **Wallet/indexer must support**: providing ciphertexts and membership/non-membership inputs needed to build Merkle path witnesses and MASP proofs
+- **Chain must enforce**:
+  - Anchor validity for `anchor_root`
+  - Nullifier insert-once semantics for all non-zero nullifiers
+  - Append/record all non-zero output commitments
+  - Verify the proof against the canonical public input layout
+- **Circuit must prove**:
+  - Membership for each enabled input under `anchor_root`
+  - Correct binding to authoritative commitment data for each input
+  - Ownership authorization + correct nullifier derivation
+  - Output commitment correctness + deterministic output nonces
+  - Integer value conservation (single-asset)
+  - Correct gating/counts and zero-padding constraints
+  - Correct `tx_binding` computation
+- **Wallet must enforce**:
+  - Output ciphertext integrity + plaintext↔commitment consistency
+  - Coin selection strategy (prefer fewer inputs; use consolidation circuit for many inputs)
 
 #### Why this is sufficient (Transfer)
 
-- (T1)+(T3) ensure the spend refers to a real note in the committed set (no “phantom notes”).
+- (T1)+(T3) ensure each spend refers to a real note in the committed set (no "phantom notes").
 - (T2)+(T4) ensure only the intended owner can derive the correct nullifier and satisfy the authorization constraints.
 - (T8) prevents replay/double-spend even if an attacker reuses the same proof inputs.
 - (T5)+(T7) prevent creating value or malformed outputs.
+- (T2b) prevents relayers/indexers from swapping or splicing outputs/nullifiers across transactions.
+- (T7b) ensures disabled slots cannot affect soundness.
 
 ### Unshield (shielded → transparent)
 
@@ -376,39 +439,41 @@ If something is “NOT IMPLEMENTED”, it is a required protocol check that the 
   - Enforced by Noir's `u64` type system in real circuits: all amount parameters (`public_amount`, `note_amount`, output values) are typed as `u64`, which automatically generates range constraints.
   - In Rust mocks, amounts are already `u64`, so no explicit check is needed.
 
-#### Transfer (T1–T9)
+#### Transfer (T1–T9) — single transfer (N inputs → M outputs)
 
 - **(T1) Membership**:
-  - `client/src/mock.rs`: `MockChain::transfer()` checks:
-    - `is_valid_anchor(anchor)`
-    - `membership_witness.root() == anchor`
-    - `membership_witness.verify_local(input_commitment)`
-  - `client/src/proofs.rs`: `mock_check_transfer()` also checks witness root == anchor and verifies Merkle path locally.
+  - `client/src/mock.rs`: `MockChain::transfer()` checks `is_valid_anchor(anchor)`.
+  - `client/src/proofs.rs`: `mock_check_transfer()` iterates over enabled inputs and verifies each Merkle path against the shared `anchor`.
 - **(T2) Spend authorization / ownership (SpendingKey-only)**:
   - `client/src/proofs.rs`: `mock_check_spend_authorization()` enforces that the prover knows `spending_key` such that:
     - `fvk(spending_key).nk_field == private.nk`, and
     - `fvk(spending_key).diversified_address(note_diversifier_index).to_field == private.note_recipient`
-  - `client/src/client.rs`: the client supplies `spending_key` and `note_diversifier_index` (as part of the note plaintext fields) in `SpendPrivateInputs` for spend proofs.
+  - Authorization is checked for each enabled input note.
 - **(T2b) Transaction binding hash (anti-malleability / intent binding)**:
-  - `client/src/tx_binding.rs`: defines `tx_binding_transfer(...)`.
-  - `client/src/client.rs`: computes `tx_binding` when building `SpendPublicInputs` for transfers.
-  - `client/src/mock.rs`: recomputes `tx_binding` from the request when verifying transfer proofs.
-  - `client/src/proofs.rs`: `mock_check_transfer()` enforces `public.tx_binding == H(DOM_TX_BINDING, ...)`.
+  - `client/src/tx_binding.rs`: defines `tx_binding_transfer(...)` (binding for the single transfer type).
+  - `client/src/proofs.rs`: `mock_check_transfer()` enforces `public.tx_binding == tx_binding_transfer(...)`.
+  - The binding includes a hash of the full padded nullifier array plus counts.
 - **(T3) Input preimage knowledge**:
-  - `client/src/proofs.rs`: `mock_check_transfer()` recomputes input note and checks `commitment == public.input_commitment`.
+  - `client/src/proofs.rs`: `mock_check_transfer()` recomputes each enabled input commitment from note fields.
 - **(T4) Nullifier correctness**:
-  - `client/src/proofs.rs`: `mock_check_transfer()` checks `compute_nullifier(private.nk, note_nullifier_nonce) == public.nullifier`.
+  - `client/src/proofs.rs`: For each enabled input, checks `compute_nullifier(nk, note_nullifier_nonce) == public.nullifiers[i]`.
+  - For disabled inputs, checks `public.nullifiers[i] == 0`.
 - **(T5) Output well-formedness**:
-  - `client/src/proofs.rs`: `mock_check_transfer()` checks each output note commitment matches each public output commitment.
+  - `client/src/proofs.rs`: For each enabled output, checks `note.commitment() == public.output_commitments[j]`.
+  - For disabled outputs, checks `public.output_commitments[j] == 0`.
 - **(T6) Output nonce derivation**:
-  - `client/src/proofs.rs`: `mock_check_transfer()` checks `out_i.nullifier_nonce == Note::derive_nullifier_nonce(input_commitment, output_index)`.
+  - `client/src/proofs.rs`: checks `out_j.nullifier_nonce == H(DOM_NULLIFIER_NONCE, tx_binding, j)`.
 - **(T7) Value conservation + asset rules**:
-  - `client/src/proofs.rs`: `mock_check_transfer()` enforces single-asset and `sum(outputs.amount) == input.amount`.
+  - `client/src/proofs.rs`: `mock_check_transfer()` enforces single-asset semantics:
+    - All enabled inputs/outputs must have the same `asset_id`.
+    - Value conservation: `Σ(enabled_input.amount) == Σ(enabled_output.amount)` (checked in integers).
+- **(T7b) Count correctness + slot gating**:
+  - `client/src/proofs.rs`: Validates `input_count` and `output_count` match the number of enabled slots.
+  - Constraints are gated by enable flags.
 - **(T8) Nullifier uniqueness**:
-  - `client/src/mock.rs`: `MockChain::insert_nullifier()` rejects duplicates (in-memory set).
+  - `client/src/mock.rs`: `MockChain::insert_nullifier()` rejects duplicates for each non-zero nullifier.
 - **(T9) Root/anchor binding (composition)**:
-  - `client/src/mock.rs`: `MockChain::transfer()` binds witness root to request anchor.
-  - `client/src/proofs.rs`: `mock_check_transfer()` binds witness root to public anchor.
+  - All enabled inputs prove membership against the same shared `anchor`.
 
 #### Unshield (U1–U3)
 
@@ -416,6 +481,6 @@ If something is “NOT IMPLEMENTED”, it is a required protocol check that the 
   - `client/src/proofs.rs`: `mock_check_unshield()` enforces `public_amount == note_amount` and `public_asset_id == note_asset_id`.
 - **(U2) Public recipient binding**: implemented in mocks (and is the standard ZK meaning of public inputs).
   - `client/src/proofs.rs`: `MockProofVerifier` binds proof bytes to **all** public inputs, including `public_recipient`.
-  - `client/src/proofs.rs`: `mock_check_unshield()` also enforces `tx_binding == H(DOM_TX_BINDING, ...)` (v0 layout).
+  - `client/src/proofs.rs`: `mock_check_unshield()` also enforces `tx_binding == H(DOM_TX_BINDING, ...)` (current layout).
     - This is a minimal, concrete intent-binding layout over the fields we already have today; future iterations can extend it to cover ciphertext hashes / additional intent fields.
 - **(U3) Transparent withdrawal (chain)**: **NOT IMPLEMENTED** in mocks (no SPL transfers yet).

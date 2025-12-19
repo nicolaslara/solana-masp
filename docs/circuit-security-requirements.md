@@ -217,18 +217,11 @@ output_note.amount < 2^64
 input_note.amount == output_note.amount + change_note.amount
 ```
 
-**Multi-asset (with α-tags):**
+**Why:** Prevents creating value from nothing.
 
-```text
-α = Poseidon(DOM_ASSET_ALPHA, tx_binding_hash)
-tag_in = Poseidon(DOM_ASSET_TAG, α, input_note.asset_id)
-tag_out = Poseidon(DOM_ASSET_TAG, α, output_note.asset_id)
-tag_change = Poseidon(DOM_ASSET_TAG, α, change_note.asset_id)
-
-input_note.amount * tag_in == output_note.amount * tag_out + change_note.amount * tag_change
-```
-
-**Why:** Prevents creating value from nothing or transferring between asset types.
+**Note on multi-asset:** We intentionally do **not** use “single field equation” tag schemes for consensus soundness.
+For true multi-asset-in-one-action semantics, the intended solution is **value commitments** (Pedersen-style)
+with per-asset generators (or equivalent hard-binding construction) + range checks. See `tasks.md` Milestone 5.
 
 #### 2.8 Asset Type Preservation ✅ CRITICAL (for single-asset transfer)
 
@@ -268,7 +261,7 @@ The `transfer` circuit entrypoint should be a clear audit trail that calls one f
 - **Amount range checks**: all amounts < 2^64
 - **Balance conservation**:
   - single-asset first
-  - multi-asset later via α-tags
+  - multi-asset later (Milestone 5) via a hard-binding construction (value commitments preferred)
 - **Transaction binding**: `tx_binding_hash` commits to the full action intent
 
 ### Who checks what (Transfer)
@@ -279,7 +272,7 @@ The `transfer` circuit entrypoint should be a clear audit trail that calls one f
   - Nullifier derivation from `nk` and note nonce (ownership binding)
   - Output commitment preimages (outputs are real notes)
   - Amount range checks
-  - Balance conservation (single-asset first; multi-asset later via α-tags)
+  - Balance conservation (single-asset first; multi-asset later in Milestone 5 via a hard-binding construction)
   - Tx binding (proof is bound to the specific transaction intent)
 - **Chain must enforce**
   - Anchor validity (root history policy)
@@ -440,7 +433,7 @@ verify(proof, public_inputs, vk) == true
 | Spend someone else's note | Ownership proof (nullifier key) |
 | Spend non-existent note | Merkle membership proof |
 | Withdraw wrong amount | Public output binding |
-| Cross-asset value transfer | Asset type preservation / α-tags |
+| Cross-asset value transfer | Asset type preservation (current) / value-commitment-based enforcement (future) |
 | Replay old transaction | Anchor freshness + nullifier |
 | Forge commitment | Commitment integrity check |
 

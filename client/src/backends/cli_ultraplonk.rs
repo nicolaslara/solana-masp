@@ -28,8 +28,8 @@
 //! Old proof directories can be cleaned with `CliProofManager::cleanup_old()`.
 
 use crate::traits::{
-    ProofBytes, ProofPublicInputs, ProofSystemError, ShieldPublicInputs, SpendPrivateInputs,
-    SpendProver, SpendPublicInputs, UnshieldPublicInputs,
+    ProofBytes, ProofPrivateInputs, ProofPublicInputs, ProofSystemError, ShieldPublicInputs,
+    SpendProver, TransferPublicInputs, UnshieldPublicInputs,
 };
 use ark_ff::{BigInteger, PrimeField};
 use std::path::{Path, PathBuf};
@@ -361,111 +361,217 @@ impl CliUltraPlonkProver {
 
     fn build_transfer_prover_toml(
         &self,
-        public: &SpendPublicInputs,
-        private: &SpendPrivateInputs,
+        public: &TransferPublicInputs,
+        private: &crate::traits::TransferPrivateInputs,
     ) -> Result<String, ProofSystemError> {
-        let num_outputs = public.output_commitments.len();
-        if num_outputs == 0 || num_outputs > 3 {
-            return Err(ProofSystemError::InvalidPublicInputs);
-        }
+        use crate::note::Note;
 
-        // Pad output commitments to 3 (use 0 for unused slots)
         let zero = crate::types::Fr::from(0u64);
-        let out0 = public.output_commitments.first().copied().unwrap_or(zero);
-        let out1 = public.output_commitments.get(1).copied().unwrap_or(zero);
-        let out2 = public.output_commitments.get(2).copied().unwrap_or(zero);
 
-        // For stage-0, we just use dummy values for output note details
-        // In production, these would come from the actual output notes
-        let out0_value = private.note_amount; // recipient gets the value
-        let out1_value = 0u64; // change value (TODO: pass from client)
-        let out2_value = 0u64; // fee value (TODO: pass from client)
-
-        // Private-only: spent commitment (not a public input in the privacy-preserving model)
-        let input_commitment = crate::note::Note::with_values(
-            private.note_asset_id,
-            private.note_amount,
-            private.note_recipient,
-            private.note_diversifier_index,
-            private.note_nullifier_nonce,
-            private.note_randomness,
-        )
-        .commitment();
-
-        let (siblings, path_indices, root) = match &private.membership_witness {
-            crate::proofs::MembershipWitness::MerklePath {
-                siblings,
-                path_indices,
-                root,
-            } => (siblings, path_indices, root),
-            crate::proofs::MembershipWitness::LightValidityProof { .. } => {
-                return Err(ProofSystemError::NotImplemented(
-                    "ultraplonk(cli) does not support LightValidityProof membership witness"
-                        .to_string(),
-                ));
-            }
-        };
-
-        if *root != public.anchor {
+        // Sanity: counts must match the enabled flags in the private witness.
+        if private.input_count() != public.input_count
+            || private.output_count() != public.output_count
+        {
             return Err(ProofSystemError::InvalidPublicInputs);
         }
 
-        let siblings_toml = fr_vec_to_toml_array(siblings);
-        let path_indices_toml = bool_vec_to_toml_array(path_indices);
+        // Transfer asset id (single-asset semantics today): take from the first enabled input.
+        let mut transfer_asset_id = zero;
+        for i in 0..crate::tx_binding::MAX_INPUTS {
+            if private.inputs[i].enabled {
+                transfer_asset_id = private.inputs[i].note_asset_id;
+                break;
+            }
+        }
+
+        // Helper to get fixed-size siblings/path arrays for Noir (depth = 16).
+        fn pad_fr_vec(
+            vals: &[crate::types::Fr],
+            len: usize,
+        ) -> Result<Vec<crate::types::Fr>, ProofSystemError> {
+            if vals.len() != len {
+                return Err(ProofSystemError::InvalidPublicInputs);
+            }
+            Ok(vals.to_vec())
+        }
+        fn pad_bool_vec(vals: &[bool], len: usize) -> Result<Vec<bool>, ProofSystemError> {
+            if vals.len() != len {
+                return Err(ProofSystemError::InvalidPublicInputs);
+            }
+            Ok(vals.to_vec())
+        }
+
+        // Build per-input TOML fragments.
+        let mut in_enabled = [false; 3];
+        let mut in_commitments = [zero; 3];
+        let mut in_siblings_toml = [String::new(), String::new(), String::new()];
+        let mut in_path_indices_toml = [String::new(), String::new(), String::new()];
+        let mut in_note_asset_id = [zero; 3];
+        let mut in_note_amount = [0u64; 3];
+        let mut in_note_recipient = [zero; 3];
+        let mut in_note_div_idx = [0u64; 3];
+        let mut in_note_nf_nonce = [zero; 3];
+        let mut in_note_rho = [zero; 3];
+        let mut in_nk = [zero; 3];
+        let mut in_ask = [zero; 3];
+
+        for i in 0..crate::tx_binding::MAX_INPUTS {
+            let slot = &private.inputs[i];
+            in_enabled[i] = slot.enabled;
+
+            if !slot.enabled {
+                // Disabled slots: use zero padding (must not affect circuit).
+                in_commitments[i] = zero;
+                in_siblings_toml[i] = fr_vec_to_toml_array(&vec![zero; 16]);
+                in_path_indices_toml[i] = bool_vec_to_toml_array(&vec![false; 16]);
+                continue;
+            }
+
+            // Commitment from note fields (authoritative input commitment).
+            let cm = Note::with_values(
+                slot.note_asset_id,
+                slot.note_amount,
+                slot.note_recipient,
+                slot.note_diversifier_index,
+                slot.note_nullifier_nonce,
+                slot.note_randomness,
+            )
+            .commitment();
+            in_commitments[i] = cm;
+
+            // Membership witness must be a Merkle path of depth 16 and bound to the public anchor.
+            let (siblings, path_indices, root) = match &slot.membership_witness {
+                crate::proofs::MembershipWitness::MerklePath {
+                    siblings,
+                    path_indices,
+                    root,
+                } => (siblings, path_indices, root),
+                crate::proofs::MembershipWitness::LightValidityProof { .. } => {
+                    return Err(ProofSystemError::NotImplemented(
+                        "ultraplonk(cli) does not support LightValidityProof membership witness"
+                            .to_string(),
+                    ));
+                }
+            };
+            if *root != public.anchor {
+                return Err(ProofSystemError::InvalidPublicInputs);
+            }
+            let sibs = pad_fr_vec(siblings, 16)?;
+            let idxs = pad_bool_vec(path_indices, 16)?;
+            in_siblings_toml[i] = fr_vec_to_toml_array(&sibs);
+            in_path_indices_toml[i] = bool_vec_to_toml_array(&idxs);
+
+            // Note fields
+            in_note_asset_id[i] = slot.note_asset_id;
+            in_note_amount[i] = slot.note_amount;
+            in_note_recipient[i] = slot.note_recipient;
+            in_note_div_idx[i] = slot.note_diversifier_index;
+            in_note_nf_nonce[i] = slot.note_nullifier_nonce;
+            in_note_rho[i] = slot.note_randomness;
+            in_nk[i] = slot.nk;
+            in_ask[i] = crate::keys::SpendingKey::from_field(slot.spending_key).ask();
+        }
+
+        // Outputs: enabled flags + amount + asset id.
+        let mut out_enabled = [false; 3];
+        let mut out_asset_id = [zero; 3];
+        let mut out_amount = [0u64; 3];
+        for j in 0..crate::tx_binding::MAX_OUTPUTS {
+            let slot = &private.outputs[j];
+            out_enabled[j] = slot.enabled;
+            if slot.enabled {
+                out_asset_id[j] = slot.note.asset_id;
+                out_amount[j] = slot.note.amount;
+            }
+        }
+
+        // Build TOML arrays for public inputs.
+        let nullifiers_toml = fr_vec_to_toml_array(&public.nullifiers.to_vec());
+        let output_commitments_toml = fr_vec_to_toml_array(&public.output_commitments.to_vec());
+
+        // Build TOML table arrays for inputs/outputs (`[[inputs]]` / `[[outputs]]`).
+        // This is the TOML-native way to represent "array of structs" and is accepted by nargo.
+        let mut inputs_toml = String::new();
+        for i in 0..crate::tx_binding::MAX_INPUTS {
+            inputs_toml.push_str("[[inputs]]\n");
+            inputs_toml.push_str(&format!(
+                "enabled = {}\n",
+                if in_enabled[i] { "true" } else { "false" }
+            ));
+            inputs_toml.push_str(&format!(
+                "note_asset_id = \"{}\"\n",
+                fr_to_dec(in_note_asset_id[i])
+            ));
+            inputs_toml.push_str(&format!("note_amount = {}\n", in_note_amount[i]));
+            inputs_toml.push_str(&format!(
+                "note_recipient = \"{}\"\n",
+                fr_to_dec(in_note_recipient[i])
+            ));
+            inputs_toml.push_str(&format!(
+                "note_diversifier_index = {}\n",
+                in_note_div_idx[i]
+            ));
+            inputs_toml.push_str(&format!(
+                "note_nullifier_nonce = \"{}\"\n",
+                fr_to_dec(in_note_nf_nonce[i])
+            ));
+            inputs_toml.push_str(&format!(
+                "note_randomness = \"{}\"\n",
+                fr_to_dec(in_note_rho[i])
+            ));
+            inputs_toml.push_str(&format!("nk = \"{}\"\n", fr_to_dec(in_nk[i])));
+            inputs_toml.push_str(&format!("ask = \"{}\"\n", fr_to_dec(in_ask[i])));
+            inputs_toml.push_str(&format!(
+                "commitment = \"{}\"\n",
+                fr_to_dec(in_commitments[i])
+            ));
+            inputs_toml.push_str(&format!("siblings = {}\n", in_siblings_toml[i]));
+            inputs_toml.push_str(&format!("path_indices = {}\n\n", in_path_indices_toml[i]));
+        }
+
+        let mut outputs_toml = String::new();
+        for j in 0..crate::tx_binding::MAX_OUTPUTS {
+            outputs_toml.push_str("[[outputs]]\n");
+            outputs_toml.push_str(&format!(
+                "enabled = {}\n",
+                if out_enabled[j] { "true" } else { "false" }
+            ));
+            outputs_toml.push_str(&format!("asset_id = \"{}\"\n", fr_to_dec(out_asset_id[j])));
+            outputs_toml.push_str(&format!("amount = {}\n", out_amount[j]));
+            outputs_toml.push_str(&format!(
+                "commitment = \"{}\"\n\n",
+                fr_to_dec(public.output_commitments[j])
+            ));
+        }
 
         Ok(format!(
             r#"# Auto-generated by CliUltraPlonkProver
 anchor = "{anchor}"
-input_commitment = "{input_commitment}"
-siblings = {siblings}
-path_indices = {path_indices}
-nullifier = "{nullifier}"
-output_commitment_0 = "{out0}"
-output_commitment_1 = "{out1}"
-output_commitment_2 = "{out2}"
+nullifiers = {nullifiers}
+output_commitments = {output_commitments}
+input_count = {input_count}
+output_count = {output_count}
 tx_binding = "{tx_binding}"
 
-note_asset_id = "{note_asset_id}"
-note_amount = "{note_amount}"
-note_recipient = "{note_recipient}"
-note_diversifier_index = "{note_diversifier_index}"
-note_nullifier_nonce = "{note_nullifier_nonce}"
-note_randomness = "{note_randomness}"
-nk = "{nk}"
-ask = "{ask}"
-
-out0_value = "{out0_value}"
-out1_value = "{out1_value}"
-out2_value = "{out2_value}"
+transfer_asset_id = "{transfer_asset_id}"
 "#,
+            // table arrays must be appended after the header block
             anchor = fr_to_dec(public.anchor),
-            input_commitment = fr_to_dec(input_commitment),
-            siblings = siblings_toml,
-            path_indices = path_indices_toml,
-            nullifier = fr_to_dec(public.nullifier),
-            out0 = fr_to_dec(out0),
-            out1 = fr_to_dec(out1),
-            out2 = fr_to_dec(out2),
+            nullifiers = nullifiers_toml,
+            output_commitments = output_commitments_toml,
+            input_count = public.input_count,
+            output_count = public.output_count,
             tx_binding = fr_to_dec(public.tx_binding),
-            note_asset_id = fr_to_dec(private.note_asset_id),
-            note_amount = private.note_amount,
-            note_recipient = fr_to_dec(private.note_recipient),
-            note_diversifier_index = private.note_diversifier_index,
-            note_nullifier_nonce = fr_to_dec(private.note_nullifier_nonce),
-            note_randomness = fr_to_dec(private.note_randomness),
-            nk = fr_to_dec(private.nk),
-            // Derive ask from spending_key for the Noir circuit
-            ask = fr_to_dec(crate::keys::SpendingKey::from_field(private.spending_key).ask()),
-            out0_value = out0_value,
-            out1_value = out1_value,
-            out2_value = out2_value,
-        ))
+            transfer_asset_id = fr_to_dec(transfer_asset_id),
+        ) + "\n"
+            + &inputs_toml
+            + &outputs_toml)
     }
 
     fn build_unshield_prover_toml(
         &self,
         public: &UnshieldPublicInputs,
-        private: &SpendPrivateInputs,
+        private: &crate::traits::UnshieldPrivateInputs,
     ) -> Result<String, ProofSystemError> {
         // Private-only: spent commitment (not a public input in the privacy-preserving model)
         let input_commitment = crate::note::Note::with_values(
@@ -544,7 +650,7 @@ ask = "{ask}"
     fn build_shield_prover_toml(
         &self,
         public: &ShieldPublicInputs,
-        private: &SpendPrivateInputs,
+        private: &crate::traits::ShieldPrivateInputs,
     ) -> Result<String, ProofSystemError> {
         Ok(format!(
             r#"# Auto-generated by CliUltraPlonkProver
@@ -678,12 +784,19 @@ note_randomness = "{note_randomness}"
     fn build_prover_toml(
         &self,
         public_inputs: &ProofPublicInputs,
-        private_inputs: &SpendPrivateInputs,
+        private_inputs: &ProofPrivateInputs,
     ) -> Result<String, ProofSystemError> {
-        match public_inputs {
-            ProofPublicInputs::Shield(p) => self.build_shield_prover_toml(p, private_inputs),
-            ProofPublicInputs::Transfer(p) => self.build_transfer_prover_toml(p, private_inputs),
-            ProofPublicInputs::Unshield(p) => self.build_unshield_prover_toml(p, private_inputs),
+        match (public_inputs, private_inputs) {
+            (ProofPublicInputs::Shield(p), ProofPrivateInputs::Shield(priv_in)) => {
+                self.build_shield_prover_toml(p, priv_in)
+            }
+            (ProofPublicInputs::Transfer(p), ProofPrivateInputs::Transfer(priv_in)) => {
+                self.build_transfer_prover_toml(p, priv_in)
+            }
+            (ProofPublicInputs::Unshield(p), ProofPrivateInputs::Unshield(priv_in)) => {
+                self.build_unshield_prover_toml(p, priv_in)
+            }
+            _ => Err(ProofSystemError::InvalidPublicInputs),
         }
     }
 
@@ -728,7 +841,7 @@ impl SpendProver for CliUltraPlonkProver {
     fn prove(
         &self,
         public_inputs: &ProofPublicInputs,
-        private_inputs: &SpendPrivateInputs,
+        private_inputs: &ProofPrivateInputs,
     ) -> Result<ProofBytes, ProofSystemError> {
         let circuit_type = Self::circuit_type_for(public_inputs);
         let circuit_dir = self.circuit_dir(circuit_type);

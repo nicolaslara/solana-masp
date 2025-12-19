@@ -10,7 +10,7 @@
 
 use crate::traits::{
     ProofBytes, ProofPublicInputs, ProofSystemError, ProofVerifier, ShieldPublicInputs,
-    SpendPublicInputs, UnshieldPublicInputs,
+    TransferPublicInputs, UnshieldPublicInputs,
 };
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -128,42 +128,32 @@ impl NoirRsUltraPlonkVerifier {
 
     fn verify_transfer(
         &self,
-        public_inputs: &SpendPublicInputs,
+        public_inputs: &TransferPublicInputs,
         proof: &ProofBytes,
     ) -> Result<bool, ProofSystemError> {
-        let num_outputs = public_inputs.output_commitments.len();
-        if num_outputs == 0 || num_outputs > 3 {
-            return Err(ProofSystemError::InvalidPublicInputs);
-        }
-
         let vk_onchain = self.get_vk_onchain(&self.vk_bb_path("transfer"))?;
 
-        // Pad output commitments to 3 (use 0 for unused slots)
-        let zero = crate::types::Fr::from(0u64);
-        let out0 = public_inputs
-            .output_commitments
-            .first()
-            .copied()
-            .unwrap_or(zero);
-        let out1 = public_inputs
-            .output_commitments
-            .get(1)
-            .copied()
-            .unwrap_or(zero);
-        let out2 = public_inputs
-            .output_commitments
-            .get(2)
-            .copied()
-            .unwrap_or(zero);
+        let out0 = public_inputs.output_commitments[0];
+        let out1 = public_inputs.output_commitments[1];
+        let out2 = public_inputs.output_commitments[2];
 
-        // Order must match transfer circuit:
-        // anchor, nullifier, out0, out1, out2, tx_binding
+        // Order must match transfer circuit public input layout:
+        // anchor,
+        // nullifier_0..2,
+        // output_commitment_0..2,
+        // input_count,
+        // output_count,
+        // tx_binding
         let pis: Vec<[u8; 32]> = vec![
             fr_to_be32(public_inputs.anchor),
-            fr_to_be32(public_inputs.nullifier),
+            fr_to_be32(public_inputs.nullifiers[0]),
+            fr_to_be32(public_inputs.nullifiers[1]),
+            fr_to_be32(public_inputs.nullifiers[2]),
             fr_to_be32(out0),
             fr_to_be32(out1),
             fr_to_be32(out2),
+            fr_to_be32(crate::types::Fr::from(public_inputs.input_count as u64)),
+            fr_to_be32(crate::types::Fr::from(public_inputs.output_count as u64)),
             fr_to_be32(public_inputs.tx_binding),
         ];
 

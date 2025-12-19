@@ -18,7 +18,7 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 - UltraPlonk proofs via `../solana-ultraplonk-verifier/`
 - Orchard-style Actions (1 spend + 1 output)
 - Poseidon hashing via `light-poseidon` crate
-- Multi-asset via Fiat-Shamir α tags
+- **Value rule (current)**: single-asset per Action (hard-sound). Multi-asset-in-one-action is deferred until we adopt a hard-binding construction (e.g. value commitments).
 - Trait-based client (Indexer + Chain abstractions)
 - On-chain commitment-tree accumulator (anchors); membership proven via Merkle paths (privacy-preserving; no commitment references)
 - Light Protocol for state compression **(nullifier set only; commitment tree is not Light)** (Milestone 3+)
@@ -42,8 +42,8 @@ We should **not** proceed to “real circuit implementation” work until items 
    - Add a consolidation flow to `client/tests/user_flows.rs` and keep the protocol interface stable.
 3. **Key model review / simplification**:
    - Ensure the SpendingKey vs FullViewingKey split is clean and minimal (no accidental “watch-only spending” capability).
-4. **Asset tags (multi-asset correctness) in mocks + circuit scaffolds**:
-   - Implement α-tag semantics in reference prover checks and mirror them in circuit scaffolds.
+4. **Asset rules (no mixing) in mocks + circuit scaffolds**:
+   - Enforce single-asset semantics (no cross-asset mixing within an Action).
 5. **Then: circuit implementation (incremental constraints)**:
    - Only after (1)–(4) are locked.
 
@@ -276,7 +276,7 @@ We should **not** proceed to “real circuit implementation” work until items 
 
 #### Transaction Calldata Layout (Indexer Extraction)
 
-- [ ] Define and freeze v0 “transaction calldata” byte layout for our instruction(s):
+- [ ] Define and freeze transaction calldata byte layout for our instruction(s):
   - public data (cm, nf, anchor, etc.)
   - encrypted output payload(s) (epk, ciphertext, optional metadata)
 - [ ] Ensure `Indexer` APIs expose enough information for clients to validate decrypted notes:
@@ -426,7 +426,7 @@ backend-light = []    # Light Protocol (production)
 - [ ] Stage 0 (noop): define inputs + generate VK + local prove/verify
 - [ ] Implement: membership proof against anchor
 - [ ] Implement: nullifier correctness (nk, nullifier_nonce)
-- [ ] Implement: balance conservation (single-asset first; multi-asset α tags later in Milestone 5)
+- [ ] Implement: balance conservation (single-asset first; multi-asset later in Milestone 5 with a hard-sound construction)
 - [ ] Tests: per-statement + E2E
 
 ### 1.4 Unshield Circuit (Noir)
@@ -513,12 +513,12 @@ backend-light = []    # Light Protocol (production)
 
 ---
 
-## Milestone 5: Multi-Asset with α Tags
+## Milestone 5: Multi-Asset (Hard-Sound Construction)
 
 **Goal:** Real MASP - multiple asset types.
 
 - [ ] Add asset_id to notes
-- [ ] Add α/tag conservation equation to circuits
+- [ ] Implement a hard-sound multi-asset value construction (e.g. value commitments) and corresponding circuit statements
 - [ ] Support multiple SPL mints at boundary
 - [ ] Asset type private inside pool
 - [ ] Decide whether `asset_id` should be `Poseidon(token_address)` (current plan) vs using token address directly; document tradeoffs and final decision

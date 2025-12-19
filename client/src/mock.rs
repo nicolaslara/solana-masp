@@ -26,7 +26,7 @@ use crate::proofs::MockProofVerifier;
 use crate::traits::{
     Chain, ChainError, Indexer, IndexerError, InsertCommitmentResult, NoteCommitmentStore,
     NullifierError, NullifierSet, OutputCiphertext, ProofBytes, ProofPublicInputs, ProofVerifier,
-    ShieldRequest, ShieldResult, SpendPublicInputs, StoreError, TransferRequest, TransferResult,
+    ShieldRequest, ShieldResult, StoreError, TransferPublicInputs, TransferRequest, TransferResult,
     UnshieldPublicInputs, UnshieldRequest, UnshieldResult,
 };
 use crate::types::{Anchor, Commitment, Fr, Nullifier};
@@ -508,10 +508,12 @@ impl Chain for MockChain {
         // Responsibility split (production-shape):
         // - Spend proof proves membership (against `anchor`) + preimage + nullifier + outputs + balance binding.
         // - Chain enforces: anchor validity + nullifier uniqueness + proof verification.
-        let public_inputs = SpendPublicInputs {
+        let public_inputs = TransferPublicInputs {
             anchor: request.anchor,
-            nullifier: request.nullifier,
-            output_commitments: request.output_commitments(),
+            nullifiers: request.nullifiers,
+            output_commitments: request.output_commitments_array(),
+            input_count: request.input_count,
+            output_count: request.output_count,
             tx_binding: request.tx_binding,
         };
         let proof = ProofBytes::new(request.spend_proof.clone());
@@ -532,11 +534,18 @@ impl Chain for MockChain {
         }
 
         // Insert nullifier (fails if double-spend)
-        self.insert_nullifier(request.nullifier).await?;
+        for &nf in request.enabled_nullifiers() {
+            if nf != Fr::from(0u64) {
+                self.insert_nullifier(nf).await?;
+            }
+        }
 
         // Insert output commitments with ciphertexts (all in same "transaction")
         let tx_sig = self.next_tx_sig();
         for output in &request.outputs {
+            if output.commitment == Fr::from(0u64) {
+                continue;
+            }
             let ct_data = match (&output.ciphertext, &output.ephemeral_key) {
                 (Some(ct), Some(epk)) => Some(OutputCiphertextData {
                     c_enc: ct.clone(),
@@ -553,7 +562,7 @@ impl Chain for MockChain {
 
         Ok(TransferResult {
             tx_sig,
-            output_commitments: request.output_commitments(),
+            output_commitments: request.enabled_output_commitments(),
         })
     }
 
@@ -739,7 +748,10 @@ mod tests {
         // Transfer
         let nk = fvk.nk_field();
         let nf = crate::nullifier::compute_nullifier(nk, note_in.nullifier_nonce);
-        let out_nonce = crate::note::Note::derive_nullifier_nonce(cm1, 0);
+        let anchor = chain.get_current_anchor().await.unwrap();
+        let nullifiers = [nf, Fr::from(0u64), Fr::from(0u64)];
+        let tx_binding = crate::tx_binding::tx_binding_transfer(anchor, &nullifiers, 1, 1);
+        let out_nonce = crate::tx_binding::derive_output_nonce_nm(tx_binding, 0);
         let note_out = crate::note::Note::with_values(
             note_in.asset_id,
             100,
@@ -752,27 +764,46 @@ mod tests {
 
         use crate::proofs::MockSpendProver;
         use crate::traits::TransferOutput;
-        use crate::traits::{ProofPublicInputs, SpendPrivateInputs, SpendPublicInputs};
+        use crate::traits::{
+            InputSlot, OutputSlot, ProofPrivateInputs, ProofPublicInputs, TransferPrivateInputs,
+            TransferPublicInputs,
+        };
 
-        let anchor = chain.get_current_anchor().await.unwrap();
-        let public = SpendPublicInputs {
+        // anchor already computed above
+        let public = TransferPublicInputs {
             anchor,
-            nullifier: nf,
-            output_commitments: vec![cm2],
-            tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm1, nf, &[cm2]),
+            nullifiers,
+            output_commitments: [cm2, Fr::from(0u64), Fr::from(0u64)],
+            input_count: 1,
+            output_count: 1,
+            tx_binding,
         };
-        let private = SpendPrivateInputs {
-            spending_key: sk.as_field(),
-            note_asset_id: note_in.asset_id,
-            note_amount: note_in.amount,
-            note_recipient: note_in.recipient,
-            note_diversifier_index: note_in.diversifier_index,
-            note_nullifier_nonce: note_in.nullifier_nonce,
-            note_randomness: note_in.note_randomness,
-            nk,
-            membership_witness: witness.clone(),
-            output_notes: vec![note_out],
-        };
+        let private = ProofPrivateInputs::Transfer(TransferPrivateInputs {
+            inputs: [
+                InputSlot {
+                    enabled: true,
+                    note_asset_id: note_in.asset_id,
+                    note_amount: note_in.amount,
+                    note_recipient: note_in.recipient,
+                    note_diversifier_index: note_in.diversifier_index,
+                    note_nullifier_nonce: note_in.nullifier_nonce,
+                    note_randomness: note_in.note_randomness,
+                    nk,
+                    spending_key: sk.as_field(),
+                    membership_witness: witness.clone(),
+                },
+                InputSlot::default(),
+                InputSlot::default(),
+            ],
+            outputs: [
+                OutputSlot {
+                    enabled: true,
+                    note: note_out,
+                },
+                OutputSlot::default(),
+                OutputSlot::default(),
+            ],
+        });
         let spend_proof = MockSpendProver
             .prove(&ProofPublicInputs::Transfer(public), &private)
             .unwrap()
@@ -781,10 +812,16 @@ mod tests {
         let result = chain
             .transfer(TransferRequest {
                 anchor,
-                nullifier: nf,
-                tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm1, nf, &[cm2]),
+                nullifiers,
+                input_count: 1,
+                output_count: 1,
+                tx_binding,
                 spend_proof,
-                outputs: vec![TransferOutput::commitment_only(cm2)],
+                outputs: [
+                    TransferOutput::commitment_only(cm2),
+                    TransferOutput::commitment_only(Fr::from(0u64)),
+                    TransferOutput::commitment_only(Fr::from(0u64)),
+                ],
             })
             .await
             .unwrap();
@@ -842,45 +879,69 @@ mod tests {
         let anchor = chain.get_current_anchor().await.unwrap();
 
         use crate::proofs::MockSpendProver;
-        use crate::traits::{ProofPublicInputs, SpendPrivateInputs, SpendPublicInputs};
+        use crate::traits::{
+            InputSlot, OutputSlot, ProofPrivateInputs, ProofPublicInputs, TransferPrivateInputs,
+            TransferPublicInputs,
+        };
 
         let mk_proof = |output_note: crate::note::Note, witness: MembershipWitness| {
-            let public = SpendPublicInputs {
+            let nullifiers = [nf, Fr::from(0u64), Fr::from(0u64)];
+            let tx_binding = crate::tx_binding::tx_binding_transfer(anchor, &nullifiers, 1, 1);
+            let out_nonce = crate::tx_binding::derive_output_nonce_nm(tx_binding, 0);
+            let output_note = crate::note::Note::with_values(
+                output_note.asset_id,
+                output_note.amount,
+                output_note.recipient,
+                output_note.diversifier_index,
+                out_nonce,
+                output_note.note_randomness,
+            );
+            let public = TransferPublicInputs {
                 anchor,
-                nullifier: nf,
-                output_commitments: vec![output_note.commitment()],
-                tx_binding: crate::tx_binding::tx_binding_transfer(
-                    anchor,
-                    cm,
-                    nf,
-                    &[output_note.commitment()],
-                ),
+                nullifiers,
+                output_commitments: [output_note.commitment(), Fr::from(0u64), Fr::from(0u64)],
+                input_count: 1,
+                output_count: 1,
+                tx_binding,
             };
-            let private = SpendPrivateInputs {
-                spending_key: sk.as_field(),
-                note_asset_id: note_in.asset_id,
-                note_amount: note_in.amount,
-                note_recipient: note_in.recipient,
-                note_diversifier_index: note_in.diversifier_index,
-                note_nullifier_nonce: note_in.nullifier_nonce,
-                note_randomness: note_in.note_randomness,
-                nk,
-                membership_witness: witness,
-                output_notes: vec![output_note],
-            };
+            let private = ProofPrivateInputs::Transfer(TransferPrivateInputs {
+                inputs: [
+                    InputSlot {
+                        enabled: true,
+                        note_asset_id: note_in.asset_id,
+                        note_amount: note_in.amount,
+                        note_recipient: note_in.recipient,
+                        note_diversifier_index: note_in.diversifier_index,
+                        note_nullifier_nonce: note_in.nullifier_nonce,
+                        note_randomness: note_in.note_randomness,
+                        nk,
+                        spending_key: sk.as_field(),
+                        membership_witness: witness,
+                    },
+                    InputSlot::default(),
+                    InputSlot::default(),
+                ],
+                outputs: [
+                    OutputSlot {
+                        enabled: true,
+                        note: output_note,
+                    },
+                    OutputSlot::default(),
+                    OutputSlot::default(),
+                ],
+            });
             MockSpendProver
                 .prove(&ProofPublicInputs::Transfer(public), &private)
                 .unwrap()
                 .into_bytes()
         };
 
-        let out_nonce = crate::note::Note::derive_nullifier_nonce(cm, 0);
         let out1 = crate::note::Note::with_values(
             note_in.asset_id,
             100,
             Fr::from(9u64),
             0,
-            out_nonce,
+            Fr::from(0u64),
             Fr::from(11u64),
         );
         let out2 = crate::note::Note::with_values(
@@ -888,35 +949,68 @@ mod tests {
             100,
             Fr::from(12u64),
             0,
-            out_nonce,
+            Fr::from(0u64),
             Fr::from(14u64),
         );
-        let cm_out1 = out1.commitment();
-        let cm_out2 = out2.commitment();
 
         let spend_proof_1 = mk_proof(out1, witness.clone());
         let spend_proof_2 = mk_proof(out2, witness.clone());
 
         // First transfer succeeds
+        let nullifiers = [nf, Fr::from(0u64), Fr::from(0u64)];
+        let tx_binding_1 = crate::tx_binding::tx_binding_transfer(anchor, &nullifiers, 1, 1);
+        let out1_nonce = crate::tx_binding::derive_output_nonce_nm(tx_binding_1, 0);
+        let out1_note = crate::note::Note::with_values(
+            note_in.asset_id,
+            100,
+            Fr::from(9u64),
+            0,
+            out1_nonce,
+            Fr::from(11u64),
+        );
+        let cm_out1 = out1_note.commitment();
         chain
             .transfer(TransferRequest {
                 anchor,
-                nullifier: nf,
-                tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm, nf, &[cm_out1]),
+                nullifiers,
+                input_count: 1,
+                output_count: 1,
+                tx_binding: tx_binding_1,
                 spend_proof: spend_proof_1,
-                outputs: vec![TransferOutput::commitment_only(cm_out1)],
+                outputs: [
+                    TransferOutput::commitment_only(cm_out1),
+                    TransferOutput::commitment_only(Fr::from(0u64)),
+                    TransferOutput::commitment_only(Fr::from(0u64)),
+                ],
             })
             .await
             .unwrap();
 
         // Second transfer with same nullifier fails
+        let tx_binding_2 = crate::tx_binding::tx_binding_transfer(anchor, &nullifiers, 1, 1);
+        let out2_nonce = crate::tx_binding::derive_output_nonce_nm(tx_binding_2, 0);
+        let out2_note = crate::note::Note::with_values(
+            note_in.asset_id,
+            100,
+            Fr::from(12u64),
+            0,
+            out2_nonce,
+            Fr::from(14u64),
+        );
+        let cm_out2 = out2_note.commitment();
         let result = chain
             .transfer(TransferRequest {
                 anchor,
-                nullifier: nf,
-                tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm, nf, &[cm_out2]),
+                nullifiers,
+                input_count: 1,
+                output_count: 1,
+                tx_binding: tx_binding_2,
                 spend_proof: spend_proof_2,
-                outputs: vec![TransferOutput::commitment_only(cm_out2)],
+                outputs: [
+                    TransferOutput::commitment_only(cm_out2),
+                    TransferOutput::commitment_only(Fr::from(0u64)),
+                    TransferOutput::commitment_only(Fr::from(0u64)),
+                ],
             })
             .await;
 
@@ -1028,8 +1122,11 @@ mod tests {
         let witness = acc.get_witness(cm1).await.unwrap();
         let nk = fvk.nk_field();
         let nf = crate::nullifier::compute_nullifier(nk, note_in.nullifier_nonce);
-        let out2_nonce = crate::note::Note::derive_nullifier_nonce(cm1, 0);
-        let out3_nonce = crate::note::Note::derive_nullifier_nonce(cm1, 1);
+        let anchor = chain.get_current_anchor().await.unwrap();
+        let nullifiers = [nf, Fr::from(0u64), Fr::from(0u64)];
+        let tx_binding = crate::tx_binding::tx_binding_transfer(anchor, &nullifiers, 1, 2);
+        let out2_nonce = crate::tx_binding::derive_output_nonce_nm(tx_binding, 0);
+        let out3_nonce = crate::tx_binding::derive_output_nonce_nm(tx_binding, 1);
         let out2 = crate::note::Note::with_values(
             note_in.asset_id,
             60,
@@ -1051,27 +1148,49 @@ mod tests {
 
         // Transfer creates two outputs in same tx
         use crate::proofs::MockSpendProver;
-        use crate::traits::{ProofPublicInputs, SpendPrivateInputs, SpendPublicInputs};
+        use crate::traits::{
+            InputSlot, OutputSlot, ProofPrivateInputs, ProofPublicInputs, TransferPrivateInputs,
+            TransferPublicInputs,
+        };
 
         let anchor = chain.get_current_anchor().await.unwrap();
-        let public = SpendPublicInputs {
+        let public = TransferPublicInputs {
             anchor,
-            nullifier: nf,
-            output_commitments: vec![cm2, cm3],
-            tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm1, nf, &[cm2, cm3]),
+            nullifiers,
+            output_commitments: [cm2, cm3, Fr::from(0u64)],
+            input_count: 1,
+            output_count: 2,
+            tx_binding,
         };
-        let private = SpendPrivateInputs {
-            spending_key: sk.as_field(),
-            note_asset_id: note_in.asset_id,
-            note_amount: note_in.amount,
-            note_recipient: note_in.recipient,
-            note_diversifier_index: note_in.diversifier_index,
-            note_nullifier_nonce: note_in.nullifier_nonce,
-            note_randomness: note_in.note_randomness,
-            nk,
-            membership_witness: witness.clone(),
-            output_notes: vec![out2, out3],
-        };
+        let private = ProofPrivateInputs::Transfer(TransferPrivateInputs {
+            inputs: [
+                InputSlot {
+                    enabled: true,
+                    note_asset_id: note_in.asset_id,
+                    note_amount: note_in.amount,
+                    note_recipient: note_in.recipient,
+                    note_diversifier_index: note_in.diversifier_index,
+                    note_nullifier_nonce: note_in.nullifier_nonce,
+                    note_randomness: note_in.note_randomness,
+                    nk,
+                    spending_key: sk.as_field(),
+                    membership_witness: witness.clone(),
+                },
+                InputSlot::default(),
+                InputSlot::default(),
+            ],
+            outputs: [
+                OutputSlot {
+                    enabled: true,
+                    note: out2,
+                },
+                OutputSlot {
+                    enabled: true,
+                    note: out3,
+                },
+                OutputSlot::default(),
+            ],
+        });
         let spend_proof = MockSpendProver
             .prove(&ProofPublicInputs::Transfer(public), &private)
             .unwrap()
@@ -1080,12 +1199,15 @@ mod tests {
         let transfer_result = chain
             .transfer(TransferRequest {
                 anchor,
-                nullifier: nf,
-                tx_binding: crate::tx_binding::tx_binding_transfer(anchor, cm1, nf, &[cm2, cm3]),
+                nullifiers,
+                input_count: 1,
+                output_count: 2,
+                tx_binding,
                 spend_proof,
-                outputs: vec![
+                outputs: [
                     TransferOutput::commitment_only(cm2),
                     TransferOutput::commitment_only(cm3),
+                    TransferOutput::commitment_only(Fr::from(0u64)),
                 ],
             })
             .await

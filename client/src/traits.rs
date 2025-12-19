@@ -176,20 +176,146 @@ pub enum ProofSystemError {
     NotImplemented(String),
 }
 
-/// Public inputs for spend proof
+/// Maximum number of inputs in a transfer.
+pub const MAX_INPUTS: usize = crate::tx_binding::MAX_INPUTS;
+
+/// Maximum number of outputs in a transfer.
+pub const MAX_OUTPUTS: usize = crate::tx_binding::MAX_OUTPUTS;
+
+/// Public inputs for transfer proof.
+///
+/// Supports flexible N inputs and M outputs within fixed compile-time maxima.
+/// Arrays are fixed-size and padded with zeros for disabled slots.
+/// This includes the common 1→3 case (1 input, up to 3 outputs: payment + change + fee).
 #[derive(Debug, Clone)]
-pub struct SpendPublicInputs {
-    /// Anchor (commitment tree root)
+pub struct TransferPublicInputs {
+    /// Shared anchor (commitment tree root) for all inputs
     pub anchor: Anchor,
 
-    /// Nullifier being revealed
-    pub nullifier: Nullifier,
+    /// Nullifiers being revealed (padded with 0 for disabled inputs)
+    pub nullifiers: [Nullifier; MAX_INPUTS],
 
-    /// Output commitment(s)
-    pub output_commitments: Vec<Commitment>,
+    /// Output commitments (padded with 0 for disabled outputs)
+    pub output_commitments: [Commitment; MAX_OUTPUTS],
+
+    /// Number of enabled inputs (1 ≤ input_count ≤ MAX_INPUTS)
+    pub input_count: u32,
+
+    /// Number of enabled outputs (1 ≤ output_count ≤ MAX_OUTPUTS)
+    pub output_count: u32,
 
     /// Transaction binding hash (prevents malleability)
     pub tx_binding: Fr,
+}
+
+impl TransferPublicInputs {
+    /// Get the enabled nullifiers (non-zero values based on input_count).
+    pub fn enabled_nullifiers(&self) -> &[Nullifier] {
+        &self.nullifiers[..self.input_count as usize]
+    }
+
+    /// Get the enabled output commitments (non-zero values based on output_count).
+    pub fn enabled_output_commitments(&self) -> &[Commitment] {
+        &self.output_commitments[..self.output_count as usize]
+    }
+}
+
+/// Private inputs for a single input slot in a transfer.
+#[derive(Debug, Clone)]
+pub struct InputSlot {
+    /// Whether this input is enabled
+    pub enabled: bool,
+
+    /// Note fields (only meaningful if enabled)
+    pub note_asset_id: Fr,
+    pub note_amount: u64,
+    pub note_recipient: Fr,
+    pub note_diversifier_index: u64,
+    pub note_nullifier_nonce: Fr,
+    pub note_randomness: Fr,
+
+    /// Nullifier key for this input
+    pub nk: Fr,
+
+    /// Spending key as field element
+    pub spending_key: Fr,
+
+    /// Membership witness for this input
+    pub membership_witness: MembershipWitness,
+}
+
+impl Default for InputSlot {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            note_asset_id: Fr::from(0u64),
+            note_amount: 0,
+            note_recipient: Fr::from(0u64),
+            note_diversifier_index: 0,
+            note_nullifier_nonce: Fr::from(0u64),
+            note_randomness: Fr::from(0u64),
+            nk: Fr::from(0u64),
+            spending_key: Fr::from(0u64),
+            membership_witness: MembershipWitness::merkle_path(vec![], vec![], Fr::from(0u64)),
+        }
+    }
+}
+
+/// Private inputs for a single output slot in a transfer.
+#[derive(Debug, Clone)]
+pub struct OutputSlot {
+    /// Whether this output is enabled
+    pub enabled: bool,
+
+    /// The output note (only meaningful if enabled)
+    pub note: crate::note::Note,
+}
+
+impl Default for OutputSlot {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            note: crate::note::Note::with_values(
+                Fr::from(0u64),
+                0,
+                Fr::from(0u64),
+                0,
+                Fr::from(0u64),
+                Fr::from(0u64),
+            ),
+        }
+    }
+}
+
+/// Private inputs for transfer proof.
+#[derive(Debug, Clone)]
+pub struct TransferPrivateInputs {
+    /// Input slots (fixed size, use `enabled` flag)
+    pub inputs: [InputSlot; MAX_INPUTS],
+
+    /// Output slots (fixed size, use `enabled` flag)
+    pub outputs: [OutputSlot; MAX_OUTPUTS],
+}
+
+impl Default for TransferPrivateInputs {
+    fn default() -> Self {
+        Self {
+            inputs: std::array::from_fn(|_| InputSlot::default()),
+            outputs: std::array::from_fn(|_| OutputSlot::default()),
+        }
+    }
+}
+
+impl TransferPrivateInputs {
+    /// Count enabled inputs.
+    pub fn input_count(&self) -> u32 {
+        self.inputs.iter().filter(|s| s.enabled).count() as u32
+    }
+
+    /// Count enabled outputs.
+    pub fn output_count(&self) -> u32 {
+        self.outputs.iter().filter(|s| s.enabled).count() as u32
+    }
 }
 
 /// Public inputs for unshield proof
@@ -234,24 +360,30 @@ pub struct ShieldPublicInputs {
 pub enum ProofPublicInputs {
     /// Shield (deposit transparent -> shielded)
     Shield(ShieldPublicInputs),
-    /// Transfer (shielded spend + output commitments)
-    Transfer(SpendPublicInputs),
+
+    /// Transfer (N inputs -> M outputs in single proof)
+    /// Common case: 1 input, up to 3 outputs (payment + change + fee)
+    Transfer(TransferPublicInputs),
+
     /// Unshield (shielded spend + public withdrawal)
     Unshield(UnshieldPublicInputs),
 }
 
-/// Private inputs for spend proof
+/// Private inputs for a shield proof.
 #[derive(Debug, Clone)]
-pub struct SpendPrivateInputs {
+pub struct ShieldPrivateInputs {
+    pub note_asset_id: Fr,
+    pub note_amount: u64,
+    pub note_recipient: Fr,
+    pub note_diversifier_index: u64,
+    pub note_nullifier_nonce: Fr,
+    pub note_randomness: Fr,
+}
+
+/// Private inputs for an unshield proof (single input spend).
+#[derive(Debug, Clone)]
+pub struct UnshieldPrivateInputs {
     /// Spending key (root secret) as a field element.
-    ///
-    /// This is the **SpendingKey-only** secret required for spend authorization in the
-    /// reference semantics: a watch-only FullViewingKey must not be able to satisfy spend
-    /// constraints.
-    ///
-    /// The mock prover derives `fvk(spending_key)` and checks:
-    /// - `fvk.nk_field() == private.nk`
-    /// - `fvk.diversified_address(note_diversifier_index).to_field() == private.note_recipient`
     pub spending_key: Fr,
 
     /// Note fields
@@ -262,23 +394,19 @@ pub struct SpendPrivateInputs {
     pub note_nullifier_nonce: Fr,
     pub note_randomness: Fr,
 
-    /// Nullifier key (Sapling: `nk.x` as a field element).
-    ///
-    /// This is view-only material (present in FullViewingKey), and is used for nullifier
-    /// derivation + incoming-viewing-key derivation (ivk).
+    /// Nullifier key (`nk.x` as a field element).
     pub nk: Fr,
 
-    /// Membership witness
+    /// Membership witness for the spent note.
     pub membership_witness: MembershipWitness,
+}
 
-    /// Output note plaintexts for this action (ordered, length must match public output commitments).
-    ///
-    /// This is used by mock/prototype implementations to validate:
-    /// - outputs are well-formed (commitment matches note preimage)
-    /// - balance conservation (single-asset now; multi-asset later)
-    ///
-    /// Production circuits will take equivalent data as private inputs.
-    pub output_notes: Vec<crate::note::Note>,
+/// Private inputs for MASP proofs (per-circuit).
+#[derive(Debug, Clone)]
+pub enum ProofPrivateInputs {
+    Shield(ShieldPrivateInputs),
+    Transfer(TransferPrivateInputs),
+    Unshield(UnshieldPrivateInputs),
 }
 
 /// Serialized proof bytes
@@ -308,12 +436,13 @@ impl ProofBytes {
 /// ## Implementations
 /// - `MockSpendProver` - Always returns valid mock proof
 /// - `UltraPlonkProver` - Real Noir/UltraPlonk prover
+///
 pub trait SpendProver: Send + Sync {
-    /// Generate a spend proof
+    /// Generate a proof for the given public inputs and private witness.
     fn prove(
         &self,
         public_inputs: &ProofPublicInputs,
-        private_inputs: &SpendPrivateInputs,
+        private_inputs: &ProofPrivateInputs,
     ) -> Result<ProofBytes, ProofSystemError>;
 
     /// Get the proving system name (for debugging)
@@ -445,14 +574,20 @@ impl TransferOutput {
     }
 }
 
-/// Transfer request
+/// Transfer request (N inputs -> M outputs).
 #[derive(Debug, Clone)]
 pub struct TransferRequest {
-    /// Anchor for membership proof
+    /// Shared anchor for all input membership proofs
     pub anchor: Anchor,
 
-    /// Nullifier of spent note
-    pub nullifier: Nullifier,
+    /// Nullifiers being revealed (padded with 0 for disabled inputs)
+    pub nullifiers: [Nullifier; MAX_INPUTS],
+
+    /// Number of enabled inputs
+    pub input_count: u32,
+
+    /// Number of enabled outputs
+    pub output_count: u32,
 
     /// Transaction binding hash (public input to spend proof)
     pub tx_binding: Fr,
@@ -460,14 +595,27 @@ pub struct TransferRequest {
     /// ZK proof of valid spend (UltraPlonk)
     pub spend_proof: Vec<u8>,
 
-    /// Output data (commitments + ciphertexts)
-    pub outputs: Vec<TransferOutput>,
+    /// Output data (fixed size, disabled slots have zero commitment)
+    pub outputs: [TransferOutput; MAX_OUTPUTS],
 }
 
 impl TransferRequest {
-    /// Get just the output commitments
-    pub fn output_commitments(&self) -> Vec<Commitment> {
-        self.outputs.iter().map(|o| o.commitment).collect()
+    /// Get the enabled nullifiers (non-zero values).
+    pub fn enabled_nullifiers(&self) -> &[Nullifier] {
+        &self.nullifiers[..self.input_count as usize]
+    }
+
+    /// Get the enabled output commitments.
+    pub fn enabled_output_commitments(&self) -> Vec<Commitment> {
+        self.outputs[..self.output_count as usize]
+            .iter()
+            .map(|o| o.commitment)
+            .collect()
+    }
+
+    /// Get the padded output commitment array.
+    pub fn output_commitments_array(&self) -> [Commitment; MAX_OUTPUTS] {
+        std::array::from_fn(|i| self.outputs[i].commitment)
     }
 }
 
@@ -586,13 +734,14 @@ pub trait Chain: Send + Sync {
         })
     }
 
-    /// Transfer: spend note(s), create output(s)
+    /// Transfer: spend note(s), create output(s).
+    ///
+    /// Supports N inputs and M outputs (including common 1→3 case).
     ///
     /// 1. Verify anchor is valid
-    /// 2. Verify membership proof
-    /// 3. Verify ZK spend proof
-    /// 4. Insert nullifier (fails if double-spend)
-    /// 5. Insert output commitments
+    /// 2. Verify ZK spend proof
+    /// 3. Insert each non-zero nullifier (fails if any is double-spend)
+    /// 4. Insert each non-zero output commitment
     async fn transfer(&self, request: TransferRequest) -> Result<TransferResult, ChainError>;
 
     /// Unshield: spend note, withdraw tokens

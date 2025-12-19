@@ -250,22 +250,15 @@ where
             public_asset_id: asset_id,
             public_amount: amount,
         };
-        let private = crate::traits::SpendPrivateInputs {
-            spending_key: self.spending_key.as_field(),
-            note_asset_id: note.asset_id,
-            note_amount: note.amount,
-            note_recipient: note.recipient,
-            note_diversifier_index: note.diversifier_index,
-            note_nullifier_nonce: note.nullifier_nonce,
-            note_randomness: note.note_randomness,
-            nk: Fr::from(0u64),
-            membership_witness: crate::proofs::MembershipWitness::merkle_path(
-                vec![],
-                vec![],
-                Fr::from(0u64),
-            ),
-            output_notes: vec![],
-        };
+        let private =
+            crate::traits::ProofPrivateInputs::Shield(crate::traits::ShieldPrivateInputs {
+                note_asset_id: note.asset_id,
+                note_amount: note.amount,
+                note_recipient: note.recipient,
+                note_diversifier_index: note.diversifier_index,
+                note_nullifier_nonce: note.nullifier_nonce,
+                note_randomness: note.note_randomness,
+            });
         let shield_proof = self
             .prover
             .prove(&crate::traits::ProofPublicInputs::Shield(public), &private)
@@ -302,8 +295,25 @@ where
             });
         }
 
+        // Output nonces for transfer outputs are derived from `tx_binding` (N inputs -> M outputs).
+        // For now, this is a single-input transfer, so we can compute the nullifier array.
+        let nullifiers = [nullifier, Fr::from(0u64), Fr::from(0u64)];
+        let input_count = 1u32;
+        // output_count is 1 (payment) or 2 (payment + change).
+        let output_count = if owned.note.amount > amount {
+            2u32
+        } else {
+            1u32
+        };
+        let tx_binding = crate::tx_binding::tx_binding_transfer(
+            witness.root(),
+            &nullifiers,
+            input_count,
+            output_count,
+        );
+
         // Create output note
-        let output_nonce = Note::derive_nullifier_nonce(owned.commitment, 0);
+        let output_nonce = crate::tx_binding::derive_output_nonce_nm(tx_binding, 0);
         let output = Note::with_values(
             owned.note.asset_id,
             amount,
@@ -315,7 +325,7 @@ where
 
         // Create change note if needed
         let change = if owned.note.amount > amount {
-            let change_nonce = Note::derive_nullifier_nonce(owned.commitment, 1);
+            let change_nonce = crate::tx_binding::derive_output_nonce_nm(tx_binding, 1);
             let change_addr = self.fvk.diversified_address(0);
             Some(Note::with_values(
                 owned.note.asset_id,
@@ -334,6 +344,7 @@ where
             membership_witness: witness,
             spent_commitment: spend_commitment,
             nullifier,
+            tx_binding,
             spend_note: owned.note,
             output,
             change,
@@ -527,18 +538,18 @@ where
             public_recipient: Fr::from_be_bytes_mod_order(&recipient),
             public_asset_id: asset_id,
         };
-        let private = crate::traits::SpendPrivateInputs {
-            spending_key: self.spending_key.as_field(),
-            note_asset_id: owned.note.asset_id,
-            note_amount: owned.note.amount,
-            note_recipient: owned.note.recipient,
-            note_diversifier_index: owned.note.diversifier_index,
-            note_nullifier_nonce: owned.note.nullifier_nonce,
-            note_randomness: owned.note.note_randomness,
-            nk: self.fvk.nk_field(),
-            membership_witness: witness.clone(),
-            output_notes: vec![],
-        };
+        let private =
+            crate::traits::ProofPrivateInputs::Unshield(crate::traits::UnshieldPrivateInputs {
+                spending_key: self.spending_key.as_field(),
+                note_asset_id: owned.note.asset_id,
+                note_amount: owned.note.amount,
+                note_recipient: owned.note.recipient,
+                note_diversifier_index: owned.note.diversifier_index,
+                note_nullifier_nonce: owned.note.nullifier_nonce,
+                note_randomness: owned.note.note_randomness,
+                nk: self.fvk.nk_field(),
+                membership_witness: witness.clone(),
+            });
         let spend_proof = self
             .prover
             .prove(
@@ -823,68 +834,92 @@ pub struct TransferData {
     /// Membership witness for the spent commitment (wallet-local; NOT sent to chain).
     pub membership_witness: MembershipWitness,
     pub nullifier: Nullifier,
+    pub tx_binding: Fr,
     pub spend_note: Note,
     pub output: Note,
     pub change: Option<Note>,
 }
 
 impl TransferData {
-    /// Build spend proof inputs for this transfer (reference implementation).
-    ///
-    /// Today we compute a v0 `tx_binding` via `crate::tx_binding::tx_binding_transfer(...)`.
+    /// Build transfer proof inputs for this transfer (reference implementation).
     pub fn spend_proof_inputs(
         &self,
         spending_key: Fr,
         nk: Fr,
     ) -> (
-        crate::traits::SpendPublicInputs,
-        crate::traits::SpendPrivateInputs,
+        crate::traits::TransferPublicInputs,
+        crate::traits::ProofPrivateInputs,
     ) {
-        use crate::traits::{SpendPrivateInputs, SpendPublicInputs};
+        use crate::traits::{InputSlot, OutputSlot, TransferPrivateInputs, TransferPublicInputs};
 
-        let output_commitments = {
-            let mut v = vec![self.output.commitment()];
-            if let Some(change) = &self.change {
-                v.push(change.commitment());
-            }
-            v
-        };
+        let out0 = self.output.commitment();
+        let out1 = self
+            .change
+            .as_ref()
+            .map(|n| n.commitment())
+            .unwrap_or(Fr::from(0u64));
+        let out2 = Fr::from(0u64); // fee slot (not used by current client flow yet)
 
-        let tx_binding = crate::tx_binding::tx_binding_transfer(
-            self.anchor,
-            self.spent_commitment,
-            self.nullifier,
-            &output_commitments,
-        );
+        let nullifiers = [self.nullifier, Fr::from(0u64), Fr::from(0u64)];
+        let input_count = 1;
+        let output_count = if self.change.is_some() { 2 } else { 1 };
+        // `tx_binding` is already computed during `build_transfer()` so output nonces can be derived from it.
+        let tx_binding = self.tx_binding;
 
-        let public = SpendPublicInputs {
+        let public = TransferPublicInputs {
             anchor: self.anchor,
-            nullifier: self.nullifier,
-            output_commitments,
+            nullifiers,
+            output_commitments: [out0, out1, out2],
+            input_count,
+            output_count,
             tx_binding,
         };
 
         let note = &self.spend_note;
-        let private = SpendPrivateInputs {
-            spending_key,
-            note_asset_id: note.asset_id,
-            note_amount: note.amount,
-            note_recipient: note.recipient,
-            note_diversifier_index: note.diversifier_index,
-            note_nullifier_nonce: note.nullifier_nonce,
-            note_randomness: note.note_randomness,
-            nk,
-            membership_witness: self.membership_witness.clone(),
-            output_notes: {
-                let mut v = vec![self.output.clone()];
-                if let Some(change) = &self.change {
-                    v.push(change.clone());
-                }
-                v
-            },
+        let out0_note = self.output.clone();
+        let out1_note = self.change.clone().unwrap_or_else(|| {
+            // disabled output placeholder
+            crate::note::Note::with_values(
+                Fr::from(0u64),
+                0,
+                Fr::from(0u64),
+                0,
+                Fr::from(0u64),
+                Fr::from(0u64),
+            )
+        });
+
+        let private = TransferPrivateInputs {
+            inputs: [
+                InputSlot {
+                    enabled: true,
+                    note_asset_id: note.asset_id,
+                    note_amount: note.amount,
+                    note_recipient: note.recipient,
+                    note_diversifier_index: note.diversifier_index,
+                    note_nullifier_nonce: note.nullifier_nonce,
+                    note_randomness: note.note_randomness,
+                    nk,
+                    spending_key,
+                    membership_witness: self.membership_witness.clone(),
+                },
+                InputSlot::default(),
+                InputSlot::default(),
+            ],
+            outputs: [
+                OutputSlot {
+                    enabled: true,
+                    note: out0_note,
+                },
+                OutputSlot {
+                    enabled: self.change.is_some(),
+                    note: out1_note,
+                },
+                OutputSlot::default(),
+            ],
         };
 
-        (public, private)
+        (public, crate::traits::ProofPrivateInputs::Transfer(private))
     }
 
     /// Convert to transfer request for submission (without ciphertexts)
@@ -893,22 +928,26 @@ impl TransferData {
     pub fn to_request(&self, spend_proof: ProofBytes) -> TransferRequest {
         use crate::traits::TransferOutput;
 
-        let mut outputs = vec![TransferOutput::commitment_only(self.output.commitment())];
+        let out0 = TransferOutput::commitment_only(self.output.commitment());
+        let out1 = self
+            .change
+            .as_ref()
+            .map(|n| TransferOutput::commitment_only(n.commitment()))
+            .unwrap_or_else(|| TransferOutput::commitment_only(Fr::from(0u64)));
+        let out2 = TransferOutput::commitment_only(Fr::from(0u64));
 
-        if let Some(change) = &self.change {
-            outputs.push(TransferOutput::commitment_only(change.commitment()));
-        }
+        let outputs = [out0, out1, out2];
 
-        let tx_binding = crate::tx_binding::tx_binding_transfer(
-            self.anchor,
-            self.spent_commitment,
-            self.nullifier,
-            &outputs.iter().map(|o| o.commitment).collect::<Vec<_>>(),
-        );
+        let nullifiers = [self.nullifier, Fr::from(0u64), Fr::from(0u64)];
+        let input_count = 1;
+        let output_count = if self.change.is_some() { 2 } else { 1 };
+        let tx_binding = self.tx_binding;
 
         TransferRequest {
             anchor: self.anchor,
-            nullifier: self.nullifier,
+            nullifiers,
+            input_count,
+            output_count,
             tx_binding,
             spend_proof: spend_proof.into_bytes(),
             outputs,
@@ -921,16 +960,42 @@ impl TransferData {
         spend_proof: ProofBytes,
         outputs: Vec<crate::traits::TransferOutput>,
     ) -> TransferRequest {
-        let output_commitments: Vec<_> = outputs.iter().map(|o| o.commitment).collect();
-        let tx_binding = crate::tx_binding::tx_binding_transfer(
-            self.anchor,
-            self.spent_commitment,
-            self.nullifier,
-            &output_commitments,
-        );
+        // Convert vector outputs into fixed 3-slot layout: payment + change + fee.
+        let out0 = outputs
+            .get(0)
+            .cloned()
+            .expect("caller must supply at least one output");
+        let out1 = outputs
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| crate::traits::TransferOutput {
+                commitment: Fr::from(0u64),
+                ciphertext: None,
+                ephemeral_key: None,
+            });
+        let out2 = outputs
+            .get(2)
+            .cloned()
+            .unwrap_or_else(|| crate::traits::TransferOutput {
+                commitment: Fr::from(0u64),
+                ciphertext: None,
+                ephemeral_key: None,
+            });
+        let outputs = [out0, out1, out2];
+
+        let nullifiers = [self.nullifier, Fr::from(0u64), Fr::from(0u64)];
+        let input_count = 1;
+        // output_count is number of non-zero commitments in provided outputs (bounded to 3).
+        let output_count = (outputs[0].commitment != Fr::from(0u64)) as u32
+            + (outputs[1].commitment != Fr::from(0u64)) as u32
+            + (outputs[2].commitment != Fr::from(0u64)) as u32;
+
+        let tx_binding = self.tx_binding;
         TransferRequest {
             anchor: self.anchor,
-            nullifier: self.nullifier,
+            nullifiers,
+            input_count,
+            output_count,
             tx_binding,
             spend_proof: spend_proof.into_bytes(),
             outputs,

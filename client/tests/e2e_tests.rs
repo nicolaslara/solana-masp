@@ -90,23 +90,14 @@ async fn shield_with_encryption<E: masp_client::NoteEncryption>(
         public_asset_id: masp_client::note::compute_asset_id(token_address),
         public_amount: note.amount,
     };
-    let private = masp_client::SpendPrivateInputs {
-        // Shield proofs do not require spend authorization; keep a sentinel.
-        spending_key: masp_client::Fr::from(0u64),
+    let private = masp_client::ProofPrivateInputs::Shield(masp_client::ShieldPrivateInputs {
         note_asset_id: note.asset_id,
         note_amount: note.amount,
         note_recipient: note.recipient,
         note_diversifier_index: note.diversifier_index,
         note_nullifier_nonce: note.nullifier_nonce,
         note_randomness: note.note_randomness,
-        nk: masp_client::Fr::from(0u64),
-        membership_witness: masp_client::MembershipWitness::merkle_path(
-            vec![],
-            vec![],
-            masp_client::Fr::from(0u64),
-        ),
-        output_notes: vec![],
-    };
+    });
     let shield_proof = env
         .prover
         .prove(&masp_client::ProofPublicInputs::Shield(public), &private)
@@ -996,29 +987,39 @@ async fn test_cannot_spend_others_note_wrong_nullifier() {
     // This must fail because spend authorization is SpendingKey-only: Alice's spending key does not
     // match the note recipient (which is derived from Bob's key).
     let alice_anchor = alice_witness.root();
-    let alice_public = masp_client::SpendPublicInputs {
+    let nullifiers = [alice_nullifier, masp_client::Fr::from(0u64), masp_client::Fr::from(0u64)];
+    let tx_binding = masp_client::tx_binding::tx_binding_transfer(alice_anchor, &nullifiers, 1, 1);
+    let alice_public = masp_client::TransferPublicInputs {
         anchor: alice_anchor,
-        nullifier: alice_nullifier,
-        output_commitments: vec![],
-        tx_binding: masp_client::tx_binding::tx_binding_transfer(
-            alice_anchor,
-            bob_note.commitment(),
-            alice_nullifier,
-            &[],
-        ),
+        nullifiers,
+        output_commitments: [masp_client::Fr::from(0u64); 3],
+        input_count: 1,
+        output_count: 1,
+        tx_binding,
     };
-    let alice_private = masp_client::SpendPrivateInputs {
-        spending_key: masp_client::SpendingKey::from_bytes(&[1u8; 32]).as_field(),
-        note_asset_id: bob_note.asset_id,
-        note_amount: bob_note.amount,
-        note_recipient: bob_note.recipient,
-        note_diversifier_index: bob_note.diversifier_index,
-        note_nullifier_nonce: bob_note.nullifier_nonce,
-        note_randomness: bob_note.note_randomness,
-        nk: alice.full_viewing_key().nk_field(),
-        membership_witness: alice_witness,
-        output_notes: vec![],
-    };
+    let alice_private = masp_client::ProofPrivateInputs::Transfer(masp_client::TransferPrivateInputs {
+        inputs: [
+            masp_client::InputSlot {
+                enabled: true,
+                note_asset_id: bob_note.asset_id,
+                note_amount: bob_note.amount,
+                note_recipient: bob_note.recipient,
+                note_diversifier_index: bob_note.diversifier_index,
+                note_nullifier_nonce: bob_note.nullifier_nonce,
+                note_randomness: bob_note.note_randomness,
+                nk: alice.full_viewing_key().nk_field(),
+                spending_key: masp_client::SpendingKey::from_bytes(&[1u8; 32]).as_field(),
+                membership_witness: alice_witness,
+            },
+            masp_client::InputSlot::default(),
+            masp_client::InputSlot::default(),
+        ],
+        outputs: [
+            masp_client::OutputSlot::default(),
+            masp_client::OutputSlot::default(),
+            masp_client::OutputSlot::default(),
+        ],
+    });
     let alice_proof_result = env.prover.prove(
         &masp_client::ProofPublicInputs::Transfer(alice_public),
         &alice_private,

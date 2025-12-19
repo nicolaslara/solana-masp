@@ -8,22 +8,24 @@
 // Security requirements: see `docs/circuit-security-requirements.md`.
 
 use dep::masp_common::{
-    prove_merkle_membership, prove_note_preimage_hashes_to_commitment,
-    prove_nullifier_derivation, prove_spend_authorization, prove_tx_binding,
+    check_public_withdraw_binding_single_asset, prove_merkle_membership,
+    prove_note_preimage_hashes_to_commitment, prove_nullifier_derivation, prove_spend_authorization,
+    prove_tx_binding,
 };
 
-/// 3.5 Public output binding (Stage-0 partial)
-///
-/// Intended statement (Stage-1+):
-/// `note.amount == public_amount` and `note.asset_id == public_asset_id`.
-fn check_public_withdraw_binding(
-    public_amount: u64,
-    public_asset_id: Field,
-    note_amount: u64,
+/// Public withdrawal binding (single-asset semantics).
+fn check_public_withdraw_binding_single_asset_action(
     note_asset_id: Field,
+    note_amount: u64,
+    public_asset_id: Field,
+    public_amount: u64,
 ) {
-    assert(public_amount == note_amount);
-    assert(public_asset_id == note_asset_id);
+    check_public_withdraw_binding_single_asset(
+        note_asset_id,
+        note_amount,
+        public_asset_id,
+        public_amount,
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -126,12 +128,12 @@ fn main(
     // - "This proof is bound to the intended unshield intent"
     prove_tx_binding(public.tx_binding);
     //
-    // - For unshield: "public withdrawal fields match the spent note"
-    check_public_withdraw_binding(
-        public.public_amount,
-        public.public_asset_id,
-        private.note.amount,
+    // - For unshield: "public withdrawal matches spent note (single-asset)"
+    check_public_withdraw_binding_single_asset_action(
         private.note.asset_id,
+        private.note.amount,
+        public.public_asset_id,
+        public.public_amount,
     );
 
     // Touch remaining public input (recipient encoding decision is deferred).

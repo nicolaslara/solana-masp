@@ -71,9 +71,11 @@ pub use oob::{
 pub use proofs::{MembershipWitness, StoreId};
 pub use traits::{
     Chain, ChainError, Indexer, IndexerError, InsertCommitmentResult, NoteCommitmentStore,
-    NullifierError, NullifierSet, OutputCiphertext, ProofBytes, ProofPublicInputs,
-    ProofSystemError, ProofVerifier, ScanParams, ScanResult, ShieldPublicInputs, ShieldRequest,
-    ShieldResult, SpendPrivateInputs, SpendProver, SpendPublicInputs, StoreError, TransferOutput,
-    TransferRequest, TransferResult, UnshieldRequest, UnshieldResult,
+    InputSlot, NullifierError, NullifierSet, OutputCiphertext, OutputSlot, ProofBytes,
+    ProofPublicInputs,
+    ProofPrivateInputs, ProofSystemError, ProofVerifier, ScanParams, ScanResult, ShieldPrivateInputs,
+    ShieldPublicInputs, ShieldRequest, ShieldResult, SpendProver, StoreError, TransferOutput,
+    TransferPrivateInputs, TransferPublicInputs, TransferRequest, TransferResult, UnshieldPrivateInputs,
+    UnshieldRequest, UnshieldResult,
 };
 pub use types::{Anchor, Commitment, Fr, Nullifier, TokenAddress};
