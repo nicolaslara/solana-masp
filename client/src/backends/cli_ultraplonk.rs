@@ -393,7 +393,7 @@ impl CliUltraPlonkProver {
         for i in 0..crate::tx_binding::MAX_INPUTS {
             let slot = &private.inputs[i];
 
-            // Membership witness must be a Merkle path of depth 16 and bound to the public anchor.
+            // Membership witness must be a Merkle path of depth MERKLE_DEPTH and bound to the public anchor.
             let (siblings, path_indices, root) = match &slot.membership_witness {
                 crate::proofs::MembershipWitness::MerklePath {
                     siblings,
@@ -410,7 +410,10 @@ impl CliUltraPlonkProver {
             if slot.enabled && *root != public.anchor {
                 return Err(ProofSystemError::InvalidPublicInputs);
             }
-            if slot.enabled && (siblings.len() != 16 || path_indices.len() != 16) {
+            if slot.enabled
+                && (siblings.len() != crate::MERKLE_DEPTH
+                    || path_indices.len() != crate::MERKLE_DEPTH)
+            {
                 return Err(ProofSystemError::InvalidPublicInputs);
             }
 
@@ -456,12 +459,12 @@ impl CliUltraPlonkProver {
             let sibs = if slot.enabled {
                 siblings.to_vec()
             } else {
-                vec![zero; 16]
+                vec![zero; crate::MERKLE_DEPTH]
             };
             let idxs = if slot.enabled {
                 path_indices.to_vec()
             } else {
-                vec![false; 16]
+                vec![false; crate::MERKLE_DEPTH]
             };
 
             inputs_toml.push_str(&format!(

@@ -27,6 +27,22 @@
 //! 2. **Non-membership** - nullifier not spent (set check or insert-or-fail)
 //! 3. **Spend validity** - ZK proof of valid note (always UltraPlonk)
 
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Merkle tree depth for commitment accumulator.
+/// Must match circuits/masp/common/src/constants.nr::MERKLE_DEPTH
+pub const MERKLE_DEPTH: usize = 32;
+
+/// Maximum number of inputs per transfer.
+/// Must match circuits/masp/common/src/constants.nr::MAX_INPUTS
+pub const MAX_INPUTS: usize = 3;
+
+/// Maximum number of outputs per transfer.
+/// Must match circuits/masp/common/src/constants.nr::MAX_OUTPUTS
+pub const MAX_OUTPUTS: usize = 3;
+
 // Core cryptographic primitives
 pub mod domain;
 pub mod encryption;

@@ -79,7 +79,7 @@ impl LightIndexer {
     /// Backwards-compatible constructor (creates its own internal mock store).
     /// Prefer `helius_with_mock_store` in tests.
     pub fn helius() -> Self {
-        Self::helius_with_mock_store(Arc::new(MockNoteStore::new(16)))
+        Self::helius_with_mock_store(Arc::new(MockNoteStore::new(crate::MERKLE_DEPTH)))
     }
 }
 

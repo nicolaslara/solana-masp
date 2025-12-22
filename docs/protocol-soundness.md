@@ -232,6 +232,7 @@ nf = H(DOM\_NULLIFIER, nsk, nullifier\_nonce)
 \]
 
 Where:
+
 - `nsk = H(DOM_NULLIFIER_SECRET, spending_key)` is the **nullifier secret key** (derived from SpendingKey)
 - `nullifier_nonce` is unique per note, committed in the note plaintext
 
@@ -239,6 +240,7 @@ Where:
 If we used `nk.x` (which is in the FullViewingKey), watch-only wallets could compute nullifiers and spend notes!
 
 The circuit enforces this by:
+
 1. Deriving `nsk = H(DOM_NULLIFIER_SECRET, spending_key)` in-circuit
 2. Computing `nullifier = H(DOM_NULLIFIER, nsk, nullifier_nonce)`
 3. The `nk = nsk * G` public key is used for `ivk` derivation (recipient binding), but NOT for nullifier derivation
@@ -374,6 +376,13 @@ If ciphertexts are posted out-of-band via Tx A, then Tx B MUST also bind to the 
   - The chain checks that `anchor_root` is a valid recent root for the commitment tree.
 - **(T2) Spend authorization / ownership (MASP circuit)**:
   - For each **enabled** input `i`, only the SpendingKey holder for that note's recipient/address can produce a valid spend proof.
+- **Implementation note (current circuit optimization):**
+  - The current Noir `transfer` circuit enforces that **all enabled inputs share the same sender tuple**
+    `(spending_key, note_recipient, diversifier_index)`, and then performs the expensive
+    EC-based spend authorization check **exactly once** (for the first enabled input).
+  - This is intentional to avoid repeating embedded-curve operations per input.
+  - Consequence: multi-input transfers currently require all inputs to be addressed to the *same diversified address*
+    (same `diversifier_index` and `note_recipient`), not merely the same spending key.
 - **(T2b) Transaction binding hash (MASP circuit)**:
   - `tx_binding` is a public input computed as:
 

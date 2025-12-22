@@ -41,7 +41,9 @@ use crate::note::{Note, NotePlaintext};
 use crate::types::Fr;
 use ark_ec::CurveGroup;
 use ark_ff::{BigInteger, PrimeField, UniformRand};
-use ark_grumpkin::{Affine as GrumpkinAffine, Fr as GrumpkinScalar, Projective as GrumpkinProjective};
+use ark_grumpkin::{
+    Affine as GrumpkinAffine, Fr as GrumpkinScalar, Projective as GrumpkinProjective,
+};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,

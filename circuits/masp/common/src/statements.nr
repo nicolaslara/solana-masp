@@ -5,6 +5,7 @@
 //
 // Security requirements: see `docs/circuit-security-requirements.md`.
 
+use crate::constants::{MAX_INPUTS, MERKLE_DEPTH};
 use std::embedded_curve_ops::{EmbeddedCurveScalar, fixed_base_scalar_mul, multi_scalar_mul};
 use std::hash::poseidon2::Poseidon2;
 
@@ -100,14 +101,14 @@ pub fn merkle_hash(left: Field, right: Field) -> Field {
 pub fn prove_merkle_membership(
     anchor: Field,
     input_commitment: Field,
-    siblings: [Field; 16],
-    path_indices: [bool; 16],
+    siblings: [Field; MERKLE_DEPTH],
+    path_indices: [bool; MERKLE_DEPTH],
 ) {
     // Enforce the Merkle path against the public `anchor` using Poseidon2.
     //
     // NOTE: This must match the Rust-side commitment accumulator hashing (`client/src/hash.rs::merkle_hash`).
     let mut current: Field = input_commitment;
-    for i in 0..16 {
+    for i in 0..MERKLE_DEPTH {
         let sib = siblings[i];
         let is_right = path_indices[i];
         if is_right {
@@ -183,7 +184,9 @@ pub fn prove_nullifier_derivation(nullifier: Field, nsk: Field, note_nullifier_n
 /// 7. pk_d = ivk * g_d (diversified payment key)
 /// 8. Assert note_recipient == pk_d.x
 ///
-/// Returns `nsk` so the caller can use it for nullifier derivation.
+/// Returns `SpendAuthResult` containing:
+/// - `nsk`: nullifier secret key for nullifier derivation
+/// - `ivk`: incoming viewing key for verifying other inputs' diversified addresses
 ///
 /// IMPORTANT: This uses Grumpkin (Noir's embedded curve), which matches
 /// the Rust key derivation using `ark-grumpkin`.
@@ -191,7 +194,7 @@ pub fn prove_spend_authorization(
     spending_key: Field,
     note_recipient: Field,
     note_diversifier_index: u64,
-) -> Field {
+) -> SpendAuthResult {
     // 1. Derive ask and nsk from spending_key
     let ask = Poseidon2::hash([DOM_AUTH_SECRET, spending_key], 2);
     let nsk = Poseidon2::hash([DOM_NULLIFIER_SECRET, spending_key], 2);
@@ -221,8 +224,140 @@ pub fn prove_spend_authorization(
     // This proves the note was addressed to this SpendingKey's diversified address.
     assert(note_recipient == pk_d.x);
 
-    // Return nsk for nullifier derivation
-    nsk
+    // Return both nsk and ivk for downstream use
+    SpendAuthResult { nsk, ivk }
+}
+
+// ============================================================================
+// Multi-input same-sender authorization (optimized for avoiding bb loop bug)
+// ============================================================================
+
+/// Return type from spend authorization, containing derived key material.
+pub struct SpendAuthResult {
+    /// Nullifier secret key: nsk = H(DOM_NULLIFIER_SECRET, spending_key)
+    /// Used for nullifier derivation.
+    pub nsk: Field,
+    /// Incoming viewing key: ivk = H(DOM_IVK, ak.x, nk.x)
+    /// Used to verify diversified address ownership for other inputs.
+    pub ivk: Field,
+}
+
+/// Input slot for a transfer circuit.
+///
+/// Contains all private data for a single input note, including the note plaintext,
+/// spending key, and Merkle path for membership proof.
+pub struct InputSlot {
+    /// Whether this input slot is enabled (vs a dummy/padding slot)
+    pub enabled: bool,
+    /// Asset ID of the note
+    pub note_asset_id: Field,
+    /// Amount of the note (in atomic units)
+    pub note_amount: u64,
+    /// Recipient field (pk_d.x) - the diversified payment address
+    pub note_recipient: Field,
+    /// Diversifier index used for this note's address
+    pub note_diversifier_index: u64,
+    /// Nullifier nonce - unique per note, committed in the note
+    pub note_nullifier_nonce: Field,
+    /// Randomness used in the note commitment
+    pub note_randomness: Field,
+    /// Spending key (root secret) - circuit derives ask and nsk from this
+    pub spending_key: Field,
+    /// Merkle path siblings for membership proof (length = MERKLE_DEPTH)
+    pub siblings: [Field; MERKLE_DEPTH],
+    /// Merkle path indices (left=false, right=true) (length = MERKLE_DEPTH)
+    pub path_indices: [bool; MERKLE_DEPTH],
+}
+
+/// Compute expected recipient for a diversified address.
+///
+/// Given `ivk` (incoming viewing key) and `diversifier_index`, computes:
+/// - g_d = H(diversifier_index) * G
+/// - pk_d = ivk * g_d
+/// - returns pk_d.x (the recipient field element)
+fn compute_expected_recipient(ivk: Field, diversifier_index: u64) -> Field {
+    let g_d_scalar_field = Poseidon2::hash([diversifier_index as Field], 1);
+    let g_d_scalar = EmbeddedCurveScalar::from_field(g_d_scalar_field);
+    let g_d = fixed_base_scalar_mul(g_d_scalar);
+
+    let ivk_scalar = EmbeddedCurveScalar::from_field(ivk);
+    let pk_d = multi_scalar_mul([g_d], [ivk_scalar]);
+
+    pk_d.x
+}
+
+/// Statement: "All enabled inputs are owned by the same spending_key holder."
+///
+/// This is a companion to `prove_spend_authorization` for multi-input transfers.
+/// Call `prove_spend_authorization` first on inputs[0] to get `SpendAuthResult`,
+/// then call this to verify all other enabled inputs belong to the same owner.
+///
+/// What it verifies:
+/// 1. All enabled inputs have the same spending_key
+/// 2. Each enabled input's note_recipient matches the expected diversified address
+///    computed from that input's note_diversifier_index using the precomputed `ivk`
+///
+/// ## Security
+/// - The spending_key is never revealed; only its derived values are used
+/// - Different diversifier_indices produce different expected recipients (unlinkable addresses)
+/// - `ivk` was already computed and verified in `prove_spend_authorization`
+/// - We MUST verify recipient derivation (not just spending_key equality) because spending_key
+///   is private and an attacker could claim any value without the EC derivation check
+///
+/// ## Note on EC ops
+/// EC operations (in `compute_expected_recipient`) are computed UNCONDITIONALLY for all inputs,
+/// then we conditionally assert based on `enabled`. This is required because EC black box
+/// functions inside conditional blocks cause bb verification failures.
+///
+/// ## MAX_INPUTS coupling
+/// This function is unrolled for MAX_INPUTS == 3. If MAX_INPUTS changes, update the unrolled
+/// EC computations and assertions below.
+
+/// Gated equality assertion: enforces (a == b) only when enabled is true.
+/// When enabled is false, the constraint becomes 0 == 0 (always satisfied).
+/// This avoids putting asserts inside `if` blocks, which can cause issues with EC blackboxes.
+fn assert_eq_if(enabled: bool, a: Field, b: Field) {
+    let e = enabled as Field; // 0 or 1
+    assert((a - b) * e == 0);
+}
+
+pub fn verify_inputs_same_owner(inputs: [InputSlot; MAX_INPUTS], spending_key: Field, ivk: Field) {
+    // This function is hardcoded to MAX_INPUTS == 3 and has an unrolled loop for 3 inputs.
+    // if MAX_INPUTS changes, this function will need to be updated.
+    assert(MAX_INPUTS == 3);
+
+    // For each enabled input, verify:
+    // 1. spending_key matches (field comparison)
+    // 2. note_recipient is derivable from ivk + diversifier_index (EC ops)
+    //
+    // inputs[0] was already verified in prove_spend_authorization, so we skip its recipient check.
+    //
+    // PATTERN A: Compute all EC ops unconditionally, use gated asserts.
+    // This avoids the known Noir/bb issue with EC blackboxes under predicates.
+    // See: https://github.com/noir-lang/noir/issues/10185
+    //
+    // NOTE: If MAX_INPUTS changes, update the unrolled code below!
+
+    // Compute expected recipients for ALL inputs UNCONDITIONALLY
+    // (inputs[0] recipient is already verified in prove_spend_authorization, but we skip asserting it)
+    let expected0 = compute_expected_recipient(ivk, inputs[0].note_diversifier_index);
+    let expected1 = compute_expected_recipient(ivk, inputs[1].note_diversifier_index);
+    let expected2 = compute_expected_recipient(ivk, inputs[2].note_diversifier_index);
+
+    // Touch expected0 to avoid unused variable warning (it's verified in prove_spend_authorization)
+    let _ = expected0;
+
+    // Gated assertions: only enforced when enabled is true
+    // Input 0: spending_key check only (recipient already verified in prove_spend_authorization)
+    assert_eq_if(inputs[0].enabled, inputs[0].spending_key, spending_key);
+
+    // Input 1: spending_key + recipient check
+    assert_eq_if(inputs[1].enabled, inputs[1].spending_key, spending_key);
+    assert_eq_if(inputs[1].enabled, inputs[1].note_recipient, expected1);
+
+    // Input 2: spending_key + recipient check
+    assert_eq_if(inputs[2].enabled, inputs[2].spending_key, spending_key);
+    assert_eq_if(inputs[2].enabled, inputs[2].note_recipient, expected2);
 }
 
 /// Statement: "This proof is bound to the intended transaction."
@@ -291,3 +426,222 @@ pub fn check_public_withdraw_binding_single_asset(
 // generates range constraints. No explicit `prove_amount_range()` function is needed.
 //
 // See `docs/protocol-soundness.md` for the full security rationale.
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[test]
+fn test_prove_spend_authorization_single() {
+    // Test that prove_spend_authorization works for a single input.
+    // Values from Rust: cargo test gen_valid_circuit_witness
+    let spending_key: Field =
+        19071638227322667481529338707313302469950350415517269371204778542479809587754;
+    let note_recipient: Field =
+        19597776030385147363221867065656248682035662835329079184316854821084231909197;
+    let diversifier_index: u64 = 0;
+
+    // This should not panic
+    let result = prove_spend_authorization(spending_key, note_recipient, diversifier_index);
+
+    // nsk and ivk should be non-zero
+    assert(result.nsk != 0);
+    assert(result.ivk != 0);
+}
+
+#[test]
+fn test_verify_inputs_same_owner_single_input() {
+    // Test with a single enabled input.
+    let spending_key: Field =
+        19071638227322667481529338707313302469950350415517269371204778542479809587754;
+    let note_recipient: Field =
+        19597776030385147363221867065656248682035662835329079184316854821084231909197;
+    let diversifier_index: u64 = 0;
+
+    // First, call prove_spend_authorization to get ivk
+    let auth_result = prove_spend_authorization(spending_key, note_recipient, diversifier_index);
+
+    // Create InputSlot with all required fields (dummy values for fields not used by verify_inputs_same_owner)
+    let dummy_siblings: [Field; MERKLE_DEPTH] = [0; MERKLE_DEPTH];
+    let dummy_path_indices: [bool; MERKLE_DEPTH] = [false; MERKLE_DEPTH];
+
+    let inputs = [
+        InputSlot {
+            enabled: true,
+            note_asset_id: 0,
+            note_amount: 0,
+            note_recipient,
+            note_diversifier_index: diversifier_index,
+            note_nullifier_nonce: 0,
+            note_randomness: 0,
+            spending_key,
+            siblings: dummy_siblings,
+            path_indices: dummy_path_indices,
+        },
+        InputSlot {
+            enabled: false,
+            note_asset_id: 0,
+            note_amount: 0,
+            note_recipient: 0,
+            note_diversifier_index: 0,
+            note_nullifier_nonce: 0,
+            note_randomness: 0,
+            spending_key: 0,
+            siblings: dummy_siblings,
+            path_indices: dummy_path_indices,
+        },
+        InputSlot {
+            enabled: false,
+            note_asset_id: 0,
+            note_amount: 0,
+            note_recipient: 0,
+            note_diversifier_index: 0,
+            note_nullifier_nonce: 0,
+            note_randomness: 0,
+            spending_key: 0,
+            siblings: dummy_siblings,
+            path_indices: dummy_path_indices,
+        },
+    ];
+
+    // This should not panic - verify other inputs match
+    verify_inputs_same_owner(inputs, spending_key, auth_result.ivk);
+
+    // nsk from auth_result should be non-zero
+    assert(auth_result.nsk != 0);
+}
+
+#[test]
+fn test_verify_inputs_same_owner_different_diversifiers() {
+    // Test with 2 enabled inputs at different diversifiers.
+    // Same spending_key, but different diversifier_indices produce different recipients.
+    let spending_key: Field =
+        19071638227322667481529338707313302469950350415517269371204778542479809587754;
+
+    // Recipients from Rust (for diversifiers 0 and 7)
+    let recipient_div0: Field =
+        19597776030385147363221867065656248682035662835329079184316854821084231909197;
+    let recipient_div7: Field =
+        17822185092646959655687347322021915709507817777678905363953393991482705860441;
+
+    // First, call prove_spend_authorization on the first input to get ivk
+    let auth_result = prove_spend_authorization(spending_key, recipient_div0, 0);
+
+    // Dummy values for fields not used by verify_inputs_same_owner
+    let dummy_siblings: [Field; MERKLE_DEPTH] = [0; MERKLE_DEPTH];
+    let dummy_path_indices: [bool; MERKLE_DEPTH] = [false; MERKLE_DEPTH];
+
+    let inputs = [
+        InputSlot {
+            enabled: true,
+            note_asset_id: 0,
+            note_amount: 0,
+            note_recipient: recipient_div0,
+            note_diversifier_index: 0,
+            note_nullifier_nonce: 0,
+            note_randomness: 0,
+            spending_key,
+            siblings: dummy_siblings,
+            path_indices: dummy_path_indices,
+        },
+        InputSlot {
+            enabled: true,
+            note_asset_id: 0,
+            note_amount: 0,
+            note_recipient: recipient_div7,
+            note_diversifier_index: 7,
+            note_nullifier_nonce: 0,
+            note_randomness: 0,
+            spending_key,
+            siblings: dummy_siblings,
+            path_indices: dummy_path_indices,
+        },
+        InputSlot {
+            enabled: false,
+            note_asset_id: 0,
+            note_amount: 0,
+            note_recipient: 0,
+            note_diversifier_index: 0,
+            note_nullifier_nonce: 0,
+            note_randomness: 0,
+            spending_key: 0,
+            siblings: dummy_siblings,
+            path_indices: dummy_path_indices,
+        },
+    ];
+
+    // This should not panic - both inputs are owned by the same key
+    verify_inputs_same_owner(inputs, spending_key, auth_result.ivk);
+    assert(auth_result.nsk != 0);
+}
+
+#[test]
+fn test_verify_inputs_uses_auth_result() {
+    // Verify that the flow works: prove_spend_authorization -> verify_inputs_same_owner
+    let spending_key: Field =
+        19071638227322667481529338707313302469950350415517269371204778542479809587754;
+    let note_recipient: Field =
+        19597776030385147363221867065656248682035662835329079184316854821084231909197;
+    let diversifier_index: u64 = 0;
+
+    // Get auth result from prove_spend_authorization
+    let auth_result = prove_spend_authorization(spending_key, note_recipient, diversifier_index);
+
+    // Verify the nsk and ivk are consistent
+    assert(auth_result.nsk != 0);
+    assert(auth_result.ivk != 0);
+
+    // Dummy values for fields not used by verify_inputs_same_owner
+    let dummy_siblings: [Field; MERKLE_DEPTH] = [0; MERKLE_DEPTH];
+    let dummy_path_indices: [bool; MERKLE_DEPTH] = [false; MERKLE_DEPTH];
+
+    // Use the ivk to verify inputs
+    let inputs = [
+        InputSlot {
+            enabled: true,
+            note_asset_id: 0,
+            note_amount: 0,
+            note_recipient,
+            note_diversifier_index: diversifier_index,
+            note_nullifier_nonce: 0,
+            note_randomness: 0,
+            spending_key,
+            siblings: dummy_siblings,
+            path_indices: dummy_path_indices,
+        },
+        InputSlot {
+            enabled: false,
+            note_asset_id: 0,
+            note_amount: 0,
+            note_recipient: 0,
+            note_diversifier_index: 0,
+            note_nullifier_nonce: 0,
+            note_randomness: 0,
+            spending_key: 0,
+            siblings: dummy_siblings,
+            path_indices: dummy_path_indices,
+        },
+        InputSlot {
+            enabled: false,
+            note_asset_id: 0,
+            note_amount: 0,
+            note_recipient: 0,
+            note_diversifier_index: 0,
+            note_nullifier_nonce: 0,
+            note_randomness: 0,
+            spending_key: 0,
+            siblings: dummy_siblings,
+            path_indices: dummy_path_indices,
+        },
+    ];
+
+    // This should not panic - ivk from auth_result is used to verify all inputs
+    verify_inputs_same_owner(inputs, spending_key, auth_result.ivk);
+}
+
+#[test]
+fn test_verify_inputs_same_owner_max_inputs_change() {
+    // If MAX_INPUTS changes, the verify_inputs_same_owner function will need to be updated.
+    // This test will fail to let us know that the function needs to be updated.
+    assert(MAX_INPUTS == 3);
+}

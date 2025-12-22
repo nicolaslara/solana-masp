@@ -51,7 +51,7 @@ impl TestEnv {
         }
 
         // Shared store so chain writes are visible to the indexer in scaffold mode.
-        let shared_store = Arc::new(MockNoteStore::new(16));
+        let shared_store = Arc::new(MockNoteStore::new(masp_client::MERKLE_DEPTH));
 
         fn ultraplonk_prover() -> Arc<dyn SpendProver> {
             // Use CLI-based prover that shells out to nargo + bb.

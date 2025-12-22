@@ -528,6 +528,63 @@ Minimal public inputs:
 
 ## Key Learnings
 
+### EC Operations in Noir Conditionals (Validated 2025-12-22)
+
+**Problem:** EC black box functions (`fixed_base_scalar_mul`, `multi_scalar_mul`) inside conditional blocks (`if enabled { ... }`) cause bb verification failures when the condition is `false`.
+
+**Root cause:** This is a **known issue** in the Noir ↔ Barretenberg pipeline around ACIR predicates:
+- Noir compiles `if cond { ... }` into constraints guarded by a predicate
+- Some Barretenberg blackbox calls don't properly respect those predicates
+- The backend still "touches" inputs/outputs even when the predicate is false
+- This leads to "fails when branch is false" behavior
+
+**GitHub issues:**
+- [Add tests for running embedded curve ops under a predicate](https://github.com/noir-lang/noir/issues/10185)
+- [Update to account for explicit predicates on blackbox operations](https://github.com/noir-lang/noir/issues/10186)
+- [Aztec PR: use bb predicates when generating constraints](https://github.com/AztecProtocol/aztec-packages/pull/16663)
+
+**Validated via minimal test circuit (`circuits/masp/ec_test/`):**
+
+| Version | enabled | Result |
+|---------|---------|--------|
+| EC inside if | true | ✅ PASS |
+| EC inside if | false | ❌ FAIL |
+| EC outside if | true | ✅ PASS |
+| EC outside if | false | ✅ PASS |
+
+**Solution: Pattern A - Compute all, gate only asserts:**
+
+```noir
+// BAD: EC ops inside conditional - FAILS when enabled=false
+if enabled {
+    let result = compute_point(ivk, diversifier_index);
+    assert(recipient == result);
+}
+
+// GOOD: Compute unconditionally, use gated assert
+let result = compute_point(ivk, diversifier_index);
+// assert_eq_if: enforces (a == b) only when enabled
+fn assert_eq_if(enabled: bool, a: Field, b: Field) {
+    let e = enabled as Field;
+    assert((a - b) * e == 0);
+}
+assert_eq_if(enabled, recipient, result);
+```
+
+**Cost implications (measured):**
+- 1 EC derivation: ~3,400 gates
+- Each additional: ~600 gates
+- 15 EC derivations: ~12,000 gates
+- Prover time scales roughly linearly with circuit size
+
+**Trade-off:** We pay for MAX_INPUTS EC derivations regardless of how many are enabled.
+
+**Recommendations:**
+1. For MAX_INPUTS ≤ 5: acceptable overhead, use Pattern A
+2. For MAX_INPUTS = 15: use Pattern A, accept ~3x proving time increase
+3. For production with varying input counts: compile separate circuits (e.g., `transfer_2`, `transfer_5`, `transfer_15`) and select at runtime
+4. Watch for Noir/bb updates that fix predicate handling for EC blackboxes
+
 ### From Sapling-Groth16 Spike
 
 1. **Poseidon > BLAKE2s** - 70-100x more efficient (~200 vs ~21,000 constraints)

@@ -45,7 +45,11 @@ async fn e2e_transfer_exact_amount_real_ultraplonk_proof() {
     }
 
     // Check nargo is available
-    if std::process::Command::new("nargo").arg("--version").output().is_err() {
+    if std::process::Command::new("nargo")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         eprintln!("Skipping: nargo not found in PATH. Install with: noirup -v v1.0.0-beta.3");
         return;
     }

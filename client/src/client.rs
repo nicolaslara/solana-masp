@@ -533,7 +533,7 @@ where
         )?;
 
         // 5. Submit to chain
-        let request = transfer_data.to_request_with_outputs(spend_proof, outputs);
+        let request = transfer_data.to_request_with_outputs(spend_proof, outputs, ct_hashes);
         let result = self.chain.transfer(request).await?;
 
         // 6. Update local state
@@ -1064,10 +1064,17 @@ impl TransferData {
     }
 
     /// Convert to transfer request with full output data (including ciphertexts)
+    ///
+    /// # Arguments
+    /// * `spend_proof` - The ZK proof
+    /// * `outputs` - Output data including ciphertexts
+    /// * `ct_hashes` - The ciphertext hashes that were used when generating the proof
+    ///                 (MUST match what was passed to spend_proof_inputs)
     pub fn to_request_with_outputs(
         &self,
         spend_proof: ProofBytes,
         outputs: Vec<crate::traits::TransferOutput>,
+        ct_hashes: [Fr; crate::traits::MAX_OUTPUTS],
     ) -> TransferRequest {
         // Convert vector outputs into fixed 3-slot layout: payment + change + fee.
         let out0 = outputs
@@ -1105,9 +1112,8 @@ impl TransferData {
             nullifiers,
             input_count,
             output_count,
-            // Placeholder ct_hashes: non-zero for enabled outputs
-            // TODO: compute real ct_hashes from ciphertext bytes (Phase 13)
-            ct_hashes: TransferPublicInputs::placeholder_ct_hashes(output_count),
+            // Use the actual ct_hashes that were proven
+            ct_hashes,
             tx_binding,
             spend_proof: spend_proof.into_bytes(),
             outputs,

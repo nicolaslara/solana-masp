@@ -32,10 +32,7 @@ use crate::types::{Fr, Nullifier};
 /// that FullViewingKey holders CANNOT compute nullifiers or spend notes.
 pub fn compute_nullifier(nsk: Fr, nullifier_nonce: Fr) -> Nullifier {
     // Must match Noir circuits (`Poseidon2::hash([DOM_NULLIFIER, nsk, nonce], 3)`).
-    poseidon2_hash_noir(
-        &[DomainTag::Nullifier.to_field(), nsk, nullifier_nonce],
-        3,
-    )
+    poseidon2_hash_noir(&[DomainTag::Nullifier.to_field(), nsk, nullifier_nonce], 3)
 }
 
 #[cfg(test)]

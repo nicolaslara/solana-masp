@@ -18,21 +18,12 @@
 // - Single-asset semantics: all enabled inputs/outputs must have the same asset_id
 
 use dep::masp_common::{
-    compute_note_commitment, prove_merkle_membership, prove_note_preimage_hashes_to_commitment,
-    prove_nullifier_derivation, prove_spend_authorization, prove_tx_binding,
+    compute_note_commitment, InputSlot, MAX_INPUTS, MAX_OUTPUTS, prove_merkle_membership,
+    prove_note_preimage_hashes_to_commitment, prove_nullifier_derivation, prove_spend_authorization,
+    prove_tx_binding, SpendAuthResult, verify_inputs_same_owner,
 };
 
 use std::hash::poseidon2::Poseidon2;
-
-// ============================================================================
-// Constants
-// ============================================================================
-
-/// Maximum number of inputs (compile-time).
-global MAX_INPUTS: u32 = 3;
-
-/// Maximum number of outputs (compile-time).
-global MAX_OUTPUTS: u32 = 3;
 
 // ============================================================================
 // Domain tags (must match client/src/domain.rs)
@@ -47,21 +38,6 @@ global DOM_NULLIFIER_NONCE: Field = 6;
 // ============================================================================
 // Structs for readability
 // ============================================================================
-
-struct InputSlot {
-    enabled: bool,
-    note_asset_id: Field,
-    note_amount: u64,
-    note_recipient: Field,
-    note_diversifier_index: u64,
-    note_nullifier_nonce: Field,
-    note_randomness: Field,
-    // Spending key (root secret).
-    // Circuit derives: ask = H(DOM_AUTH_SECRET, spending_key), nsk = H(DOM_NULLIFIER_SECRET, spending_key)
-    spending_key: Field,
-    siblings: [Field; 16],
-    path_indices: [bool; 16],
-}
 
 struct OutputSlot {
     enabled: bool,
@@ -121,9 +97,15 @@ fn main(
         tx_binding,
     };
 
-    // Note: MAX_INPUTS/MAX_OUTPUTS are fixed compile-time constants; we keep the shape explicit.
-    let inputs_enabled = [inputs[0].enabled, inputs[1].enabled, inputs[2].enabled];
-    let outputs_enabled = [outputs[0].enabled, outputs[1].enabled, outputs[2].enabled];
+    // Build enable flag arrays via loop (avoid hardcoding MAX_INPUTS/MAX_OUTPUTS literals)
+    let mut inputs_enabled: [bool; MAX_INPUTS] = [false; MAX_INPUTS];
+    let mut outputs_enabled: [bool; MAX_OUTPUTS] = [false; MAX_OUTPUTS];
+    for i in 0..MAX_INPUTS {
+        inputs_enabled[i] = inputs[i].enabled;
+    }
+    for j in 0..MAX_OUTPUTS {
+        outputs_enabled[j] = outputs[j].enabled;
+    }
 
     // =========================================================================
     // Protocol statements (Stage-0 scaffolding)
@@ -158,7 +140,29 @@ fn main(
     assert(tx_binding == expected_tx_binding);
     prove_tx_binding(tx_binding);
 
-    // For each enabled input:
+    // =========================================================================
+    // (T2) Same-sender authorization - ALL curve ops happen here, OUTSIDE the loop
+    // =========================================================================
+    // Statement: "All inputs belong to the same spending_key holder."
+    //
+    // We call prove_spend_authorization on inputs[0], which performs all EC ops once
+    // and returns SpendAuthResult containing nsk (for nullifier derivation) and
+    // ivk (for verifying other inputs' diversified addresses).
+    //
+    // Then verify_inputs_same_owner verifies all other enabled inputs belong to the
+    // same spending_key, using the precomputed ivk.
+    let auth_result: SpendAuthResult = prove_spend_authorization(
+        inputs[0].spending_key,
+        inputs[0].note_recipient,
+        inputs[0].note_diversifier_index,
+    );
+
+    // Verify all enabled inputs are owned by the same spending_key holder
+    verify_inputs_same_owner(inputs, inputs[0].spending_key, auth_result.ivk);
+
+    // =========================================================================
+    // Per-input checks (T1, T3, T4)
+    // =========================================================================
     for i in 0..MAX_INPUTS {
         if inputs[i].enabled {
             // Recompute the spent commitment from the note plaintext (private).
@@ -192,42 +196,29 @@ fn main(
                 inputs[i].note_randomness,
             );
 
-            // (T2) Spend authorization + (T4) Nullifier derivation
-            // Statement: "I am authorized to spend this note (SpendingKey-only)."
-            // prove_spend_authorization derives ask/nsk from spending_key and returns nsk.
-            let nsk = prove_spend_authorization(
-                inputs[i].spending_key,
-                inputs[i].note_recipient,
-                inputs[i].note_diversifier_index,
-            );
-
             // (T4) Nullifier derivation
             // Statement: "The revealed nullifier is correctly derived from the owner's key material and this note."
             // **SECURITY:** Uses nsk (SECRET), NOT nk.x (public). This ensures FVK holders can't spend.
             prove_nullifier_derivation(
                 public.nullifiers[i],
-                nsk,
+                auth_result.nsk,
                 inputs[i].note_nullifier_nonce,
             );
         }
     }
 
-    // (T6) Output nonce derivation (required)
+    // =========================================================================
+    // Per-output checks (T5, T6)
+    // =========================================================================
     // Statement: "Each enabled output's nullifier nonce is deterministically derived from tx_binding and its index."
     // Enforce output commitments are well-formed and match public outputs.
     for j in 0..MAX_OUTPUTS {
         if outputs[j].enabled {
-            // (T8) Ciphertext hash binding (Option 1A weak binding): enabled output must have non-zero ct_hash.
-            assert(public.ct_hashes[j] != 0);
-
-            // Single-asset rule
-            assert(outputs[j].note_asset_id == transfer_asset_id);
-
-            // Enforce nonce derivation
+            // Enforce nonce derivation (T6)
             let expected_nonce = derive_output_nonce(tx_binding, j);
             assert(outputs[j].note_nullifier_nonce == expected_nonce);
 
-            // Enforce output commitment integrity
+            // Enforce output commitment integrity (T5)
             let out_cm = compute_note_commitment(
                 outputs[j].note_asset_id,
                 outputs[j].note_amount,
@@ -237,14 +228,12 @@ fn main(
                 outputs[j].note_randomness,
             );
             assert(public.output_commitments[j] == out_cm);
-        } else {
-            // Disabled outputs must have zero commitment + zero ct_hash (already checked elsewhere, but keep local clarity).
-            assert(public.output_commitments[j] == 0);
-            assert(public.ct_hashes[j] == 0);
         }
     }
 
+    // =========================================================================
     // (T7) Value conservation + single-asset rule
+    // =========================================================================
     // Statement: "No inflation: sum(enabled_input_amounts) == sum(enabled_output_amounts), and all enabled
     // inputs/outputs share the same asset_id (single-asset transfer)."
     verify_balance_conservation(inputs, outputs, transfer_asset_id);

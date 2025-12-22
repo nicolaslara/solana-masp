@@ -401,10 +401,11 @@ mod tests {
         let nsk = sk.nsk();
         let nullifier = compute_nullifier(nsk, note_nullifier_nonce);
 
-        // Build Merkle tree: leaf is commitment, compute root with 16 zero siblings
+        // Build Merkle tree: leaf is commitment, compute root with MERKLE_DEPTH zero siblings
+        use crate::MERKLE_DEPTH;
         let zero_sibling = Fr::from(0u64);
         let mut current = commitment;
-        for _ in 0..16 {
+        for _ in 0..MERKLE_DEPTH {
             // path_index = false means current is left child
             current = merkle_hash(current, zero_sibling);
         }
@@ -464,8 +465,18 @@ mod tests {
         );
         println!("note_randomness = \"{}\"", fr_to_dec(note_randomness));
         println!("spending_key = \"{}\"", fr_to_dec(sk.as_field()));
-        println!("siblings = [\"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\"]");
-        println!("path_indices = [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]");
+        // Generate siblings array with MERKLE_DEPTH zeros
+        let siblings_str = (0..MERKLE_DEPTH)
+            .map(|_| "\"0\"")
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("siblings = [{}]", siblings_str);
+        // Generate path_indices array with MERKLE_DEPTH falses
+        let path_indices_str = (0..MERKLE_DEPTH)
+            .map(|_| "false")
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("path_indices = [{}]", path_indices_str);
         println!();
         println!("# Input commitment = {}", fr_to_dec(commitment));
         println!();
@@ -525,7 +536,8 @@ mod tests {
         );
         println!("note_randomness = \"{}\"", fr_to_dec(note_randomness));
         println!("spending_key = \"{}\"", fr_to_dec(sk.as_field()));
-        println!("siblings = [\"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\", \"0\"]");
-        println!("path_indices = [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]");
+        // Reuse the siblings/path_indices strings from transfer
+        println!("siblings = [{}]", siblings_str);
+        println!("path_indices = [{}]", path_indices_str);
     }
 }

@@ -1325,9 +1325,16 @@ async fn test_recovered_note_can_be_spent() {
     )];
 
     // Submit transfer
+    let output_count = if transfer_data.change.is_some() {
+        2u32
+    } else {
+        1u32
+    };
+    let ct_hashes = masp_client::TransferPublicInputs::placeholder_ct_hashes(output_count);
     let transfer_req = transfer_data.to_request_with_outputs(
         prove_transfer(&env, &recovered_alice, &transfer_data, &alice_seed),
         outputs,
+        ct_hashes,
     );
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
     recovered_alice.mark_spent(recovered_note.commitment);
@@ -1481,9 +1488,16 @@ async fn test_oob_first_payment_encrypted() {
         encrypted.ephemeral_key,
     )];
 
+    let output_count = if transfer_data.change.is_some() {
+        2u32
+    } else {
+        1u32
+    };
+    let ct_hashes = masp_client::TransferPublicInputs::placeholder_ct_hashes(output_count);
     let transfer_req = transfer_data.to_request_with_outputs(
         prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]),
         outputs,
+        ct_hashes,
     );
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
     alice.mark_spent(note.commitment());
@@ -1543,9 +1557,16 @@ async fn test_oob_vs_full_sync_semantics() {
         enc.ephemeral_key,
     )];
 
+    let output_count = if transfer_data.change.is_some() {
+        2u32
+    } else {
+        1u32
+    };
+    let ct_hashes = masp_client::TransferPublicInputs::placeholder_ct_hashes(output_count);
     let transfer_req = transfer_data.to_request_with_outputs(
         prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]),
         outputs,
+        ct_hashes,
     );
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
 
