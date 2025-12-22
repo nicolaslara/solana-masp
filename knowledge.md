@@ -533,12 +533,14 @@ Minimal public inputs:
 **Problem:** EC black box functions (`fixed_base_scalar_mul`, `multi_scalar_mul`) inside conditional blocks (`if enabled { ... }`) cause bb verification failures when the condition is `false`.
 
 **Root cause:** This is a **known issue** in the Noir ↔ Barretenberg pipeline around ACIR predicates:
+
 - Noir compiles `if cond { ... }` into constraints guarded by a predicate
 - Some Barretenberg blackbox calls don't properly respect those predicates
 - The backend still "touches" inputs/outputs even when the predicate is false
 - This leads to "fails when branch is false" behavior
 
 **GitHub issues:**
+
 - [Add tests for running embedded curve ops under a predicate](https://github.com/noir-lang/noir/issues/10185)
 - [Update to account for explicit predicates on blackbox operations](https://github.com/noir-lang/noir/issues/10186)
 - [Aztec PR: use bb predicates when generating constraints](https://github.com/AztecProtocol/aztec-packages/pull/16663)
@@ -572,6 +574,7 @@ assert_eq_if(enabled, recipient, result);
 ```
 
 **Cost implications (measured):**
+
 - 1 EC derivation: ~3,400 gates
 - Each additional: ~600 gates
 - 15 EC derivations: ~12,000 gates
@@ -580,6 +583,7 @@ assert_eq_if(enabled, recipient, result);
 **Trade-off:** We pay for MAX_INPUTS EC derivations regardless of how many are enabled.
 
 **Recommendations:**
+
 1. For MAX_INPUTS ≤ 5: acceptable overhead, use Pattern A
 2. For MAX_INPUTS = 15: use Pattern A, accept ~3x proving time increase
 3. For production with varying input counts: compile separate circuits (e.g., `transfer_2`, `transfer_5`, `transfer_15`) and select at runtime
