@@ -3,6 +3,7 @@
 This document tracks the implementation status of protocol statements from `docs/protocol-soundness.md` across **Rust mocks** and **Noir circuits**.
 
 **Legend:**
+
 - ✅ = Implemented (real constraints/checks)
 - ⚠️ = Placeholder (interface exists, no-op implementation)
 - ❌ = Not implemented
@@ -149,4 +150,3 @@ When implementing a new statement:
 3. Run tests: `cargo test` and `nargo execute` for each circuit
 4. Update this table to mark the statement as ✅
 5. Update `docs/protocol-soundness.md` if the normative spec changes
-

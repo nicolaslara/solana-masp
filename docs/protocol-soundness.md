@@ -232,6 +232,7 @@ nf = H(DOM\_NULLIFIER, nsk, nullifier\_nonce)
 \]
 
 Where:
+
 - `nsk = H(DOM_NULLIFIER_SECRET, spending_key)` is the **nullifier secret key** (derived from SpendingKey)
 - `nullifier_nonce` is unique per note, committed in the note plaintext
 
@@ -239,6 +240,7 @@ Where:
 If we used `nk.x` (which is in the FullViewingKey), watch-only wallets could compute nullifiers and spend notes!
 
 The circuit enforces this by:
+
 1. Deriving `nsk = H(DOM_NULLIFIER_SECRET, spending_key)` in-circuit
 2. Computing `nullifier = H(DOM_NULLIFIER, nsk, nullifier_nonce)`
 3. The `nk = nsk * G` public key is used for `ivk` derivation (recipient binding), but NOT for nullifier derivation
