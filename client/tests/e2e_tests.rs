@@ -55,17 +55,16 @@ mod tokens {
 /// Mock proof that always validates (for testing without real ZK)
 fn prove_transfer(
     env: &TestEnv,
-    client: &masp_client::MaspClient<dyn masp_client::Indexer, dyn masp_client::Chain>,
+    _client: &masp_client::MaspClient<dyn masp_client::Indexer, dyn masp_client::Chain>,
     td: &masp_client::client::TransferData,
     seed: &[u8; 32],
 ) -> ProofBytes {
-    let nk = client.full_viewing_key().nk_field();
     let sk = masp_client::SpendingKey::from_bytes(seed);
     // Use placeholder ct_hashes (non-zero for enabled outputs to pass mock prover checks)
     // Output count = 1 (payment) + 1 if change exists
     let output_count = if td.change.is_some() { 2u32 } else { 1u32 };
     let ct_hashes = masp_client::TransferPublicInputs::placeholder_ct_hashes(output_count);
-    let (public, private) = td.spend_proof_inputs(sk.as_field(), nk, ct_hashes);
+    let (public, private) = td.spend_proof_inputs(sk.as_field(), ct_hashes);
     env.prover
         .prove(
             &masp_client::traits::ProofPublicInputs::Transfer(public),
@@ -521,8 +520,10 @@ async fn test_sync_detects_spent_notes_via_nullifier() {
     let mut alice_restored = env.create_client(&[1u8; 32]);
 
     // Restored client computes nullifier same way
-    let nk = alice_restored.full_viewing_key().nk_field();
-    let restored_nullifier = masp_client::nullifier::compute_nullifier(nk, note.nullifier_nonce);
+    // **SECURITY:** Uses nsk (secret), NOT nk.x (public). This ensures FVK holders can't spend.
+    let sk = masp_client::SpendingKey::from_bytes(&[1u8; 32]);
+    let nsk = sk.nsk();
+    let restored_nullifier = masp_client::nullifier::compute_nullifier(nsk, note.nullifier_nonce);
 
     // Same nullifier
     assert_eq!(restored_nullifier, nullifier);
@@ -1024,7 +1025,6 @@ async fn test_cannot_spend_others_note_wrong_nullifier() {
                     note_diversifier_index: bob_note.diversifier_index,
                     note_nullifier_nonce: bob_note.nullifier_nonce,
                     note_randomness: bob_note.note_randomness,
-                    nk: alice.full_viewing_key().nk_field(),
                     spending_key: masp_client::SpendingKey::from_bytes(&[1u8; 32]).as_field(),
                     membership_witness: alice_witness,
                 },

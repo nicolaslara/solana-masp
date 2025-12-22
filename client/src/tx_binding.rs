@@ -85,20 +85,22 @@ pub fn tx_binding_unshield(
     public_recipient_limbs: [u64; 4],
     public_asset_id: Fr,
 ) -> Fr {
-    // Unshield binding remains Poseidon (legacy) for now; it isn't wired to Noir yet.
-    // We can migrate this to Poseidon2 once the unshield circuit starts enforcing the same layout.
-    crate::hash::poseidon_hash(&[
-        DomainTag::TransactionBinding.to_field(),
-        Fr::from(3u64), // discriminator: unshield
-        anchor,
-        nullifier,
-        Fr::from(public_amount),
-        Fr::from(public_recipient_limbs[0]),
-        Fr::from(public_recipient_limbs[1]),
-        Fr::from(public_recipient_limbs[2]),
-        Fr::from(public_recipient_limbs[3]),
-        public_asset_id,
-    ])
+    // Must match Noir circuits (`Poseidon2::hash([..], 10)`).
+    poseidon2_hash_noir(
+        &[
+            DomainTag::TransactionBinding.to_field(),
+            Fr::from(3u64), // discriminator: unshield
+            anchor,
+            nullifier,
+            Fr::from(public_amount),
+            Fr::from(public_recipient_limbs[0]),
+            Fr::from(public_recipient_limbs[1]),
+            Fr::from(public_recipient_limbs[2]),
+            Fr::from(public_recipient_limbs[3]),
+            public_asset_id,
+        ],
+        10,
+    )
 }
 
 /// Convert a 32-byte recipient (e.g. Solana pubkey) to 4×u64 limbs (little-endian).
@@ -106,9 +108,8 @@ pub fn tx_binding_unshield(
 /// This encoding is injective and avoids the many-to-one `bytes -> Field mod p` issue.
 pub fn recipient_to_u64_limbs_le(recipient: &[u8; 32]) -> [u64; 4] {
     let mut out = [0u64; 4];
-    for i in 0..4 {
-        let start = i * 8;
-        out[i] = u64::from_le_bytes(recipient[start..start + 8].try_into().expect("len 8"));
+    for (out_limb, chunk) in out.iter_mut().zip(recipient.chunks_exact(8)) {
+        *out_limb = u64::from_le_bytes(chunk.try_into().expect("len 8"));
     }
     out
 }
@@ -116,9 +117,8 @@ pub fn recipient_to_u64_limbs_le(recipient: &[u8; 32]) -> [u64; 4] {
 /// Convert 4×u64 limbs (little-endian) back into the original 32-byte recipient.
 pub fn recipient_from_u64_limbs_le(limbs: &[u64; 4]) -> [u8; 32] {
     let mut out = [0u8; 32];
-    for i in 0..4 {
-        let start = i * 8;
-        out[start..start + 8].copy_from_slice(&limbs[i].to_le_bytes());
+    for (&limb, chunk) in limbs.iter().zip(out.chunks_exact_mut(8)) {
+        chunk.copy_from_slice(&limb.to_le_bytes());
     }
     out
 }

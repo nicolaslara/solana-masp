@@ -18,8 +18,8 @@
 // - Single-asset semantics: all enabled inputs/outputs must have the same asset_id
 
 use dep::masp_common::{
-    prove_merkle_membership, prove_note_preimage_hashes_to_commitment, prove_nullifier_derivation,
-    prove_spend_authorization, prove_tx_binding,
+    compute_note_commitment, prove_merkle_membership, prove_note_preimage_hashes_to_commitment,
+    prove_nullifier_derivation, prove_spend_authorization, prove_tx_binding,
 };
 
 use std::hash::poseidon2::Poseidon2;
@@ -56,18 +56,21 @@ struct InputSlot {
     note_diversifier_index: u64,
     note_nullifier_nonce: Field,
     note_randomness: Field,
-    nk: Field,
-    ask: Field,
-    commitment: Field,
+    // Spending key (root secret).
+    // Circuit derives: ask = H(DOM_AUTH_SECRET, spending_key), nsk = H(DOM_NULLIFIER_SECRET, spending_key)
+    spending_key: Field,
     siblings: [Field; 16],
     path_indices: [bool; 16],
 }
 
 struct OutputSlot {
     enabled: bool,
-    asset_id: Field,
-    amount: u64,
-    commitment: Field,
+    note_asset_id: Field,
+    note_amount: u64,
+    note_recipient: Field,
+    note_diversifier_index: u64,
+    note_nullifier_nonce: Field,
+    note_randomness: Field,
 }
 
 struct TransferPublic {
@@ -158,19 +161,8 @@ fn main(
     // For each enabled input:
     for i in 0..MAX_INPUTS {
         if inputs[i].enabled {
-            // (T1) Membership
-            // Statement: "This note is a member of the commitment set for this anchor."
-            prove_merkle_membership(
-                anchor,
-                inputs[i].commitment,
-                inputs[i].siblings,
-                inputs[i].path_indices,
-            );
-
-            // (T3) Input preimage knowledge
-            // Statement: "I know the note plaintext that hashes to the commitment."
-            prove_note_preimage_hashes_to_commitment(
-                inputs[i].commitment,
+            // Recompute the spent commitment from the note plaintext (private).
+            let input_commitment = compute_note_commitment(
                 inputs[i].note_asset_id,
                 inputs[i].note_amount,
                 inputs[i].note_recipient,
@@ -179,39 +171,78 @@ fn main(
                 inputs[i].note_randomness,
             );
 
-            // (T2) Spend authorization
+            // (T1) Membership
+            // Statement: "This note is a member of the commitment set for this anchor."
+            prove_merkle_membership(
+                anchor,
+                input_commitment,
+                inputs[i].siblings,
+                inputs[i].path_indices,
+            );
+
+            // (T3) Input preimage knowledge
+            // Statement: "I know the note plaintext that hashes to the commitment."
+            prove_note_preimage_hashes_to_commitment(
+                input_commitment,
+                inputs[i].note_asset_id,
+                inputs[i].note_amount,
+                inputs[i].note_recipient,
+                inputs[i].note_diversifier_index,
+                inputs[i].note_nullifier_nonce,
+                inputs[i].note_randomness,
+            );
+
+            // (T2) Spend authorization + (T4) Nullifier derivation
             // Statement: "I am authorized to spend this note (SpendingKey-only)."
-            prove_spend_authorization(
-                inputs[i].ask,
-                inputs[i].nk,
+            // prove_spend_authorization derives ask/nsk from spending_key and returns nsk.
+            let nsk = prove_spend_authorization(
+                inputs[i].spending_key,
                 inputs[i].note_recipient,
                 inputs[i].note_diversifier_index,
             );
 
             // (T4) Nullifier derivation
             // Statement: "The revealed nullifier is correctly derived from the owner's key material and this note."
+            // **SECURITY:** Uses nsk (SECRET), NOT nk.x (public). This ensures FVK holders can't spend.
             prove_nullifier_derivation(
                 public.nullifiers[i],
-                inputs[i].nk,
+                nsk,
                 inputs[i].note_nullifier_nonce,
             );
         }
     }
 
-    // (T6) Output nonce derivation (Stage-0: placeholder)
+    // (T6) Output nonce derivation (required)
     // Statement: "Each enabled output's nullifier nonce is deterministically derived from tx_binding and its index."
-    // In Stage-1+, we would verify:
-    //   out_j.nullifier_nonce == derive_output_nonce(tx_binding, j)
-    // For now, just compute to show the intended derivation.
-    let _ = derive_output_nonce(tx_binding, 0);
-    let _ = derive_output_nonce(tx_binding, 1);
-    let _ = derive_output_nonce(tx_binding, 2);
+    // Enforce output commitments are well-formed and match public outputs.
+    for j in 0..MAX_OUTPUTS {
+        if outputs[j].enabled {
+            // (T8) Ciphertext hash binding (Option 1A weak binding): enabled output must have non-zero ct_hash.
+            assert(public.ct_hashes[j] != 0);
 
-    // (T5) Output well-formedness (Stage-0: placeholder)
-    // Statement: "Each enabled output commitment is the hash/commitment of the output note plaintext."
-    // In Stage-1+, we would verify:
-    //   public.output_commitments[j] == H(output_note_plaintext_j...)
-    // Currently we just ensure enabled outputs have matching commitment from public inputs.
+            // Single-asset rule
+            assert(outputs[j].note_asset_id == transfer_asset_id);
+
+            // Enforce nonce derivation
+            let expected_nonce = derive_output_nonce(tx_binding, j);
+            assert(outputs[j].note_nullifier_nonce == expected_nonce);
+
+            // Enforce output commitment integrity
+            let out_cm = compute_note_commitment(
+                outputs[j].note_asset_id,
+                outputs[j].note_amount,
+                outputs[j].note_recipient,
+                outputs[j].note_diversifier_index,
+                outputs[j].note_nullifier_nonce,
+                outputs[j].note_randomness,
+            );
+            assert(public.output_commitments[j] == out_cm);
+        } else {
+            // Disabled outputs must have zero commitment + zero ct_hash (already checked elsewhere, but keep local clarity).
+            assert(public.output_commitments[j] == 0);
+            assert(public.ct_hashes[j] == 0);
+        }
+    }
 
     // (T7) Value conservation + single-asset rule
     // Statement: "No inflation: sum(enabled_input_amounts) == sum(enabled_output_amounts), and all enabled
@@ -306,13 +337,13 @@ fn verify_balance_conservation(
     for j in 0..MAX_OUTPUTS {
         if outputs[j].enabled {
             // All enabled outputs must have the same asset_id
-            assert(outputs[j].asset_id == asset_id);
-            output_sum += outputs[j].amount as Field;
+            assert(outputs[j].note_asset_id == asset_id);
+            output_sum += outputs[j].note_amount as Field;
         }
     }
 
-    // Conservation. Includes range checks to ensure sums are still u64, not Field.
-    assert(input_sum as u64 == output_sum as u64);
+    // Conservation. Amounts are u64, so the Field sums are exact (no wrap).
+    assert(input_sum == output_sum);
 }
 
 /// Verify nullifier correctness for disabled slots (must be zero).

@@ -5,8 +5,8 @@ A spike exploring building a MASP system on Solana, inspired by Zcash's Orchard/
 ## Status (Current)
 
 - **Milestone 0 complete**: off-chain model + client flows + mocks + encryption + sync tests.
-- **Circuits are Stage 0 scaffolds**: production-shaped inputs, minimal/no-op constraints. The focus is validating the toolchain loop (compile → witness → prove → verify) before implementing each security statement.
-- **Proofs in client flows are still mocked** by default. We’re now starting to plug in real UltraPlonk proving/verifying.
+- **Circuits are production-shaped** with most security statements implemented. See [`docs/implementation-status.md`](docs/implementation-status.md) for a detailed tracking table.
+- **Proofs use MockSpendProver** by default (real checks in Rust). UltraPlonk mode is available via `MASP_PROOF_SYSTEM=ultraplonk`.
 
 ## Overview
 

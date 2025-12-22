@@ -7,36 +7,7 @@
 //
 // Security requirements: see `docs/circuit-security-requirements.md`.
 
-use dep::masp_common::prove_asset_id_binding;
-
-// -----------------------------------------------------------------------------
-// Statement check functions (Stage-0 placeholders)
-// -----------------------------------------------------------------------------
-
-/// Statement: "I know the note plaintext that hashes to the new commitment."
-///
-/// Intended statement (Stage-1+):
-/// `new_commitment == Poseidon(DOM_NOTE_COMMIT, asset_id, amount, recipient, nullifier_nonce, note_randomness)`.
-fn prove_new_commitment_is_note_preimage_hash(
-    new_commitment: Field,
-    asset_id: Field,
-    amount: u64,
-    recipient: Field,
-    diversifier_index: u64,
-    nullifier_nonce: Field,
-    note_randomness: Field,
-) {
-    assert(new_commitment == new_commitment);
-    let _ = asset_id
-        + (amount as Field)
-        + recipient
-        + (diversifier_index as Field)
-        + nullifier_nonce
-        + note_randomness;
-}
-
-/// 1.2 Amount range check: enforced by Noir's u64 type system (public_amount: pub u64).
-/// 1.3 Asset binding: implemented in `masp_common` (placeholder).
+use dep::masp_common::{prove_asset_id_binding, prove_note_preimage_hashes_to_commitment};
 
 // -----------------------------------------------------------------------------
 // Internal structs (for readability inside `main`)
@@ -84,7 +55,7 @@ fn main(
     prove_asset_id_binding(public.asset_id);
     //
     // - "I know the note plaintext that hashes to the new commitment"
-    prove_new_commitment_is_note_preimage_hash(
+    prove_note_preimage_hashes_to_commitment(
         public.new_commitment,
         public.asset_id,
         public.amount,

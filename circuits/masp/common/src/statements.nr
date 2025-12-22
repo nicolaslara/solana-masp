@@ -1,11 +1,73 @@
-// Shared MASP statement checks (Stage-0 scaffolding)
+// Shared MASP statement checks
 //
 // This module exists to avoid copy/paste across circuits.
 // Each circuit entrypoint should call these in a clear audit order.
 //
 // Security requirements: see `docs/circuit-security-requirements.md`.
 
+use std::embedded_curve_ops::{EmbeddedCurveScalar, fixed_base_scalar_mul, multi_scalar_mul};
 use std::hash::poseidon2::Poseidon2;
+
+// ============================================================================
+// Domain tags (must match `client/src/domain.rs::DomainTag`)
+// ============================================================================
+
+pub global DOM_NOTE_COMMITMENT: Field = 1;
+pub global DOM_NULLIFIER: Field = 2;
+pub global DOM_ASSET_ID: Field = 3;
+pub global DOM_TX_BINDING: Field = 5;
+pub global DOM_NULLIFIER_NONCE: Field = 6;
+pub global DOM_MERKLE_NODE: Field = 7;
+pub global DOM_IVK: Field = 8;
+pub global DOM_AUTH_SECRET: Field = 9; // ask = H(DOM_AUTH_SECRET, spending_key)
+pub global DOM_NULLIFIER_SECRET: Field = 10; // nsk = H(DOM_NULLIFIER_SECRET, spending_key)
+
+// ============================================================================
+// Core hash helpers
+// ============================================================================
+
+/// Compute note commitment (must match Rust `Note::commitment()` once migrated to Poseidon2).
+///
+/// Layout:
+/// `cm = H(DOM_NOTE_COMMITMENT, asset_id, amount, recipient, diversifier_index, nullifier_nonce, note_randomness)`
+pub fn compute_note_commitment(
+    note_asset_id: Field,
+    note_amount: u64,
+    note_recipient: Field,
+    note_diversifier_index: u64,
+    note_nullifier_nonce: Field,
+    note_randomness: Field,
+) -> Field {
+    Poseidon2::hash(
+        [
+            DOM_NOTE_COMMITMENT,
+            note_asset_id,
+            note_amount as Field,
+            note_recipient,
+            note_diversifier_index as Field,
+            note_nullifier_nonce,
+            note_randomness,
+        ],
+        7,
+    )
+}
+
+/// Compute nullifier (must match Rust `compute_nullifier()`).
+///
+/// **CRITICAL SECURITY PROPERTY:**
+/// The nullifier MUST use `nsk` (the nullifier SECRET), NOT `nk.x` (the public key).
+/// This ensures that only SpendingKey holders can compute nullifiers.
+/// If we used `nk.x` (which is in the FullViewingKey), watch-only wallets could spend!
+///
+/// Layout:
+/// `nf = H(DOM_NULLIFIER, nsk, nullifier_nonce)`
+///
+/// Where:
+/// - `nsk = H(DOM_NULLIFIER_SECRET, spending_key)` - the SECRET derived from spending_key
+/// - `nullifier_nonce` - unique per note, committed in the note
+pub fn compute_nullifier(nsk: Field, note_nullifier_nonce: Field) -> Field {
+    Poseidon2::hash([DOM_NULLIFIER, nsk, note_nullifier_nonce], 3)
+}
 
 /// Statement: "This note is a member of the commitment set for this anchor."
 ///
@@ -22,12 +84,10 @@ pub fn prove_membership_externally_verified(anchor: Field, input_commitment: Fie
     assert(input_commitment == input_commitment);
 }
 
-fn merkle_hash(left: Field, right: Field) -> Field {
+pub fn merkle_hash(left: Field, right: Field) -> Field {
     // Must match Rust `client/src/hash.rs::merkle_hash`:
-    // H(DOM_MERKLE_NODE=7, left, right)
-    //
-    // NOTE: We intentionally use the same domain-tag value as `DomainTag::MerkleNode`.
-    let dom: Field = 7;
+    // H(DOM_MERKLE_NODE, left, right)
+    let dom: Field = DOM_MERKLE_NODE;
 
     // Noir stdlib Poseidon2.
     //
@@ -84,43 +144,85 @@ pub fn prove_note_preimage_hashes_to_commitment(
     note_nullifier_nonce: Field,
     note_randomness: Field,
 ) {
-    assert(input_commitment == input_commitment);
-    let amount_f: Field = note_amount as Field;
-    let div_f: Field = note_diversifier_index as Field;
-    let _ =
-        note_asset_id + amount_f + note_recipient + div_f + note_nullifier_nonce + note_randomness;
+    let expected = compute_note_commitment(
+        note_asset_id,
+        note_amount,
+        note_recipient,
+        note_diversifier_index,
+        note_nullifier_nonce,
+        note_randomness,
+    );
+    assert(input_commitment == expected);
 }
 
 /// Statement: "The nullifier is derived correctly from the owner's key material."
 ///
-/// Intended statement (Stage-1+):
-/// `nullifier == Poseidon(DOM_NULLIFIER, nk, note_nullifier_nonce)`.
+/// **CRITICAL SECURITY PROPERTY:**
+/// Uses `nsk` (the nullifier SECRET), NOT `nk.x` (the public key).
+/// This ensures only SpendingKey holders can compute nullifiers.
 ///
-/// Stage-0: No-op; exists to lock the interface + audit trail.
-pub fn prove_nullifier_derivation(nullifier: Field, nk: Field, note_nullifier_nonce: Field) {
-    let _ = nk + note_nullifier_nonce;
-    assert(nullifier == nullifier);
+/// Layout:
+/// `nullifier == H(DOM_NULLIFIER, nsk, note_nullifier_nonce)`.
+pub fn prove_nullifier_derivation(nullifier: Field, nsk: Field, note_nullifier_nonce: Field) {
+    let expected = compute_nullifier(nsk, note_nullifier_nonce);
+    assert(nullifier == expected);
 }
 
 /// Statement: "I am authorized to spend this note (SpendingKey-only)."
 ///
-/// Intended statement (Stage-1+):
-/// - Prover knows `ask` such that `ak = ask * G`.
-/// - Derive `ivk = H(DOM_IVK, ak.x, nk_x)`.
-/// - Derive `g_d` from `note_diversifier_index`.
-/// - Check that the note recipient corresponds to the diversified address:
-///   `pk_d = ivk * g_d` and `note_recipient == pk_d.x` (or equivalent binding per note format).
+/// This proves the spender knows the SpendingKey that owns the note.
+/// The logic mirrors `client/src/keys.rs`:
 ///
-/// Stage-0: no-op; exists to lock the interface + audit trail.
+/// From `spending_key`:
+/// 1. ask = H(DOM_AUTH_SECRET, spending_key)
+/// 2. nsk = H(DOM_NULLIFIER_SECRET, spending_key)
+/// 3. ak = ask * G (authorization public key)
+/// 4. nk = nsk * G (nullifier public key)
+/// 5. ivk = H(DOM_IVK, ak.x, nk.x) (incoming viewing key)
+/// 6. g_d = H(diversifier_index) * G (diversifier base point)
+/// 7. pk_d = ivk * g_d (diversified payment key)
+/// 8. Assert note_recipient == pk_d.x
+///
+/// Returns `nsk` so the caller can use it for nullifier derivation.
+///
+/// IMPORTANT: This uses Grumpkin (Noir's embedded curve), which matches
+/// the Rust key derivation using `ark-grumpkin`.
 pub fn prove_spend_authorization(
-    ask: Field,
-    nk: Field,
+    spending_key: Field,
     note_recipient: Field,
     note_diversifier_index: u64,
-) {
-    let div_f: Field = note_diversifier_index as Field;
-    let _ = ask + nk + note_recipient + div_f;
-    assert(true);
+) -> Field {
+    // 1. Derive ask and nsk from spending_key
+    let ask = Poseidon2::hash([DOM_AUTH_SECRET, spending_key], 2);
+    let nsk = Poseidon2::hash([DOM_NULLIFIER_SECRET, spending_key], 2);
+
+    // 2. Compute ak = ask * G, nk = nsk * G
+    // Use from_field() to properly decompose 254-bit field elements into limbs
+    let ask_scalar = EmbeddedCurveScalar::from_field(ask);
+    let ak = fixed_base_scalar_mul(ask_scalar);
+
+    let nsk_scalar = EmbeddedCurveScalar::from_field(nsk);
+    let nk = fixed_base_scalar_mul(nsk_scalar);
+
+    // 3. Derive ivk = H(DOM_IVK, ak.x, nk.x)
+    let ivk = Poseidon2::hash([DOM_IVK, ak.x, nk.x], 3);
+
+    // 4. Derive g_d = H(diversifier_index) * G
+    // (simplified hash-to-curve: g_d_scalar = H(diversifier_index), g_d = g_d_scalar * G)
+    let g_d_scalar_field = Poseidon2::hash([note_diversifier_index as Field], 1);
+    let g_d_scalar = EmbeddedCurveScalar::from_field(g_d_scalar_field);
+    let g_d = fixed_base_scalar_mul(g_d_scalar);
+
+    // 5. Compute pk_d = ivk * g_d
+    let ivk_scalar = EmbeddedCurveScalar::from_field(ivk);
+    let pk_d = multi_scalar_mul([g_d], [ivk_scalar]);
+
+    // 6. Assert note_recipient == pk_d.x
+    // This proves the note was addressed to this SpendingKey's diversified address.
+    assert(note_recipient == pk_d.x);
+
+    // Return nsk for nullifier derivation
+    nsk
 }
 
 /// Statement: "This proof is bound to the intended transaction."

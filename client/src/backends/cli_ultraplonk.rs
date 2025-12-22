@@ -364,8 +364,6 @@ impl CliUltraPlonkProver {
         public: &TransferPublicInputs,
         private: &crate::traits::TransferPrivateInputs,
     ) -> Result<String, ProofSystemError> {
-        use crate::note::Note;
-
         let zero = crate::types::Fr::from(0u64);
 
         // Sanity: counts must match the enabled flags in the private witness.
@@ -376,68 +374,24 @@ impl CliUltraPlonkProver {
         }
 
         // Transfer asset id (single-asset semantics today): take from the first enabled input.
-        let mut transfer_asset_id = zero;
+        let mut transfer_asset_id = None;
         for i in 0..crate::tx_binding::MAX_INPUTS {
             if private.inputs[i].enabled {
-                transfer_asset_id = private.inputs[i].note_asset_id;
+                transfer_asset_id = Some(private.inputs[i].note_asset_id);
                 break;
             }
         }
+        let transfer_asset_id = transfer_asset_id.ok_or(ProofSystemError::InvalidPublicInputs)?;
 
-        // Helper to get fixed-size siblings/path arrays for Noir (depth = 16).
-        fn pad_fr_vec(
-            vals: &[crate::types::Fr],
-            len: usize,
-        ) -> Result<Vec<crate::types::Fr>, ProofSystemError> {
-            if vals.len() != len {
-                return Err(ProofSystemError::InvalidPublicInputs);
-            }
-            Ok(vals.to_vec())
-        }
-        fn pad_bool_vec(vals: &[bool], len: usize) -> Result<Vec<bool>, ProofSystemError> {
-            if vals.len() != len {
-                return Err(ProofSystemError::InvalidPublicInputs);
-            }
-            Ok(vals.to_vec())
-        }
+        // Build TOML arrays for public inputs.
+        let nullifiers_toml = fr_vec_to_toml_array(&public.nullifiers);
+        let output_commitments_toml = fr_vec_to_toml_array(&public.output_commitments);
+        let ct_hashes_toml = fr_vec_to_toml_array(&public.ct_hashes);
 
-        // Build per-input TOML fragments.
-        let mut in_enabled = [false; 3];
-        let mut in_commitments = [zero; 3];
-        let mut in_siblings_toml = [String::new(), String::new(), String::new()];
-        let mut in_path_indices_toml = [String::new(), String::new(), String::new()];
-        let mut in_note_asset_id = [zero; 3];
-        let mut in_note_amount = [0u64; 3];
-        let mut in_note_recipient = [zero; 3];
-        let mut in_note_div_idx = [0u64; 3];
-        let mut in_note_nf_nonce = [zero; 3];
-        let mut in_note_rho = [zero; 3];
-        let mut in_nk = [zero; 3];
-        let mut in_ask = [zero; 3];
-
+        // Build TOML table arrays for inputs/outputs (`[[inputs]]` / `[[outputs]]`).
+        let mut inputs_toml = String::new();
         for i in 0..crate::tx_binding::MAX_INPUTS {
             let slot = &private.inputs[i];
-            in_enabled[i] = slot.enabled;
-
-            if !slot.enabled {
-                // Disabled slots: use zero padding (must not affect circuit).
-                in_commitments[i] = zero;
-                in_siblings_toml[i] = fr_vec_to_toml_array(&vec![zero; 16]);
-                in_path_indices_toml[i] = bool_vec_to_toml_array(&vec![false; 16]);
-                continue;
-            }
-
-            // Commitment from note fields (authoritative input commitment).
-            let cm = Note::with_values(
-                slot.note_asset_id,
-                slot.note_amount,
-                slot.note_recipient,
-                slot.note_diversifier_index,
-                slot.note_nullifier_nonce,
-                slot.note_randomness,
-            )
-            .commitment();
-            in_commitments[i] = cm;
 
             // Membership witness must be a Merkle path of depth 16 and bound to the public anchor.
             let (siblings, path_indices, root) = match &slot.membership_witness {
@@ -453,94 +407,139 @@ impl CliUltraPlonkProver {
                     ));
                 }
             };
-            if *root != public.anchor {
+            if slot.enabled && *root != public.anchor {
                 return Err(ProofSystemError::InvalidPublicInputs);
             }
-            let sibs = pad_fr_vec(siblings, 16)?;
-            let idxs = pad_bool_vec(path_indices, 16)?;
-            in_siblings_toml[i] = fr_vec_to_toml_array(&sibs);
-            in_path_indices_toml[i] = bool_vec_to_toml_array(&idxs);
-
-            // Note fields
-            in_note_asset_id[i] = slot.note_asset_id;
-            in_note_amount[i] = slot.note_amount;
-            in_note_recipient[i] = slot.note_recipient;
-            in_note_div_idx[i] = slot.note_diversifier_index;
-            in_note_nf_nonce[i] = slot.note_nullifier_nonce;
-            in_note_rho[i] = slot.note_randomness;
-            in_nk[i] = slot.nk;
-            in_ask[i] = crate::keys::SpendingKey::from_field(slot.spending_key).ask();
-        }
-
-        // Outputs: enabled flags + amount + asset id.
-        let mut out_enabled = [false; 3];
-        let mut out_asset_id = [zero; 3];
-        let mut out_amount = [0u64; 3];
-        for j in 0..crate::tx_binding::MAX_OUTPUTS {
-            let slot = &private.outputs[j];
-            out_enabled[j] = slot.enabled;
-            if slot.enabled {
-                out_asset_id[j] = slot.note.asset_id;
-                out_amount[j] = slot.note.amount;
+            if slot.enabled && (siblings.len() != 16 || path_indices.len() != 16) {
+                return Err(ProofSystemError::InvalidPublicInputs);
             }
-        }
 
-        // Build TOML arrays for public inputs.
-        let nullifiers_toml = fr_vec_to_toml_array(&public.nullifiers.to_vec());
-        let output_commitments_toml = fr_vec_to_toml_array(&public.output_commitments.to_vec());
-
-        // Build TOML table arrays for inputs/outputs (`[[inputs]]` / `[[outputs]]`).
-        // This is the TOML-native way to represent "array of structs" and is accepted by nargo.
-        let mut inputs_toml = String::new();
-        for i in 0..crate::tx_binding::MAX_INPUTS {
             inputs_toml.push_str("[[inputs]]\n");
             inputs_toml.push_str(&format!(
                 "enabled = {}\n",
-                if in_enabled[i] { "true" } else { "false" }
+                if slot.enabled { "true" } else { "false" }
             ));
+
+            // Note fields + secrets (zero-padded when disabled)
+            let note_asset_id = if slot.enabled {
+                slot.note_asset_id
+            } else {
+                zero
+            };
+            let note_amount = if slot.enabled { slot.note_amount } else { 0u64 };
+            let note_recipient = if slot.enabled {
+                slot.note_recipient
+            } else {
+                zero
+            };
+            let note_div_idx = if slot.enabled {
+                slot.note_diversifier_index
+            } else {
+                0u64
+            };
+            let note_nf_nonce = if slot.enabled {
+                slot.note_nullifier_nonce
+            } else {
+                zero
+            };
+            let note_rnd = if slot.enabled {
+                slot.note_randomness
+            } else {
+                zero
+            };
+            let spending_key = if slot.enabled {
+                slot.spending_key
+            } else {
+                zero
+            };
+
+            let sibs = if slot.enabled {
+                siblings.to_vec()
+            } else {
+                vec![zero; 16]
+            };
+            let idxs = if slot.enabled {
+                path_indices.to_vec()
+            } else {
+                vec![false; 16]
+            };
+
             inputs_toml.push_str(&format!(
                 "note_asset_id = \"{}\"\n",
-                fr_to_dec(in_note_asset_id[i])
+                fr_to_dec(note_asset_id)
             ));
-            inputs_toml.push_str(&format!("note_amount = {}\n", in_note_amount[i]));
+            inputs_toml.push_str(&format!("note_amount = {}\n", note_amount));
             inputs_toml.push_str(&format!(
                 "note_recipient = \"{}\"\n",
-                fr_to_dec(in_note_recipient[i])
+                fr_to_dec(note_recipient)
             ));
-            inputs_toml.push_str(&format!(
-                "note_diversifier_index = {}\n",
-                in_note_div_idx[i]
-            ));
+            inputs_toml.push_str(&format!("note_diversifier_index = {}\n", note_div_idx));
             inputs_toml.push_str(&format!(
                 "note_nullifier_nonce = \"{}\"\n",
-                fr_to_dec(in_note_nf_nonce[i])
+                fr_to_dec(note_nf_nonce)
             ));
+            inputs_toml.push_str(&format!("note_randomness = \"{}\"\n", fr_to_dec(note_rnd)));
+            inputs_toml.push_str(&format!("spending_key = \"{}\"\n", fr_to_dec(spending_key)));
+            inputs_toml.push_str(&format!("siblings = {}\n", fr_vec_to_toml_array(&sibs)));
             inputs_toml.push_str(&format!(
-                "note_randomness = \"{}\"\n",
-                fr_to_dec(in_note_rho[i])
+                "path_indices = {}\n\n",
+                bool_vec_to_toml_array(&idxs)
             ));
-            inputs_toml.push_str(&format!("nk = \"{}\"\n", fr_to_dec(in_nk[i])));
-            inputs_toml.push_str(&format!("ask = \"{}\"\n", fr_to_dec(in_ask[i])));
-            inputs_toml.push_str(&format!(
-                "commitment = \"{}\"\n",
-                fr_to_dec(in_commitments[i])
-            ));
-            inputs_toml.push_str(&format!("siblings = {}\n", in_siblings_toml[i]));
-            inputs_toml.push_str(&format!("path_indices = {}\n\n", in_path_indices_toml[i]));
         }
 
         let mut outputs_toml = String::new();
         for j in 0..crate::tx_binding::MAX_OUTPUTS {
+            let slot = &private.outputs[j];
             outputs_toml.push_str("[[outputs]]\n");
             outputs_toml.push_str(&format!(
                 "enabled = {}\n",
-                if out_enabled[j] { "true" } else { "false" }
+                if slot.enabled { "true" } else { "false" }
             ));
-            outputs_toml.push_str(&format!("asset_id = \"{}\"\n", fr_to_dec(out_asset_id[j])));
-            outputs_toml.push_str(&format!("amount = {}\n", out_amount[j]));
+
+            let note_asset_id = if slot.enabled {
+                slot.note.asset_id
+            } else {
+                zero
+            };
+            let note_amount = if slot.enabled { slot.note.amount } else { 0u64 };
+            let note_recipient = if slot.enabled {
+                slot.note.recipient
+            } else {
+                zero
+            };
+            let note_div_idx = if slot.enabled {
+                slot.note.diversifier_index
+            } else {
+                0u64
+            };
+            let note_nf_nonce = if slot.enabled {
+                slot.note.nullifier_nonce
+            } else {
+                zero
+            };
+            let note_rnd = if slot.enabled {
+                slot.note.note_randomness
+            } else {
+                zero
+            };
+
             outputs_toml.push_str(&format!(
-                "commitment = \"{}\"\n\n",
-                fr_to_dec(public.output_commitments[j])
+                "note_asset_id = \"{}\"\n",
+                fr_to_dec(note_asset_id)
+            ));
+            outputs_toml.push_str(&format!("note_amount = {}\n", note_amount));
+            outputs_toml.push_str(&format!(
+                "note_recipient = \"{}\"\n",
+                fr_to_dec(note_recipient)
+            ));
+            outputs_toml.push_str(&format!("note_diversifier_index = {}\n", note_div_idx));
+            outputs_toml.push_str(&format!(
+                "note_nullifier_nonce = \"{}\"\n",
+                fr_to_dec(note_nf_nonce)
+            ));
+            outputs_toml.push_str(&format!(
+                "note_randomness = \"{}\"\n\n",
+                fr_to_dec(note_rnd)
             ));
         }
 
@@ -551,16 +550,17 @@ nullifiers = {nullifiers}
 output_commitments = {output_commitments}
 input_count = {input_count}
 output_count = {output_count}
+ct_hashes = {ct_hashes}
 tx_binding = "{tx_binding}"
 
 transfer_asset_id = "{transfer_asset_id}"
 "#,
-            // table arrays must be appended after the header block
             anchor = fr_to_dec(public.anchor),
             nullifiers = nullifiers_toml,
             output_commitments = output_commitments_toml,
             input_count = public.input_count,
             output_count = public.output_count,
+            ct_hashes = ct_hashes_toml,
             tx_binding = fr_to_dec(public.tx_binding),
             transfer_asset_id = fr_to_dec(transfer_asset_id),
         ) + "\n"
@@ -573,17 +573,6 @@ transfer_asset_id = "{transfer_asset_id}"
         public: &UnshieldPublicInputs,
         private: &crate::traits::UnshieldPrivateInputs,
     ) -> Result<String, ProofSystemError> {
-        // Private-only: spent commitment (not a public input in the privacy-preserving model)
-        let input_commitment = crate::note::Note::with_values(
-            private.note_asset_id,
-            private.note_amount,
-            private.note_recipient,
-            private.note_diversifier_index,
-            private.note_nullifier_nonce,
-            private.note_randomness,
-        )
-        .commitment();
-
         let (siblings, path_indices, root) = match &private.membership_witness {
             crate::proofs::MembershipWitness::MerklePath {
                 siblings,
@@ -608,9 +597,6 @@ transfer_asset_id = "{transfer_asset_id}"
         Ok(format!(
             r#"# Auto-generated by CliUltraPlonkProver
 anchor = "{anchor}"
-input_commitment = "{input_commitment}"
-siblings = {siblings}
-path_indices = {path_indices}
 nullifier = "{nullifier}"
 tx_binding = "{tx_binding}"
 public_amount = "{public_amount}"
@@ -623,11 +609,11 @@ note_recipient = "{note_recipient}"
 note_diversifier_index = "{note_diversifier_index}"
 note_nullifier_nonce = "{note_nullifier_nonce}"
 note_randomness = "{note_randomness}"
-nk = "{nk}"
-ask = "{ask}"
+spending_key = "{spending_key}"
+siblings = {siblings}
+path_indices = {path_indices}
 "#,
             anchor = fr_to_dec(public.anchor),
-            input_commitment = fr_to_dec(input_commitment),
             siblings = siblings_toml,
             path_indices = path_indices_toml,
             nullifier = fr_to_dec(public.nullifier),
@@ -644,9 +630,7 @@ ask = "{ask}"
             note_diversifier_index = private.note_diversifier_index,
             note_nullifier_nonce = fr_to_dec(private.note_nullifier_nonce),
             note_randomness = fr_to_dec(private.note_randomness),
-            nk = fr_to_dec(private.nk),
-            // Derive ask from spending_key for the Noir circuit
-            ask = fr_to_dec(crate::keys::SpendingKey::from_field(private.spending_key).ask()),
+            spending_key = fr_to_dec(private.spending_key),
         ))
     }
 
@@ -660,6 +644,7 @@ ask = "{ask}"
 new_commitment = "{new_commitment}"
 public_asset_id = "{public_asset_id}"
 public_amount = "{public_amount}"
+ct_hash = "{ct_hash}"
 
 recipient = "{recipient}"
 diversifier_index = "{diversifier_index}"
@@ -669,6 +654,7 @@ note_randomness = "{note_randomness}"
             new_commitment = fr_to_dec(public.new_commitment),
             public_asset_id = fr_to_dec(public.public_asset_id),
             public_amount = public.public_amount,
+            ct_hash = fr_to_dec(public.ct_hash),
             recipient = fr_to_dec(private.note_recipient),
             diversifier_index = private.note_diversifier_index,
             nullifier_nonce = fr_to_dec(private.note_nullifier_nonce),

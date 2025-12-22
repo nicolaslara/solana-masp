@@ -7,7 +7,7 @@ description = "MASP client library - note primitives, key derivation, and transa
 [dependencies]
 # Arkworks for BN254 field and curve operations
 ark-bn254 = "0.5.0"
-ark-ed-on-bn254 = "0.5.0"                                    # Baby JubJub (embedded curve for BN254)
+ark-grumpkin = "0.5.0"                                       # Grumpkin (embedded curve for BN254, matches Noir's std::embedded_curve_ops)
 ark-ff = "0.5.0"
 ark-ec = "0.5.0"
 ark-serialize = { version = "0.5.0", features = ["derive"] }
@@ -54,4 +54,5 @@ default = []
 ultraplonk-verifier = ["dep:ultraplonk-core"]
 
 [dev-dependencies]
+ark-grumpkin = "0.5.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

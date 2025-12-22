@@ -223,9 +223,10 @@ where
         // Get membership witness
         let witness = self.indexer.get_witness(commitment).await?;
 
-        // Compute nullifier
-        let nk = self.fvk.nk_field();
-        let nullifier = compute_nullifier(nk, owned.note.nullifier_nonce);
+        // Compute nullifier using nsk (secret), NOT nk.x (public)
+        // This ensures only SpendingKey holders can compute nullifiers.
+        let nsk = self.spending_key.nsk();
+        let nullifier = compute_nullifier(nsk, owned.note.nullifier_nonce);
 
         Ok((owned, witness, nullifier))
     }
@@ -523,11 +524,9 @@ where
         }
 
         // 4. Build proof with real ct_hashes
-        let (public, private) = transfer_data.spend_proof_inputs(
-            self.spending_key.as_field(),
-            self.fvk.nk_field(),
-            ct_hashes,
-        );
+        // Pass spending_key; circuit derives ask/nsk from it
+        let (public, private) =
+            transfer_data.spend_proof_inputs(self.spending_key.as_field(), ct_hashes);
         let spend_proof = self.prover.prove(
             &crate::traits::ProofPublicInputs::Transfer(public),
             &private,
@@ -606,6 +605,7 @@ where
         };
         let private =
             crate::traits::ProofPrivateInputs::Unshield(crate::traits::UnshieldPrivateInputs {
+                // Pass spending_key; circuit derives ask/nsk from it
                 spending_key: self.spending_key.as_field(),
                 note_asset_id: owned.note.asset_id,
                 note_amount: owned.note.amount,
@@ -613,7 +613,6 @@ where
                 note_diversifier_index: owned.note.diversifier_index,
                 note_nullifier_nonce: owned.note.nullifier_nonce,
                 note_randomness: owned.note.note_randomness,
-                nk: self.fvk.nk_field(),
                 membership_witness: witness.clone(),
             });
         let spend_proof = self
@@ -716,7 +715,9 @@ where
         if !found_notes.is_empty() {
             let nullifiers: Vec<Nullifier> = found_notes
                 .iter()
-                .map(|(note, _, _)| compute_nullifier(self.fvk.nk_field(), note.nullifier_nonce))
+                .map(|(note, _, _)| {
+                    compute_nullifier(self.spending_key.nsk(), note.nullifier_nonce)
+                })
                 .collect();
 
             let spent_flags = self.chain.batch_check_nullifiers(&nullifiers).await?;
@@ -767,7 +768,9 @@ where
         if !found_notes.is_empty() {
             let nullifiers: Vec<_> = found_notes
                 .iter()
-                .map(|(note, _, _)| compute_nullifier(self.fvk.nk_field(), note.nullifier_nonce))
+                .map(|(note, _, _)| {
+                    compute_nullifier(self.spending_key.nsk(), note.nullifier_nonce)
+                })
                 .collect();
 
             let spent_flags = self.chain.batch_check_nullifiers(&nullifiers).await?;
@@ -870,7 +873,8 @@ where
                 // Check if already owned
                 if self.find_note(commitment).is_none() {
                     // Check if spent
-                    let nullifier = compute_nullifier(self.fvk.nk_field(), note.nullifier_nonce);
+                    let nullifier =
+                        compute_nullifier(self.spending_key.nsk(), note.nullifier_nonce);
                     let is_spent = self.chain.is_nullifier_spent(&nullifier).await?;
 
                     if !is_spent {
@@ -892,7 +896,7 @@ where
         let nullifiers: Vec<_> = self
             .notes
             .iter()
-            .map(|owned| compute_nullifier(self.fvk.nk_field(), owned.note.nullifier_nonce))
+            .map(|owned| compute_nullifier(self.spending_key.nsk(), owned.note.nullifier_nonce))
             .collect();
 
         let spent_flags = self.chain.batch_check_nullifiers(&nullifiers).await?;
@@ -941,13 +945,11 @@ impl TransferData {
     /// Build transfer proof inputs for this transfer (reference implementation).
     ///
     /// # Arguments
-    /// * `spending_key` - The spending key for authorization
-    /// * `nk` - The nullifier key
+    /// * `spending_key` - The root spending key (circuit derives ask/nsk from it)
     /// * `ct_hashes` - Ciphertext hashes for output binding (computed from encrypted outputs)
     pub fn spend_proof_inputs(
         &self,
         spending_key: Fr,
-        nk: Fr,
         ct_hashes: [crate::types::CiphertextHash; crate::traits::MAX_OUTPUTS],
     ) -> (
         crate::traits::TransferPublicInputs,
@@ -1004,7 +1006,6 @@ impl TransferData {
                     note_diversifier_index: note.diversifier_index,
                     note_nullifier_nonce: note.nullifier_nonce,
                     note_randomness: note.note_randomness,
-                    nk,
                     spending_key,
                     membership_witness: self.membership_witness.clone(),
                 },

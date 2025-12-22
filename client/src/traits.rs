@@ -262,10 +262,14 @@ pub struct InputSlot {
     pub note_nullifier_nonce: Fr,
     pub note_randomness: Fr,
 
-    /// Nullifier key for this input
-    pub nk: Fr,
-
-    /// Spending key as field element
+    /// Spending key (root secret).
+    ///
+    /// The circuit derives from this:
+    /// - `ask = H(DOM_AUTH_SECRET, spending_key)` for spend authorization
+    /// - `nsk = H(DOM_NULLIFIER_SECRET, spending_key)` for nullifier derivation
+    ///
+    /// **SECURITY:** This is the root secret. Only SpendingKey holders have this.
+    /// FullViewingKey holders do NOT know this value.
     pub spending_key: Fr,
 
     /// Membership witness for this input
@@ -282,7 +286,6 @@ impl Default for InputSlot {
             note_diversifier_index: 0,
             note_nullifier_nonce: Fr::from(0u64),
             note_randomness: Fr::from(0u64),
-            nk: Fr::from(0u64),
             spending_key: Fr::from(0u64),
             membership_witness: MembershipWitness::merkle_path(vec![], vec![], Fr::from(0u64)),
         }
@@ -429,7 +432,11 @@ pub struct ShieldPrivateInputs {
 /// Private inputs for an unshield proof (single input spend).
 #[derive(Debug, Clone)]
 pub struct UnshieldPrivateInputs {
-    /// Spending key (root secret) as a field element.
+    /// Spending key (root secret).
+    ///
+    /// The circuit derives from this:
+    /// - `ask = H(DOM_AUTH_SECRET, spending_key)` for spend authorization
+    /// - `nsk = H(DOM_NULLIFIER_SECRET, spending_key)` for nullifier derivation
     pub spending_key: Fr,
 
     /// Note fields
@@ -439,9 +446,6 @@ pub struct UnshieldPrivateInputs {
     pub note_diversifier_index: u64,
     pub note_nullifier_nonce: Fr,
     pub note_randomness: Fr,
-
-    /// Nullifier key (`nk.x` as a field element).
-    pub nk: Fr,
 
     /// Membership witness for the spent note.
     pub membership_witness: MembershipWitness,

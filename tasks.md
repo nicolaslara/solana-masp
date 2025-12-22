@@ -285,6 +285,46 @@ This section defines the **required implementation ordering** for the next miles
 - [ ] Decide how we represent “indexing latency” in tests (ties to 0.13.1):
   - client calls `wait_for_indexer_update()` between submit and scan
 
+#### Byte Budget + Calldata Optimization (Post-Circuits)
+
+**Goal:** keep transactions comfortably under Solana’s packet limits while preserving production-grade privacy.
+
+**Current inefficiencies (fixable):**
+
+- We currently include **redundant ciphertext bytes in Tx B** even though Option 1A intends Tx A to carry ciphertexts.
+- We currently duplicate **`ephemeral_key`**:
+  - inside `EncryptedNote::to_bytes()` (ciphertext bytes already include `epk`)
+  - and again as `TransferOutput.ephemeral_key` / `ShieldRequest.ephemeral_key`
+- We currently carry fixed-size `[TransferOutput; MAX_OUTPUTS]` with Option-wrapped fields, which adds per-slot overhead even for disabled outputs.
+
+**Plan (after circuits are stable):**
+
+- [ ] Write a **tight byte budget** for `shield` and `transfer` instruction data:
+  - include Option/Vec length prefixes and per-slot overhead
+  - cover the common 1→2 case (payment + change)
+  - cover worst-case MAX_OUTPUTS (3) and explain why/when it matters
+- [ ] Make Option 1A real in the “production-shaped” path:
+  - Tx A posts `ciphertext_blob` (the canonical bytes)
+  - Tx B carries only commitments + `ct_hashes` + proof (no ciphertext bytes)
+- [ ] Remove `ephemeral_key` duplication in calldata:
+  - choose one canonical representation:
+    - **either** `ciphertext_blob` includes `epk` and Tx B does not carry `epk` separately
+    - **or** Tx B carries `epk` separately and `ciphertext` excludes it (not preferred)
+- [ ] Compress Baby JubJub points on the wire:
+  - switch `epk` encoding from uncompressed 64B (x||y) to compressed 32B
+  - define and document strict decoding + curve checks
+- [ ] Replace fixed-size output slots in on-chain calldata with a compact encoding:
+  - encode only enabled outputs (commitment + optional metadata) with explicit `output_count`
+  - keep fixed-size arrays only as an *internal* circuit ABI detail
+- [ ] Evaluate “derived blinding / derived note randomness” vs explicit randomness:
+  - must be safe under malicious sender behavior (marking/griefing model)
+  - must support mnemonic-only recovery (wallet can recompute commitment from recovered fields)
+  - document the decision in `knowledge.md` + `docs/protocol-soundness.md`
+  - **Option (byte-saving):** drop `note_randomness` (32B) from the encrypted note plaintext and instead derive it deterministically:
+    - candidate: `note_randomness = PRF(shared_secret, epk, domain)` where `shared_secret = esk * pk_d` (sender) = `ivk * epk` (recipient)
+    - recipient can recompute from `ivk` + `epk` during scanning; sender can recompute only if they retain `esk` or we enable `C_out`
+    - **Security note:** this does *not* prevent sender “marking”; sender still chooses `esk` and can choose it deterministically (no brute force required)
+
 #### Ciphertext DA + Binding (Outputs-only) — Implementation Plan (Option 1A baseline)
 
 **Goal:** implement the baseline from `docs/design-decisions/ciphertext-da-and-binding.md` and make it real in the client/indexer/program shape:

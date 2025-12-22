@@ -23,7 +23,7 @@ This file captures learnings, design decisions, and discoveries as we develop th
   - Noir circuits include `ct_hashes` as public inputs (Stage-0 scaffolding)
   - Negative tests: wrong ciphertext bytes rejected, missing ciphertext = DA failure
   - Client `shield`/`transfer_to` compute `ct_hash(es)` before proof generation
-- ✅ C_out (Outgoing Ciphertext) for sender audit trail
+- ⚠️ C_out (Outgoing Ciphertext) infrastructure ready (not used in client flows yet)
 - ✅ Outgoing Viewing Key (ovk) derivation
 - ✅ Full shielded sync from chain
 - ✅ Incremental sync
@@ -44,22 +44,24 @@ This file captures learnings, design decisions, and discoveries as we develop th
 
 ### Critical Findings (Protocol Soundness)
 
-#### Spend authorization is not yet enforced (P0)
+#### ✅ Spend authorization + Nullifier security (P0) — RESOLVED
 
-We currently derive nullifiers as:
+**Previous issue:** Nullifiers were derived using `nk.x` (public key), which is in the `FullViewingKey`. This meant watch-only wallets could compute valid nullifiers and construct spends!
 
-`nf = H(DOM_NULLIFIER, nk.x, nullifier_nonce)`
+**Resolution (2024-12-22):**
 
-Where `nk` is a **public key** contained in the `FullViewingKey`. This means a **watch-only wallet** that can decrypt note plaintexts can also compute valid nullifiers and construct spends under the current “mock proof semantics”.
+1. **Nullifier derivation now uses `nsk` (secret), not `nk.x` (public):**
+   - `nsk = H(DOM_NULLIFIER_SECRET, spending_key)` — only SpendingKey holder knows this
+   - `nf = H(DOM_NULLIFIER, nsk, nullifier_nonce)`
 
-This violates the intended Sapling-style separation:
+2. **Circuits derive `ask` and `nsk` from `spending_key` in-circuit:**
+   - Uses Grumpkin EC ops (Noir's embedded curve, compatible with `ark-grumpkin` in Rust)
+   - `ak = ask * G`, `nk = nsk * G` computed in-circuit
+   - `ivk = H(DOM_IVK, ak.x, nk.x)` for recipient binding
 
-- `SpendingKey` can spend (has `ask`, `nsk`)
-- `FullViewingKey` can view but **must not** be able to spend
-
-**Implication:** the protocol is **not sound** (under the intended key separation model) until transfer/unshield proofs include an ownership/authorization statement that requires secret key material derived from the SpendingKey and binds it to the note recipient/address derivation.
-
-This likely requires updating the note format and/or circuit private inputs so the circuit can prove proper address ownership (not just knowledge of note plaintext + public `nk`).
+3. **Key separation is now correctly enforced:**
+   - `SpendingKey` can spend (knows `ask`, `nsk`)
+   - `FullViewingKey` can view (knows `ak`, `nk`, `ivk`) but **cannot** spend (doesn't know `nsk`)
 
 ---
 
@@ -114,7 +116,19 @@ This likely requires updating the note format and/or circuit private inputs so t
 - **Tx B (MASP state transition tx):** includes proof + nullifiers + commitments and binds to the ciphertext bytes via:
 
 ```text
+// Intended (spec-level):
 ct_hash[j] = H(DOM_CIPHERTEXT, ciphertext_bytes[j])
+
+// Current implementation detail (as of now):
+// We compute ct_hash over a "ct_blob" constructed as:
+//   ct_blob = ephemeral_key || encrypted_note_bytes
+// where:
+//   encrypted_note_bytes = diversifier_index || ephemeral_key || nonce || aead_ciphertext
+//
+// This means `ephemeral_key` is currently included twice in the hashed blob.
+// This is not known-broken cryptographically (still collision-resistant hashing),
+// but it is slightly wasteful and should be simplified when we finalize the
+// canonical ciphertext byte format for Option 1A.
 ```
 
 - The proof/circuit MUST bind to `ct_hashes` for enabled outputs (as explicit public inputs or via inclusion in `tx_binding`).
@@ -165,7 +179,7 @@ A note MUST include:
 
 **Decision:** Poseidon with domain separation (via light-poseidon crate)
 
-```
+```text
 cm = Poseidon(DOM_NOTE_COMMIT, asset_id, amount, recipient, nullifier_nonce, note_randomness)
 ```
 
@@ -179,7 +193,7 @@ cm = Poseidon(DOM_NOTE_COMMIT, asset_id, amount, recipient, nullifier_nonce, not
 
 ### Nullifier Derivation
 
-```
+```text
 nf = Poseidon(DOM_NULLIFIER, nk, nullifier_nonce)
 ```
 
@@ -192,7 +206,7 @@ Where:
 
 ### Asset Identifier
 
-```
+```text
 asset_id = Poseidon(DOM_ASSET, token_address)
 ```
 
@@ -248,7 +262,7 @@ enum DomainTag {
 
 **Decision:** Trait-based design separating concerns:
 
-```
+```text
 MaspClient<I: Indexer, C: Chain>
     ├── Keys (SpendingKey, ViewingKey) - local
     ├── Notes (OwnedNote) - local
@@ -342,7 +356,7 @@ Decryption (recipient has ivk):
 | AEAD | ChaCha20-Poly1305 | ChaCha20-Poly1305 ✅ |
 | KDF | Blake2b | Poseidon (ZK-native) |
 | AAD | commitment | ephemeral key |
-| Outgoing Ciphertext | Yes (C_out) | ✅ Implemented |
+| Outgoing Ciphertext | Yes (C_out) | ⚠️ Implemented, not used in flows |
 | Outgoing Viewing Key | Yes (ovk) | ✅ Implemented |
 | Batch Nullifier Checks | Yes | ✅ Implemented |
 
@@ -407,11 +421,15 @@ trait OobChannel {
 
 See `docs/payment-discovery-analysis.md` for full analysis.
 
-### Sender Recovery Problem (C_out) ✅
+### Sender Recovery Problem (C_out) ⚠️ Implemented, Not Used
+
+**Note:** C_out infrastructure is fully implemented (`encrypt_with_outgoing()`, `try_decrypt_outgoing()`)
+but current client flows (`shield()`, `transfer_to()`) only call `encrypt()`, producing C_enc only.
+To enable sender recovery, change flows to use `encrypt_with_outgoing()`.
 
 **Critical insight:** Recipients can always recover, but senders cannot!
 
-```
+```text
 Recipient (Bob): ss = ivk * epk    ← ivk derived from seed ✅
 Sender (Alice):  ss = esk * pk_d   ← esk was RANDOM, not from seed ❌
 ```
@@ -685,7 +703,7 @@ As real implementations are added, tests will automatically use them.
 
   - How our ECIES implementation compares to Zcash
   - What we did better (trait-based, ZK-native KDF)
-  - Gaps (C_out not implemented)
+  - C_out: implemented but not used in client flows (see doc for details)
 
 - **[Payment Discovery Analysis](docs/payment-discovery-analysis.md)** - Scaling sync:
 

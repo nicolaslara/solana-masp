@@ -13,6 +13,7 @@ It defines:
 Related docs:
 
 - `docs/circuit-security-requirements.md` (detailed circuit statement checklist)
+- `docs/implementation-status.md` (**implementation tracking**: what's done in mocks vs. circuits)
 - `docs/protocol.md` (high-level overview; should not contradict this document)
 - `client/tests/user_flows.rs` (wallet flows that the protocol must support)
 
@@ -227,10 +228,20 @@ cm = H(DOM\_NOTE\_COMMIT, asset\_id, amount, recipient, diversifier\_index, null
 The nullifier must be derivable **only** by the spender (SpendingKey holder) for notes addressed to them, and must be bound to the note:
 
 \[
-nf = H(DOM\_NULLIFIER, \text{spend\_auth\_material}, nullifier\_nonce)
+nf = H(DOM\_NULLIFIER, nsk, nullifier\_nonce)
 \]
 
-**Important:** `spend_auth_material` MUST NOT be computable from a watch-only viewing key.
+Where:
+- `nsk = H(DOM_NULLIFIER_SECRET, spending_key)` is the **nullifier secret key** (derived from SpendingKey)
+- `nullifier_nonce` is unique per note, committed in the note plaintext
+
+**CRITICAL SECURITY PROPERTY:** The nullifier MUST use `nsk` (the secret), NOT `nk.x` (the public key coordinate).
+If we used `nk.x` (which is in the FullViewingKey), watch-only wallets could compute nullifiers and spend notes!
+
+The circuit enforces this by:
+1. Deriving `nsk = H(DOM_NULLIFIER_SECRET, spending_key)` in-circuit
+2. Computing `nullifier = H(DOM_NULLIFIER, nsk, nullifier_nonce)`
+3. The `nk = nsk * G` public key is used for `ivk` derivation (recipient binding), but NOT for nullifier derivation
 
 ---
 
@@ -616,7 +627,8 @@ If something is “NOT IMPLEMENTED”, it is a required protocol check that the 
 - **(T3) Input preimage knowledge**:
   - `client/src/proofs.rs`: `mock_check_transfer()` recomputes each enabled input commitment from note fields.
 - **(T4) Nullifier correctness**:
-  - `client/src/proofs.rs`: For each enabled input, checks `compute_nullifier(nk, note_nullifier_nonce) == public.nullifiers[i]`.
+  - `client/src/proofs.rs`: For each enabled input, derives `nsk` from `spending_key`, then checks `compute_nullifier(nsk, note_nullifier_nonce) == public.nullifiers[i]`.
+  - **SECURITY:** Uses `nsk` (secret), NOT `nk.x` (public). This ensures FVK holders can't spend.
   - For disabled inputs, checks `public.nullifiers[i] == 0`.
 - **(T5) Output well-formedness**:
   - `client/src/proofs.rs`: For each enabled output, checks `note.commitment() == public.output_commitments[j]`.

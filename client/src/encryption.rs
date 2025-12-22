@@ -17,7 +17,7 @@
 //! Encryption (sender knows recipient's pk_d and g_d):
 //! 1. Generate ephemeral keypair: esk (random), epk = esk * g_d
 //! 2. ECDH: shared_secret = esk * pk_d
-//! 3. KDF: symmetric_key = Poseidon(DOM_CIPHERTEXT, ss.x, ss.y, 0)
+//! 3. KDF: symmetric_key = Poseidon(DOM_CIPHERTEXT, ss.x, ss.y, epk_x)
 //! 4. Encrypt: ChaCha20-Poly1305(symmetric_key, nonce, plaintext)
 //! 5. Output: (epk, nonce, ciphertext, tag)
 //!
@@ -40,8 +40,8 @@ use crate::keys::{DiversifiedAddress, FullViewingKey};
 use crate::note::{Note, NotePlaintext};
 use crate::types::Fr;
 use ark_ec::CurveGroup;
-use ark_ed_on_bn254::{EdwardsAffine, EdwardsProjective, Fr as JubJubScalar};
 use ark_ff::{BigInteger, PrimeField, UniformRand};
+use ark_grumpkin::{Affine as GrumpkinAffine, Fr as GrumpkinScalar, Projective as GrumpkinProjective};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
@@ -644,7 +644,7 @@ pub fn decrypt_outgoing(
         });
     }
 
-    return Err(EncryptionError::InvalidLength);
+    Err(EncryptionError::InvalidLength)
 }
 
 /// Try to decrypt C_out (for sender scanning)
@@ -695,11 +695,11 @@ impl NoteEncryption for ChaChaPolyEncryption {
 
         // 2. Compute ephemeral public key: epk = esk * g_d
         let epk =
-            (EdwardsProjective::from(recipient_addr.g_d) * to_jubjub_scalar(esk)).into_affine();
+            (GrumpkinProjective::from(recipient_addr.g_d) * to_grumpkin_scalar(esk)).into_affine();
 
         // 3. ECDH: shared_secret = esk * pk_d
         let shared_secret =
-            (EdwardsProjective::from(recipient_addr.pk_d) * to_jubjub_scalar(esk)).into_affine();
+            (GrumpkinProjective::from(recipient_addr.pk_d) * to_grumpkin_scalar(esk)).into_affine();
 
         // 4. Serialize ephemeral public key
         let ephemeral_key = serialize_point(&epk);
@@ -760,7 +760,7 @@ impl NoteEncryption for ChaChaPolyEncryption {
         let epk = deserialize_point(&encrypted.ephemeral_key)?;
 
         // ECDH: shared_secret = ivk * epk
-        let shared_secret = (EdwardsProjective::from(epk) * to_jubjub_scalar(ivk)).into_affine();
+        let shared_secret = (GrumpkinProjective::from(epk) * to_grumpkin_scalar(ivk)).into_affine();
 
         // KDF: derive same symmetric key
         let symmetric_key = derive_symmetric_key(&shared_secret, &encrypted.ephemeral_key);
@@ -831,11 +831,11 @@ impl NoteEncryption for ChaChaPolyEncryption {
 
         // 2. Compute ephemeral public key: epk = esk * g_d
         let epk =
-            (EdwardsProjective::from(recipient_addr.g_d) * to_jubjub_scalar(esk)).into_affine();
+            (GrumpkinProjective::from(recipient_addr.g_d) * to_grumpkin_scalar(esk)).into_affine();
 
         // 3. ECDH: shared_secret = esk * pk_d
         let shared_secret =
-            (EdwardsProjective::from(recipient_addr.pk_d) * to_jubjub_scalar(esk)).into_affine();
+            (GrumpkinProjective::from(recipient_addr.pk_d) * to_grumpkin_scalar(esk)).into_affine();
 
         // 4. Serialize ephemeral public key
         let ephemeral_key = serialize_point(&epk);
@@ -1065,14 +1065,14 @@ impl NoteEncryption for MockEncryption {
 // Helper Functions
 // ============================================================================
 
-/// Convert BN254 Fr to Baby JubJub scalar
-fn to_jubjub_scalar(f: Fr) -> JubJubScalar {
+/// Convert BN254 Fr to Grumpkin scalar
+fn to_grumpkin_scalar(f: Fr) -> GrumpkinScalar {
     let bytes = f.into_bigint().to_bytes_le();
-    JubJubScalar::from_le_bytes_mod_order(&bytes)
+    GrumpkinScalar::from_le_bytes_mod_order(&bytes)
 }
 
-/// Convert Baby JubJub base field element to BN254 Fr
-fn from_jubjub_base(fq: ark_ed_on_bn254::Fq) -> Fr {
+/// Convert Grumpkin base field element (== BN254 Fr) to Fr
+fn from_grumpkin_base(fq: ark_grumpkin::Fq) -> Fr {
     let bytes = fq.into_bigint().to_bytes_le();
     Fr::from_le_bytes_mod_order(&bytes)
 }
@@ -1080,9 +1080,9 @@ fn from_jubjub_base(fq: ark_ed_on_bn254::Fq) -> Fr {
 /// Derive 32-byte symmetric key from shared secret point using Poseidon KDF
 ///
 /// Includes ephemeral public key in derivation to bind key to this encryption.
-fn derive_symmetric_key(shared_secret: &EdwardsAffine, epk_bytes: &[u8; EPK_SIZE]) -> [u8; 32] {
-    let ss_x = from_jubjub_base(shared_secret.x);
-    let ss_y = from_jubjub_base(shared_secret.y);
+fn derive_symmetric_key(shared_secret: &GrumpkinAffine, epk_bytes: &[u8; EPK_SIZE]) -> [u8; 32] {
+    let ss_x = from_grumpkin_base(shared_secret.x);
+    let ss_y = from_grumpkin_base(shared_secret.y);
 
     // Include epk_x in KDF for binding
     let epk_x = field_from_bytes(&epk_bytes[..32].try_into().unwrap());
@@ -1092,8 +1092,8 @@ fn derive_symmetric_key(shared_secret: &EdwardsAffine, epk_bytes: &[u8; EPK_SIZE
     field_to_bytes(&key_field)
 }
 
-/// Serialize Baby JubJub point to bytes (x || y, 32 bytes each)
-fn serialize_point(point: &EdwardsAffine) -> [u8; EPK_SIZE] {
+/// Serialize Grumpkin point to bytes (x || y, 32 bytes each)
+fn serialize_point(point: &GrumpkinAffine) -> [u8; EPK_SIZE] {
     let mut bytes = [0u8; EPK_SIZE];
     let x_bytes = point.x.into_bigint().to_bytes_le();
     let y_bytes = point.y.into_bigint().to_bytes_le();
@@ -1102,15 +1102,15 @@ fn serialize_point(point: &EdwardsAffine) -> [u8; EPK_SIZE] {
     bytes
 }
 
-/// Deserialize Baby JubJub point from bytes
-fn deserialize_point(bytes: &[u8; EPK_SIZE]) -> Result<EdwardsAffine, EncryptionError> {
-    use ark_ed_on_bn254::Fq;
+/// Deserialize Grumpkin point from bytes
+fn deserialize_point(bytes: &[u8; EPK_SIZE]) -> Result<GrumpkinAffine, EncryptionError> {
+    use ark_grumpkin::Fq;
 
     let x = Fq::from_le_bytes_mod_order(&bytes[..32]);
     let y = Fq::from_le_bytes_mod_order(&bytes[32..]);
 
     // Construct the affine point (this doesn't validate it's on the curve)
-    let point = EdwardsAffine::new(x, y);
+    let point = GrumpkinAffine::new(x, y);
 
     // Verify point is on curve
     if !point.is_on_curve() {

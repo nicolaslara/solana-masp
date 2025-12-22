@@ -11,7 +11,7 @@
 //! | `note_randomness`  | Hides note contents in commitment          |
 
 use crate::domain::DomainTag;
-use crate::hash::{field_from_bytes, field_to_bytes, poseidon_hash};
+use crate::hash::{field_from_bytes, field_to_bytes, poseidon2_hash_noir};
 use crate::types::{Commitment, Fr, TokenAddress};
 use ark_ff::UniformRand;
 use rand::Rng;
@@ -103,11 +103,16 @@ impl Note {
     /// This ties the output to the transaction that created it,
     /// ensuring each output has a unique nonce.
     pub fn derive_nullifier_nonce(spent_commitment: Fr, output_index: u64) -> Fr {
-        poseidon_hash(&[
-            DomainTag::NullifierNonce.to_field(),
-            spent_commitment,
-            Fr::from(output_index),
-        ])
+        // Legacy derivation (single-input style). New N→M transfers use
+        // `tx_binding::derive_output_nonce_nm(tx_binding, output_index)`.
+        poseidon2_hash_noir(
+            &[
+                DomainTag::NullifierNonce.to_field(),
+                spent_commitment,
+                Fr::from(output_index),
+            ],
+            3,
+        )
     }
 
     /// Compute the note commitment
@@ -116,15 +121,19 @@ impl Note {
     ///
     /// This is stored in the on-chain Merkle tree.
     pub fn commitment(&self) -> Commitment {
-        poseidon_hash(&[
-            DomainTag::NoteCommitment.to_field(),
-            self.asset_id,
-            Fr::from(self.amount),
-            self.recipient,
-            Fr::from(self.diversifier_index),
-            self.nullifier_nonce,
-            self.note_randomness,
-        ])
+        // Must match Noir circuits (`std::hash::poseidon2::Poseidon2::hash([...], 7)`).
+        poseidon2_hash_noir(
+            &[
+                DomainTag::NoteCommitment.to_field(),
+                self.asset_id,
+                Fr::from(self.amount),
+                self.recipient,
+                Fr::from(self.diversifier_index),
+                self.nullifier_nonce,
+                self.note_randomness,
+            ],
+            7,
+        )
     }
 
     /// Convert to plaintext for encryption/serialization
@@ -157,7 +166,8 @@ impl Note {
 /// `asset_id = H(DOM_ASSET, token_address)`
 pub fn compute_asset_id(token_address: &TokenAddress) -> Fr {
     let addr_field = field_from_bytes(token_address);
-    poseidon_hash(&[DomainTag::AssetId.to_field(), addr_field])
+    // Must match Noir circuits (`Poseidon2::hash([DOM_ASSET_ID, token_address_field], 2)`).
+    poseidon2_hash_noir(&[DomainTag::AssetId.to_field(), addr_field], 2)
 }
 
 #[cfg(test)]

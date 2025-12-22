@@ -33,7 +33,7 @@
 use crate::types::{Anchor, Commitment, Fr};
 
 use crate::domain::DomainTag;
-use crate::hash::{field_to_bytes, poseidon_hash};
+use crate::hash::{field_to_bytes, poseidon2_hash_noir};
 
 // ============================================================================
 // Membership Witness (backend-specific)
@@ -198,13 +198,16 @@ fn mock_public_inputs_hash(public_inputs: &ProofPublicInputs) -> Fr {
     // `MockSpendProver` when it is used.
     let dom = DomainTag::TransactionBinding.to_field();
     match public_inputs {
-        ProofPublicInputs::Shield(pi) => poseidon_hash(&[
-            dom,
-            Fr::from(1u64), // discriminator: shield
-            pi.new_commitment,
-            pi.public_asset_id,
-            Fr::from(pi.public_amount),
-        ]),
+        ProofPublicInputs::Shield(pi) => {
+            let inputs = [
+                dom,
+                Fr::from(1u64), // discriminator: shield
+                pi.new_commitment,
+                pi.public_asset_id,
+                Fr::from(pi.public_amount),
+            ];
+            poseidon2_hash_noir(&inputs, 5)
+        }
         ProofPublicInputs::Transfer(pi) => {
             // Bind to the canonical public input layout:
             // anchor, padded nullifiers, padded output commitments, counts, tx_binding.
@@ -219,21 +222,24 @@ fn mock_public_inputs_hash(public_inputs: &ProofPublicInputs) -> Fr {
             inputs.extend_from_slice(&pi.nullifiers);
             inputs.extend_from_slice(&pi.output_commitments);
             inputs.push(pi.tx_binding);
-            poseidon_hash(&inputs)
+            poseidon2_hash_noir(&inputs, inputs.len() as u32)
         }
-        ProofPublicInputs::Unshield(pi) => poseidon_hash(&[
-            dom,
-            Fr::from(3u64), // discriminator: unshield
-            pi.anchor,
-            pi.nullifier,
-            pi.tx_binding,
-            Fr::from(pi.public_amount),
-            Fr::from(pi.public_recipient_limbs[0]),
-            Fr::from(pi.public_recipient_limbs[1]),
-            Fr::from(pi.public_recipient_limbs[2]),
-            Fr::from(pi.public_recipient_limbs[3]),
-            pi.public_asset_id,
-        ]),
+        ProofPublicInputs::Unshield(pi) => {
+            let inputs = [
+                dom,
+                Fr::from(3u64), // discriminator: unshield
+                pi.anchor,
+                pi.nullifier,
+                pi.tx_binding,
+                Fr::from(pi.public_amount),
+                Fr::from(pi.public_recipient_limbs[0]),
+                Fr::from(pi.public_recipient_limbs[1]),
+                Fr::from(pi.public_recipient_limbs[2]),
+                Fr::from(pi.public_recipient_limbs[3]),
+                pi.public_asset_id,
+            ];
+            poseidon2_hash_noir(&inputs, 11)
+        }
     }
 }
 
@@ -249,30 +255,64 @@ pub fn mock_proof_for_public_inputs(public_inputs: &ProofPublicInputs) -> ProofB
 ///
 /// Enforces: the prover knows the **SpendingKey** corresponding to the spent note's recipient.
 ///
-/// This prevents a watch-only FullViewingKey from spending, even if it can decrypt notes and
-/// compute nullifiers.
-///
-/// Checks:
-/// 1. `fvk(spending_key).nk_field() == private.nk`
-/// 2. `fvk(spending_key).diversified_address(note_diversifier_index).to_field() == private.note_recipient`
+/// This mirrors the circuit logic in `prove_spend_authorization`:
+/// 1. Derive ask = H(DOM_AUTH_SECRET, spending_key)
+/// 2. Derive nsk = H(DOM_NULLIFIER_SECRET, spending_key)
+/// 3. Compute ak = ask * G, nk = nsk * G
+/// 4. Derive ivk = H(DOM_IVK, ak.x, nk.x)
+/// 5. Derive g_d = H(diversifier_index) * G
+/// 6. Compute pk_d = ivk * g_d
+/// 7. Assert note_recipient == pk_d.x
 fn mock_check_spend_authorization(
     spending_key: Fr,
-    nk: Fr,
     note_recipient: Fr,
     note_diversifier_index: u64,
 ) -> Result<(), ProofSystemError> {
-    let sk = crate::keys::SpendingKey::from_field(spending_key);
-    // Derive fvk from sk
-    let fvk = sk.to_full_viewing_key();
+    use crate::domain::DomainTag;
+    use crate::hash::poseidon2_hash_noir;
+    use ark_ec::{CurveGroup, PrimeGroup};
+    use ark_ff::{BigInteger, PrimeField};
+    use ark_grumpkin::{Fr as GrumpkinScalar, Projective as GrumpkinProjective};
 
-    // Bind the provided nk to the spending key material.
-    if fvk.nk_field() != nk {
-        return Err(ProofSystemError::VerificationFailed);
+    // Helper: convert BN254 Fr to Grumpkin scalar
+    fn to_grumpkin_scalar(f: Fr) -> GrumpkinScalar {
+        let bytes = f.into_bigint().to_bytes_le();
+        GrumpkinScalar::from_le_bytes_mod_order(&bytes)
     }
 
-    // Bind the note recipient (part of the commitment preimage) to this spending key.
-    let expected_recipient = fvk.diversified_address(note_diversifier_index).to_field();
-    if expected_recipient != note_recipient {
+    // Helper: convert Grumpkin base field to BN254 Fr
+    fn from_grumpkin_base(fq: ark_grumpkin::Fq) -> Fr {
+        let bytes = fq.into_bigint().to_bytes_le();
+        Fr::from_le_bytes_mod_order(&bytes)
+    }
+
+    // 1. Derive ask and nsk from spending_key (using Poseidon2 to match Noir)
+    let ask = poseidon2_hash_noir(
+        &[DomainTag::AuthorizationSecret.to_field(), spending_key],
+        2,
+    );
+    let nsk = poseidon2_hash_noir(&[DomainTag::NullifierSecret.to_field(), spending_key], 2);
+
+    // 2. Compute ak = ask * G, nk = nsk * G
+    let generator = GrumpkinProjective::generator();
+    let ak = (generator * to_grumpkin_scalar(ask)).into_affine();
+    let nk = (generator * to_grumpkin_scalar(nsk)).into_affine();
+
+    // 3. Derive ivk = H(DOM_IVK, ak.x, nk.x) (using Poseidon2 to match Noir)
+    let ak_x = from_grumpkin_base(ak.x);
+    let nk_x = from_grumpkin_base(nk.x);
+    let ivk = poseidon2_hash_noir(&[DomainTag::IncomingViewingKey.to_field(), ak_x, nk_x], 3);
+
+    // 4. Derive g_d = H(diversifier_index) * G (using Poseidon2 to match Noir)
+    let g_d_scalar_field = poseidon2_hash_noir(&[Fr::from(note_diversifier_index)], 1);
+    let g_d = (generator * to_grumpkin_scalar(g_d_scalar_field)).into_affine();
+
+    // 5. Compute pk_d = ivk * g_d
+    let pk_d = (GrumpkinProjective::from(g_d) * to_grumpkin_scalar(ivk)).into_affine();
+
+    // 6. Assert note_recipient == pk_d.x
+    let expected_recipient = from_grumpkin_base(pk_d.x);
+    if note_recipient != expected_recipient {
         return Err(ProofSystemError::VerificationFailed);
     }
 
@@ -360,16 +400,19 @@ fn mock_check_transfer(
 
         // (T2) Spend authorization / ownership.
         // Statement: "I am authorized to spend this note (SpendingKey-only)."
+        // Derives ask and nsk from spending_key internally.
         mock_check_spend_authorization(
             slot.spending_key,
-            slot.nk,
             slot.note_recipient,
             slot.note_diversifier_index,
         )?;
 
         // (T4) Nullifier correctness.
         // Statement: "The revealed nullifier is correctly derived from the owner's key material and this note."
-        let expected_nf = compute_nullifier(slot.nk, slot.note_nullifier_nonce);
+        // **SECURITY:** Uses nsk (secret), NOT nk.x (public). This ensures FVK holders can't spend.
+        let sk = crate::keys::SpendingKey::from_field(slot.spending_key);
+        let nsk = sk.nsk();
+        let expected_nf = compute_nullifier(nsk, slot.note_nullifier_nonce);
         if expected_nf != public.nullifiers[i] {
             return Err(ProofSystemError::VerificationFailed);
         }
@@ -507,15 +550,18 @@ fn mock_check_unshield(
     // (already established by deriving `input_commitment` from the private note fields above)
 
     // (2.5) "I am authorized to spend this note" (SpendingKey-only ownership).
+    // Derives ask and nsk from spending_key internally.
     mock_check_spend_authorization(
         private.spending_key,
-        private.nk,
         private.note_recipient,
         private.note_diversifier_index,
     )?;
 
     // (3) "The nullifier is derived correctly from the owner's key material"
-    if compute_nullifier(private.nk, private.note_nullifier_nonce) != public.nullifier {
+    // **SECURITY:** Uses nsk (secret), NOT nk.x (public). This ensures FVK holders can't spend.
+    let sk = crate::keys::SpendingKey::from_field(private.spending_key);
+    let nsk = sk.nsk();
+    if compute_nullifier(nsk, private.note_nullifier_nonce) != public.nullifier {
         return Err(ProofSystemError::VerificationFailed);
     }
 
@@ -667,8 +713,9 @@ mod tests {
             Fr::from(4u64),
         );
         let cm = note.commitment();
-        let nk = fvk.nk_field();
-        let nf = crate::nullifier::compute_nullifier(nk, note.nullifier_nonce);
+        // Use nsk (secret) for nullifier, NOT nk.x (public)
+        let nsk = sk.nsk();
+        let nf = crate::nullifier::compute_nullifier(nsk, note.nullifier_nonce);
 
         let nullifiers = [nf, Fr::from(0u64), Fr::from(0u64)];
         let tx_binding = crate::tx_binding::tx_binding_transfer(cm, &nullifiers, 1, 1);
@@ -707,7 +754,6 @@ mod tests {
                     note_diversifier_index: note.diversifier_index,
                     note_nullifier_nonce: note.nullifier_nonce,
                     note_randomness: note.note_randomness,
-                    nk,
                     spending_key: sk.as_field(),
                     membership_witness: MembershipWitness::merkle_path(vec![], vec![], cm),
                 },
@@ -768,8 +814,9 @@ mod tests {
             Fr::from(4u64),
         );
         let in_cm = in_note.commitment();
-        let nk = fvk.nk_field();
-        let nf = crate::nullifier::compute_nullifier(nk, in_note.nullifier_nonce);
+        // Use nsk (secret) for nullifier, NOT nk.x (public)
+        let nsk = sk.nsk();
+        let nf = crate::nullifier::compute_nullifier(nsk, in_note.nullifier_nonce);
 
         let nullifiers = [nf, Fr::from(0u64), Fr::from(0u64)];
         let tx_binding = crate::tx_binding::tx_binding_transfer(in_cm, &nullifiers, 1, 1);
@@ -807,7 +854,6 @@ mod tests {
                     note_diversifier_index: in_note.diversifier_index,
                     note_nullifier_nonce: in_note.nullifier_nonce,
                     note_randomness: in_note.note_randomness,
-                    nk,
                     spending_key: sk.as_field(),
                     membership_witness: MembershipWitness::merkle_path(vec![], vec![], in_cm),
                 },
@@ -850,8 +896,9 @@ mod tests {
             Fr::from(12u64),
         );
         let cm = note.commitment();
-        let nk = fvk.nk_field();
-        let nf = crate::nullifier::compute_nullifier(nk, note.nullifier_nonce);
+        // Use nsk (secret) for nullifier, NOT nk.x (public)
+        let nsk = sk.nsk();
+        let nf = crate::nullifier::compute_nullifier(nsk, note.nullifier_nonce);
 
         let public = crate::traits::UnshieldPublicInputs {
             anchor: cm,
@@ -876,7 +923,6 @@ mod tests {
             note_diversifier_index: note.diversifier_index,
             note_nullifier_nonce: note.nullifier_nonce,
             note_randomness: note.note_randomness,
-            nk,
             membership_witness: MembershipWitness::merkle_path(vec![], vec![], cm),
         };
 

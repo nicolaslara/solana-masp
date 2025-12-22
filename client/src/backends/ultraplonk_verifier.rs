@@ -115,11 +115,13 @@ impl NoirRsUltraPlonkVerifier {
     ) -> Result<bool, ProofSystemError> {
         let vk_onchain = self.get_vk_onchain(&self.vk_bb_path("shield"))?;
 
-        // Order must match shield circuit: new_commitment, public_asset_id, public_amount
+        // Order must match shield circuit public input layout:
+        // new_commitment, public_asset_id, public_amount, ct_hash
         let pis: Vec<[u8; 32]> = vec![
             fr_to_be32(public_inputs.new_commitment),
             fr_to_be32(public_inputs.public_asset_id),
             fr_to_be32(crate::types::Fr::from(public_inputs.public_amount)),
+            fr_to_be32(public_inputs.ct_hash),
         ];
 
         ultraplonk_core::verifier::verify_bytes(&vk_onchain, proof.as_bytes(), &pis)
@@ -143,6 +145,7 @@ impl NoirRsUltraPlonkVerifier {
         // output_commitment_0..2,
         // input_count,
         // output_count,
+        // ct_hashes_0..2,
         // tx_binding
         let pis: Vec<[u8; 32]> = vec![
             fr_to_be32(public_inputs.anchor),
@@ -154,6 +157,9 @@ impl NoirRsUltraPlonkVerifier {
             fr_to_be32(out2),
             fr_to_be32(crate::types::Fr::from(public_inputs.input_count as u64)),
             fr_to_be32(crate::types::Fr::from(public_inputs.output_count as u64)),
+            fr_to_be32(public_inputs.ct_hashes[0]),
+            fr_to_be32(public_inputs.ct_hashes[1]),
+            fr_to_be32(public_inputs.ct_hashes[2]),
             fr_to_be32(public_inputs.tx_binding),
         ];
 

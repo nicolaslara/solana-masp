@@ -45,7 +45,7 @@ use crate::proofs::MockProofVerifier;
 use crate::traits::{
     Chain, ChainError, Indexer, IndexerError, InsertCommitmentResult, NoteCommitmentStore,
     NullifierError, NullifierSet, OutputCiphertext, OutputCiphertextData, ProofBytes,
-    ProofPublicInputs, ProofVerifier, ShieldPublicInputs, ShieldRequest, ShieldResult, StoreError,
+    ProofPublicInputs, ProofVerifier, ShieldRequest, ShieldResult, StoreError,
     TransferPublicInputs, TransferRequest, TransferResult, UnshieldPublicInputs, UnshieldRequest,
     UnshieldResult,
 };
@@ -788,6 +788,7 @@ impl Chain for MockChain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::ShieldPublicInputs;
     use crate::traits::ShieldRequest;
     use crate::traits::SpendProver;
 
@@ -907,9 +908,9 @@ mod tests {
         // Get witness
         let witness = acc.get_witness(cm1).await.unwrap();
 
-        // Transfer
-        let nk = fvk.nk_field();
-        let nf = crate::nullifier::compute_nullifier(nk, note_in.nullifier_nonce);
+        // Transfer - use nsk (secret) for nullifier, NOT nk.x (public)
+        let nsk = sk.nsk();
+        let nf = crate::nullifier::compute_nullifier(nsk, note_in.nullifier_nonce);
         let anchor = chain.get_current_anchor().await.unwrap();
         let nullifiers = [nf, Fr::from(0u64), Fr::from(0u64)];
         let tx_binding = crate::tx_binding::tx_binding_transfer(anchor, &nullifiers, 1, 1);
@@ -952,7 +953,6 @@ mod tests {
                     note_diversifier_index: note_in.diversifier_index,
                     note_nullifier_nonce: note_in.nullifier_nonce,
                     note_randomness: note_in.note_randomness,
-                    nk,
                     spending_key: sk.as_field(),
                     membership_witness: witness.clone(),
                 },
@@ -1042,8 +1042,9 @@ mod tests {
             .unwrap();
 
         let witness = acc.get_witness(cm).await.unwrap();
-        let nk = fvk.nk_field();
-        let nf = crate::nullifier::compute_nullifier(nk, note_in.nullifier_nonce);
+        // Use nsk (secret) for nullifier, NOT nk.x (public)
+        let nsk = sk.nsk();
+        let nf = crate::nullifier::compute_nullifier(nsk, note_in.nullifier_nonce);
         let anchor = chain.get_current_anchor().await.unwrap();
 
         use crate::proofs::MockSpendProver;
@@ -1084,7 +1085,6 @@ mod tests {
                         note_diversifier_index: note_in.diversifier_index,
                         note_nullifier_nonce: note_in.nullifier_nonce,
                         note_randomness: note_in.note_randomness,
-                        nk,
                         spending_key: sk.as_field(),
                         membership_witness: witness,
                     },
@@ -1300,8 +1300,9 @@ mod tests {
             .unwrap();
 
         let witness = acc.get_witness(cm1).await.unwrap();
-        let nk = fvk.nk_field();
-        let nf = crate::nullifier::compute_nullifier(nk, note_in.nullifier_nonce);
+        // Use nsk (secret) for nullifier, NOT nk.x (public)
+        let nsk = sk.nsk();
+        let nf = crate::nullifier::compute_nullifier(nsk, note_in.nullifier_nonce);
         let anchor = chain.get_current_anchor().await.unwrap();
         let nullifiers = [nf, Fr::from(0u64), Fr::from(0u64)];
         let tx_binding = crate::tx_binding::tx_binding_transfer(anchor, &nullifiers, 1, 2);
@@ -1354,7 +1355,6 @@ mod tests {
                     note_diversifier_index: note_in.diversifier_index,
                     note_nullifier_nonce: note_in.nullifier_nonce,
                     note_randomness: note_in.note_randomness,
-                    nk,
                     spending_key: sk.as_field(),
                     membership_witness: witness.clone(),
                 },
@@ -1483,7 +1483,8 @@ mod tests {
         // Setup
         let sk = SpendingKey::from_bytes(&[0u8; 32]);
         let fvk = sk.to_full_viewing_key();
-        let nk = fvk.nk_field();
+        // Use nsk (secret) for nullifier, NOT nk.x (public)
+        let nsk = sk.nsk();
         let addr = fvk.diversified_address(0);
 
         let note_in = Note::with_values(
@@ -1495,7 +1496,7 @@ mod tests {
             Fr::from(1u64),
         );
         let cm1 = note_in.commitment();
-        let nf = compute_nullifier(nk, note_in.nullifier_nonce);
+        let nf = compute_nullifier(nsk, note_in.nullifier_nonce);
 
         // Build tx_binding first to derive output nonce
         let anchor = cm1;
@@ -1534,7 +1535,6 @@ mod tests {
                     note_diversifier_index: note_in.diversifier_index,
                     note_nullifier_nonce: note_in.nullifier_nonce,
                     note_randomness: note_in.note_randomness,
-                    nk,
                     spending_key: sk.as_field(),
                     membership_witness: witness.clone(),
                 },
