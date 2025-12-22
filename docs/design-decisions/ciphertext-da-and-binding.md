@@ -1,7 +1,3 @@
-Below is a **drop-in replacement** for the design-decision doc, updated for **Jito bundling**, “possible future tx-size increases”, **off-chain redundancy**, and a more realistic **Candidate 2 (1B) feasibility/cost/safety** appendix.
-
----
-
 # Ciphertext Data Availability (DA) & Binding to Proofs (Solana MASP)
 
 **Status:** Proposed → **Recommended** (see “Decision”)
