@@ -8,8 +8,9 @@
 // Security requirements: see `docs/circuit-security-requirements.md`.
 
 use dep::masp_common::{
-    check_public_withdraw_binding_single_asset, compute_note_commitment, prove_merkle_membership,
-    prove_note_preimage_hashes_to_commitment, prove_nullifier_derivation, prove_spend_authorization,
+    check_public_withdraw_binding_single_asset, compute_note_commitment, MERKLE_DEPTH,
+    prove_merkle_membership, prove_note_preimage_hashes_to_commitment, prove_nullifier_derivation,
+    prove_spend_authorization, SpendAuthResult,
 };
 
 use std::hash::poseidon2::Poseidon2;
@@ -79,8 +80,8 @@ fn main(
     // Spending key (root secret). Circuit derives ask/nsk from it.
     spending_key: Field,
     // Private Merkle path witness (leaf -> root)
-    siblings: [Field; 16],
-    path_indices: [bool; 16],
+    siblings: [Field; MERKLE_DEPTH],
+    path_indices: [bool; MERKLE_DEPTH],
 ) {
     let public = UnshieldPublic {
         anchor,
@@ -129,15 +130,19 @@ fn main(
     );
     //
     // - "I am authorized to spend this note (SpendingKey-only)" + nullifier derivation
-    // prove_spend_authorization derives ask/nsk from spending_key and returns nsk.
-    let nsk = prove_spend_authorization(
+    // prove_spend_authorization derives ask/nsk from spending_key and returns SpendAuthResult.
+    let auth_result: SpendAuthResult = prove_spend_authorization(
         private.spending_key,
         private.note.recipient,
         private.note.diversifier_index,
     );
     // - "The nullifier is derived correctly from the owner's key material"
     // **SECURITY:** Uses nsk (SECRET), NOT nk.x (public). This ensures FVK holders can't spend.
-    prove_nullifier_derivation(public.nullifier, nsk, private.note.nullifier_nonce);
+    prove_nullifier_derivation(
+        public.nullifier,
+        auth_result.nsk,
+        private.note.nullifier_nonce,
+    );
     //
     // - "This proof is bound to the intended unshield intent"
     let expected_tx_binding = Poseidon2::hash(
