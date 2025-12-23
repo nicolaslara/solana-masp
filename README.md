@@ -162,24 +162,50 @@ cd client
 cargo test --test user_flows
 ```
 
-#### 2. With Surfpool (Local Solana)
+#### 2. With Surfpool (Local Solana) - Auto Deploy
+
+The test suite can automatically build and deploy the program if needed:
 
 ```bash
 # Terminal 1: Start Surfpool
 surfpool start
 
-# Terminal 2: Deploy program and run tests
+# Terminal 2: Run tests (auto-builds and deploys if needed)
+MASP_CHAIN=surfpool \
+MASP_PRINT_CONFIG=1 \
+  cargo test -p masp-client --features solana-backend --test user_flows -- --nocapture
+```
+
+Auto-deploy behavior:
+- If `MASP_PROGRAM_ID` is set → uses that program ID (no build/deploy)
+- If `.so` is missing or source changed → rebuilds with `cargo build-sbf`
+- Deploys via `solana program deploy` and sets `MASP_PROGRAM_ID`
+- Uses `--features local-testing,mock-proofs` by default
+
+Control via environment:
+| Variable | Description |
+|----------|-------------|
+| `MASP_PROGRAM_ID` | Skip build/deploy, use this program ID |
+| `MASP_SKIP_BUILD` | Skip rebuild check (use existing .so) |
+| `MASP_PROGRAM_FEATURES` | Override build features |
+
+#### 2b. With Surfpool - Manual Deploy
+
+```bash
+# Terminal 1: Start Surfpool
+surfpool start
+
+# Terminal 2: Build and deploy manually
 cd programs/solana-masp
 cargo build-sbf --features "local-testing,mock-proofs"
 solana program deploy target/deploy/solana_masp.so --url http://127.0.0.1:8899
-# Note the program ID
+# Output: Program Id: <44-char-base58-id>
 
-# Terminal 2: Run tests
-cd ../client
+# Terminal 2: Run tests with explicit program ID
 MASP_CHAIN=surfpool \
-MASP_PROGRAM_ID=<program_id> \
+MASP_PROGRAM_ID=<program_id_from_above> \
 MASP_PRINT_CONFIG=1 \
-  cargo test --features solana-backend --test user_flows -- --nocapture
+  cargo test -p masp-client --features solana-backend --test user_flows -- --nocapture
 ```
 
 #### 3. With Light Protocol Indexer (Scaffold)
@@ -215,18 +241,74 @@ MASP_ENCRYPTION=mock \
 
 ⚠️ **Warning:** Mock encryption is INSECURE. Only use for testing.
 
-#### 6. Full Production-like Stack (Future)
+#### 6. Production-like Stack (Surfpool + Mock Proofs)
+
+**This is the most production-like configuration that works today:**
 
 ```bash
-# Not yet implemented - this is the target configuration
-cd client
+# Terminal 1: Start Surfpool
+surfpool start
+
+# Terminal 2: Run with real Solana chain, real encryption, mock proofs
+MASP_CHAIN=surfpool \
+MASP_ENCRYPTION=chacha \
+MASP_PROOF_SYSTEM=mock \
+MASP_PROOF_VERIFY=onchain \
+MASP_PRINT_CONFIG=1 \
+  cargo test -p masp-client --features solana-backend,onchain-mock --test user_flows -- --nocapture
+```
+
+Note: `onchain-mock` feature enables the Keccak256-based mock prover that's compatible with the on-chain mock verifier.
+
+Expected output:
+```
+╔══════════════════════════════════════╗
+║       MASP Backend Configuration     ║
+╠══════════════════════════════════════╣
+║ Chain:      surfpool (http://127.0.0.1:8899) ║
+║ Indexer:    mock ║
+║ Encryption: chacha20-poly1305 ║
+║ Proof:      mock ║
+║ Verify:     onchain ║
+╚══════════════════════════════════════╝
+```
+
+#### 7. Production-like Stack (Surfpool + Real UltraPlonk) ⚠️ WIP
+
+**This is the target - currently fails because on-chain VK integration is pending:**
+
+```bash
+# Terminal 1: Start Surfpool
+surfpool start
+
+# Terminal 2: Compile circuits first
+cd circuits/masp/shield && nargo compile && cd ../../..
+cd circuits/masp/transfer && nargo compile && cd ../../..
+cd circuits/masp/unshield && nargo compile && cd ../../..
+
+# Terminal 2: Run with real proofs (will fail on verification)
+MASP_CHAIN=surfpool \
+MASP_ENCRYPTION=chacha \
+MASP_PROOF_SYSTEM=ultraplonk \
+MASP_PROOF_VERIFY=onchain \
+MASP_PRINT_CONFIG=1 \
+  cargo test -p masp-client --features solana-backend,ultraplonk-verifier --test user_flows -- --nocapture
+```
+
+**Why it fails:** The on-chain program doesn't have the embedded VKs yet. See "Next Steps" below.
+
+#### 8. Full Production Stack (Future Target)
+
+```bash
+# Target configuration for mainnet/devnet
 MASP_CHAIN=devnet \
 MASP_INDEXER=light \
+MASP_ENCRYPTION=chacha \
 MASP_PROOF_SYSTEM=ultraplonk \
 MASP_PROOF_VERIFY=onchain \
 MASP_PROGRAM_ID=<deployed_program> \
 HELIUS_API_KEY=<key> \
-  cargo test --features solana-backend,ultraplonk-verifier --test user_flows -- --nocapture
+  cargo test -p masp-client --features solana-backend,ultraplonk-verifier --test user_flows -- --nocapture
 ```
 
 ### Indexer Modes
@@ -381,6 +463,65 @@ Withdraw from shielded pool to transparent address:
 - [Namada MASP](https://github.com/anoma/masp)
 - [Tachyon](https://seanbowe.com/blog/tachyon-scaling-zcash-oblivious-synchronization/)
 - [ZIP-32: Key Derivation](https://zips.z.cash/zip-0032)
+
+## Next Steps: On-chain UltraPlonk Verification
+
+To get real UltraPlonk proofs verifying on Surfpool:
+
+### 1. Generate VKs from compiled circuits
+
+```bash
+cd circuits/masp/shield && nargo compile && bb OLD_API write_vk -b target/masp_shield.json -o vk.bin
+cd ../transfer && nargo compile && bb OLD_API write_vk -b target/masp_transfer.json -o vk.bin
+cd ../unshield && nargo compile && bb OLD_API write_vk -b target/masp_unshield.json -o vk.bin
+```
+
+### 2. Convert VKs to on-chain format
+
+The `ultraplonk-core` verifier expects 1632-byte VKs (without G2_X). Use the client's VK conversion:
+
+```bash
+# Use the pipeline test to see VK conversion
+cargo test -p masp-client --features ultraplonk-tools --test masp_ultraplonk_pipeline -- --ignored --nocapture
+```
+
+### 3. Embed VKs in the program
+
+Update `programs/solana-masp/src/verify.rs` to load real VKs:
+
+```rust
+// Replace stub VKs with real ones
+const SHIELD_VK: &[u8] = include_bytes!("../vks/ultraplonk_vk_shield.bin");
+const TRANSFER_VK: &[u8] = include_bytes!("../vks/ultraplonk_vk_transfer.bin");
+const UNSHIELD_VK: &[u8] = include_bytes!("../vks/ultraplonk_vk_unshield.bin");
+```
+
+### 4. Enable real verification
+
+Uncomment the verification logic in `verify.rs` and remove the mock feature flag.
+
+### 5. Build and test
+
+```bash
+cd programs/solana-masp
+cargo build-sbf --features local-testing,ultraplonk  # Note: no mock-proofs
+
+# Run tests
+MASP_CHAIN=surfpool \
+MASP_PROOF_SYSTEM=ultraplonk \
+MASP_PROOF_VERIFY=onchain \
+  cargo test -p masp-client --features solana-backend,ultraplonk-verifier --test user_flows -- --nocapture
+```
+
+### Current Blockers
+
+| Item | Status | Notes |
+|------|--------|-------|
+| VK generation | ✅ Works | `bb OLD_API write_vk` |
+| VK conversion | ✅ Works | `to_onchain_bytes_without_g2()` |
+| VK embedding | 🚧 Pending | Need `build.rs` to automate |
+| On-chain verify | 🚧 Stubbed | Uses mock when `mock-proofs` feature |
+| CU profiling | 🚧 Pending | Need real VKs first |
 
 ## Status
 

@@ -26,6 +26,11 @@
 //! - `MASP_INDEXER`    (mock|light)
 //! - `MASP_ENCRYPTION` (chacha|mock)  // mock is INSECURE, only for tests
 //! - `MASP_PRINT_CONFIG=1` to print selection
+//!
+//! ## Program Deployment
+//!
+//! Deployment is handled by `setup::ensure_ready()` in `user_flows.rs`.
+//! See that module for auto-deploy behavior and configuration.
 
 use masp_client::backends::proof_system::{Groth16ProverScaffold, Groth16VerifierScaffold};
 use masp_client::backends::LightIndexer;
@@ -104,13 +109,45 @@ Compile tests with: `cargo test --features ultraplonk-verifier ...`"
             }
         }
 
+        // Prover/verifier selection
+        //
+        // When using mock proofs with a real Solana chain (surfpool/devnet/etc),
+        // we need to use OnChainMockSpendProver which generates Keccak256-based
+        // proofs compatible with the on-chain mock verifier.
+        //
+        // When using mock proofs with MockChain, we use the simpler MockSpendProver.
+        let uses_real_chain = !matches!(config.chain, ChainBackend::Mock);
+
         let prover: Arc<dyn SpendProver> = match config.proof_system {
+            ProofSystemBackend::Mock if uses_real_chain => {
+                #[cfg(feature = "onchain-mock")]
+                {
+                    Arc::new(masp_client::proofs::OnChainMockSpendProver)
+                }
+                #[cfg(not(feature = "onchain-mock"))]
+                {
+                    panic!(
+                        "Using mock proofs with a real Solana chain requires the `onchain-mock` feature. \
+                        Compile with: cargo test --features solana-backend,onchain-mock ..."
+                    );
+                }
+            }
             ProofSystemBackend::Mock => Arc::new(MockSpendProver),
             ProofSystemBackend::UltraPlonk => ultraplonk_prover(),
             ProofSystemBackend::Groth16 => Arc::new(Groth16ProverScaffold::default()),
         };
 
         let verifier: Arc<dyn ProofVerifier> = match config.proof_system {
+            ProofSystemBackend::Mock if uses_real_chain => {
+                #[cfg(feature = "onchain-mock")]
+                {
+                    Arc::new(masp_client::proofs::OnChainMockProofVerifier)
+                }
+                #[cfg(not(feature = "onchain-mock"))]
+                {
+                    panic!("Using mock proofs with a real Solana chain requires the `onchain-mock` feature.");
+                }
+            }
             ProofSystemBackend::Mock => Arc::new(MockProofVerifier),
             ProofSystemBackend::UltraPlonk => ultraplonk_verifier(),
             ProofSystemBackend::Groth16 => Arc::new(Groth16VerifierScaffold::default()),
@@ -137,7 +174,7 @@ Compile tests with: `cargo test --features ultraplonk-verifier ...`"
             #[cfg(feature = "solana-backend")]
             ChainBackend::Surfpool => Arc::new(
                 SolanaChain::surfpool(IndexerMode::LocalSync(shared_store.clone()))
-                    .expect("Failed to create Surfpool SolanaChain - is MASP_PROGRAM_ID set?"),
+                    .expect("Failed to create Surfpool SolanaChain"),
             ),
             #[cfg(feature = "solana-backend")]
             ChainBackend::Devnet => Arc::new(
@@ -151,6 +188,13 @@ Compile tests with: `cargo test --features ultraplonk-verifier ...`"
             ),
             #[cfg(feature = "solana-backend")]
             ChainBackend::Mainnet => {
+                // Mainnet: require explicit MASP_PROGRAM_ID (no auto-deploy)
+                if std::env::var("MASP_PROGRAM_ID").is_err() {
+                    panic!(
+                        "MASP_PROGRAM_ID required for mainnet. \
+                        Auto-deploy is disabled for safety."
+                    );
+                }
                 Arc::new(SolanaChain::mainnet().expect("Failed to create Mainnet SolanaChain"))
             }
             #[cfg(feature = "solana-backend")]

@@ -74,7 +74,7 @@ mod real_backend {
         }
     }
     use async_trait::async_trait;
-    use solana_client::rpc_client::RpcClient;
+    use solana_client::nonblocking::rpc_client::RpcClient;
     use solana_sdk::{
         instruction::{AccountMeta, Instruction},
         pubkey::Pubkey,
@@ -220,7 +220,7 @@ mod real_backend {
         }
 
         /// Ensure program is initialized (idempotent).
-        fn ensure_initialized(&self) -> Result<(), ChainError> {
+        async fn ensure_initialized(&self) -> Result<(), ChainError> {
             if self.initialized.load(std::sync::atomic::Ordering::Relaxed) {
                 return Ok(());
             }
@@ -228,7 +228,7 @@ mod real_backend {
             let (tree_state_pda, _) = derive_tree_state_pda(&self.program_id);
 
             // Check if already initialized on-chain
-            match self.rpc_client.get_account(&tree_state_pda) {
+            match self.rpc_client.get_account(&tree_state_pda).await {
                 Ok(_) => {
                     self.initialized
                         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -251,7 +251,7 @@ mod real_backend {
                 data: vec![IX_INITIALIZE],
             };
 
-            self.send_transaction(&[ix])?;
+            self.send_transaction(&[ix]).await?;
             self.initialized
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             println!("✅ MASP program initialized");
@@ -260,7 +260,7 @@ mod real_backend {
         }
 
         /// Create and populate a proof buffer
-        fn create_proof_buffer(
+        async fn create_proof_buffer(
             &self,
             circuit_type: u8,
             public_inputs: &[[u8; 32]],
@@ -284,6 +284,7 @@ mod real_backend {
             let blockhash = self
                 .rpc_client
                 .get_latest_blockhash()
+                .await
                 .map_err(|e| ChainError::Other(format!("Failed to get blockhash: {}", e)))?;
 
             let tx = Transaction::new_signed_with_payer(
@@ -295,6 +296,7 @@ mod real_backend {
 
             self.rpc_client
                 .send_and_confirm_transaction(&tx)
+                .await
                 .map_err(|e| ChainError::Other(format!("Failed to create proof buffer: {}", e)))?;
 
             // Step 2: Upload proof data
@@ -314,15 +316,19 @@ mod real_backend {
                 data: upload_data,
             };
 
-            self.send_transaction(&[upload_ix])?;
+            self.send_transaction(&[upload_ix]).await?;
 
             Ok(buffer.pubkey())
         }
 
-        fn send_transaction(&self, instructions: &[Instruction]) -> Result<String, ChainError> {
+        async fn send_transaction(
+            &self,
+            instructions: &[Instruction],
+        ) -> Result<String, ChainError> {
             let blockhash = self
                 .rpc_client
                 .get_latest_blockhash()
+                .await
                 .map_err(|e| ChainError::Other(format!("Failed to get blockhash: {}", e)))?;
 
             let tx = Transaction::new_signed_with_payer(
@@ -335,6 +341,7 @@ mod real_backend {
             let sig = self
                 .rpc_client
                 .send_and_confirm_transaction(&tx)
+                .await
                 .map_err(|e| ChainError::Other(format!("Transaction failed: {}", e)))?;
 
             Ok(sig.to_string())
@@ -460,19 +467,16 @@ mod real_backend {
 
         async fn shield(&self, request: ShieldRequest) -> Result<ShieldResult, ChainError> {
             // Ensure program is initialized
-            self.ensure_initialized()?;
+            self.ensure_initialized().await?;
 
             let (tree_state_pda, _) = derive_tree_state_pda(&self.program_id);
 
             // Convert commitment to bytes
             let commitment_bytes = Self::commitment_to_bytes(&request.commitment);
 
-            // Build public inputs
-            let asset_id_bytes = {
-                let mut buf = [0u8; 32];
-                buf[31] = 1; // TODO: proper asset_id from token_address
-                buf
-            };
+            // Build public inputs - must match what prover used
+            let asset_id = crate::note::compute_asset_id(&request.token_address);
+            let asset_id_bytes = Self::commitment_to_bytes(&asset_id);
             let amount_bytes = {
                 let mut buf = [0u8; 32];
                 buf[24..32].copy_from_slice(&request.amount.to_be_bytes());
@@ -488,8 +492,9 @@ mod real_backend {
             ];
 
             // Create proof buffer with the proof bytes
-            let proof_buffer =
-                self.create_proof_buffer(CIRCUIT_SHIELD, &public_inputs, &request.shield_proof)?;
+            let proof_buffer = self
+                .create_proof_buffer(CIRCUIT_SHIELD, &public_inputs, &request.shield_proof)
+                .await?;
 
             // Build shield instruction data
             let mut data = vec![IX_SHIELD];
@@ -508,7 +513,7 @@ mod real_backend {
                 data,
             };
 
-            let tx_sig = self.send_transaction(&[ix])?;
+            let tx_sig = self.send_transaction(&[ix]).await?;
 
             // Update local store if present (LocalSync mode sync)
             if let Some(store) = self.local_store() {
