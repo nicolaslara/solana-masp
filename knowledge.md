@@ -864,3 +864,53 @@ sk (SpendingKey) - root secret, can spend
 | **Value commitment** | Binding commitment to (asset_id, amount) used for hard-sound multi-asset conservation (future) |
 | **Indexer**         | Service providing Merkle witnesses and ciphertexts         |
 | **Chain**           | Service for submitting transactions (Solana RPC)           |
+
+---
+
+## Circuit Implementation Assessment (2025-12-22)
+
+Gap analysis after implementing circuit statements from `docs/protocol-soundness.md`.
+
+### Implementation Status
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Shield circuit | ✅ Real | Commitment integrity, amount range (u64), ct_hash binding |
+| Transfer circuit | ✅ Real | Merkle membership, nullifier (nsk), spend auth (EC), balance, output nonces |
+| Unshield circuit | ✅ Real | Transfer checks + public withdrawal binding (recipient limbs) |
+| Domain tags | ✅ Aligned | `client/src/domain.rs` ↔ `circuits/masp/common/src/statements.nr` |
+| tx_binding | ✅ Match | Rust and Noir layouts identical |
+| Local verifier | ✅ Working | `ultraplonk-core` with correct PI ordering |
+
+### Known Gaps
+
+| Gap | Priority | Notes |
+|-----|----------|-------|
+| On-chain program is stub | P0 | No verification, tree, nullifiers, SPL |
+| Real-proof tests for shield/unshield | P1 | Only transfer has pipeline coverage |
+| Context binding (chain_id/program_id) | P2 | Replay across deployments possible |
+
+### Doc Drift (to fix)
+
+- `docs/circuit-security-requirements.md` — update to N→M transfer model
+- `docs/implementation-status.md` — spend-auth is implemented, not placeholder
+- Shield `prove_asset_id_binding()` is no-op — safe only if chain computes asset_id
+
+### Risks
+
+- **EC ops under predicates**: mitigated via Pattern A (compute unconditionally, gate asserts)
+- **Ciphertext format not frozen**: define canonical blob before production
+- **MAX_INPUTS hardcoded**: assert `MAX_INPUTS == 3` in `verify_inputs_same_owner()`
+- **VK non-determinism**: use canonical VK path + lock file pattern
+
+### Groth16 References (for future backend)
+
+If we need smaller proofs / lower CU:
+
+- `../noir-main/` — Noir fork with Groth16 support
+- `../acvm-backend-groth16/` — ACVM backend for Groth16 proving
+- `../mobile-solana-e2e/solana-groth16-verifier/` — Solana on-chain Groth16 verifier
+
+Groth16 tradeoffs:
+- **Pros:** ~192B proofs (vs ~2KB UltraPlonk), ~81K CU (vs ~500K-1M)
+- **Cons:** Requires trusted setup per circuit, different toolchain

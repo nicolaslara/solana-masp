@@ -1,11 +1,14 @@
 # Solana MASP - Tasks
 
-## Status: ✅ Milestone 0 Complete - Ready for Milestone 1
+## Status: ✅ Circuits Implemented → Ready for Real Prover Testing (0.14)
+
+**Current state:** Circuit constraints are implemented and match `docs/protocol-soundness.md`. Mock proofs pass. Ready to validate with real UltraPlonk proofs.
 
 ## Before Starting
 
-1. **Read `knowledge.md`** - Architecture decisions are documented
-2. **Update both files** as you make progress
+1. **Read `knowledge.md`** - Architecture decisions + gap analysis documented
+2. **Read `docs/protocol-soundness.md`** - Normative protocol spec
+3. **Update both files** as you make progress
 
 ---
 
@@ -16,27 +19,32 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 **Architecture:**
 
 - UltraPlonk proofs via `../solana-ultraplonk-verifier/`
-- Orchard-style Actions (1 spend + 1 output)
-- Poseidon hashing via `light-poseidon` crate
-- **Value rule (current)**: single-asset per Action (hard-sound). Multi-asset-in-one-action is deferred until we adopt a hard-binding construction (e.g. value commitments).
+- N→M transfers (up to 3 inputs, 3 outputs) in a single proof
+- Poseidon2 hashing (Noir stdlib + `taceo-poseidon2` in Rust)
+- **Value rule (current)**: single-asset per transfer (hard-sound). Multi-asset deferred to Milestone 5.
 - Trait-based client (Indexer + Chain abstractions)
-- On-chain commitment-tree accumulator (anchors); membership proven via Merkle paths (privacy-preserving; no commitment references)
-- Light Protocol for state compression **(nullifier set only; commitment tree is not Light)** (Milestone 3+)
+- On-chain commitment-tree accumulator (anchors); membership proven via Merkle paths (privacy-preserving)
+- Light Protocol for nullifier set (Milestone 4+)
 
-**Circuits:**
+**Circuits (all implemented):**
 
-- Shield circuit (deposit)
-- Transfer circuit (shielded action)
-- Unshield circuit (withdraw)
+- Shield circuit — commitment integrity, amount range, ct_hash binding
+- Transfer circuit — membership, nullifier derivation, spend auth (EC), balance conservation, output nonces
+- Unshield circuit — same as transfer + public withdrawal binding (recipient limbs)
 
 ---
 
-## Next priority order
+## Next Priority Order
 
-This section defines the **required implementation ordering** for the next milestones.
+**Current sprint:**
 
-1. **Circuit implementation (incremental constraints)**:
-   - Only after (1)–(4) are locked.
+1. ✅ Real prover testing (0.14.1) — transfer circuit validated
+2. ⬅️ **Doc cleanup (0.14.3)** — fix drift in `docs/circuit-security-requirements.md` and `docs/implementation-status.md`
+3. **Shield/Unshield pipeline tests (0.14.1)** — add remaining circuit tests
+
+**Next:**
+
+4. **Solana program (Milestone 1)** — proof verification + commitment accumulator + nullifier set + SPL transfers
 
 ---
 
@@ -198,267 +206,138 @@ This section defines the **required implementation ordering** for the next miles
 
 ---
 
-## Milestone 0.13: Indexer/Chain/Store Interface Review (Before Real Proofs)
+## Milestone 0.13: Interface Review ✅ MOSTLY COMPLETE
 
-**Goal:** Lock the *protocol-level interfaces* so the user flows stay stable while we swap internals.
+**Goal:** Lock protocol-level interfaces so user flows stay stable while swapping internals.
 
-**Guiding principle:** In production, the **chain does not “update the indexer”**. The indexer observes the ledger. In mocks, we may keep in-memory stores, but the APIs should reflect real expectations.
+### 0.13.1 Indexer/Chain APIs ✅
 
-### 0.13.1 Review Indexer API (Production-Shape)
+- [x] `Indexer` trait supports: ciphertext scanning, OOB fetch, witness retrieval, exists checks
+- [x] Two-tx model (Tx A ciphertexts + Tx B state transition) implemented in mocks
+- [x] Indexing latency hook: `Indexer::wait_for_update()` + `MaspClient::wait_for_indexer_update()`
+- [x] OOB notification includes both `masp_tx_sig` and `ciphertext_tx_sig`
 
-- [ ] Audit `Indexer` trait: what data is needed to support realistic client flows?
-  - ciphertext scanning (paginated)
-  - fetch outputs by `tx_sig` (OOB fast path)
-  - witness retrieval (membership proof / Merkle path / Light proof)
-  - optional “exists” checks (commitment presence)
-- [ ] **Update the client trait surface for two-transaction publishes (Tx A + Tx B)**:
-  - Ensure `Chain` exposes submission of **both**:
-    - **Tx A**: ciphertext posting transaction(s) (outputs-only bytes)
-    - **Tx B**: MASP state transition (proof + nullifiers + commitments + `ct_hash` binding)
-  - Decide what the client returns from submit calls (signatures, handles, or a structured receipt).
-  - Ensure the API shape works for:
-    - “send now” UX (submit both sequentially), and
-    - “recover later” UX (OOB provides enough information to locate both artifacts via an indexer).
-- [ ] Decide how to model “indexing latency” in the reference implementation:
-  - Option A: `Indexer::wait_for_update()` (noop in real impl; sleeps/polls in mocks)
-  - Option B: test-only helper (preferred if we want to keep `Indexer` pure/read-only)
-  - Document the decision in `knowledge.md`
-- [ ] Add a **client-side hook** to model real-world indexing delay:
-  - `MaspClient::wait_for_indexer_update()` calls into the indexer (or is a noop)
-  - In mocks: can advance an internal “indexed up to” cursor or simply sleep
-  - In real impl: likely a noop or polling helper (indexer is external)
-  - Goal: tests can be written in a production-like order without assuming immediate indexing
+### 0.13.2 Store Abstractions (Deferred to Milestone 3/4)
 
-### 0.13.2 Store Abstractions for Light Protocol (No Implementation Yet)
+Light Protocol integration deferred. Current model:
+- Mock in-memory Merkle tree for commitments
+- Mock in-memory set for nullifiers
+- Abstractions exist (`MembershipWitness`, `Anchor`) for later swap
 
-**Goal:** Abstract “append + membership/non-membership proofs” so we can swap between:
+### 0.13.3 Key/Address Decisions ✅
 
-- Mock in-memory store (tests)
-- Light Protocol + Helius (production)
-- (Optional experiment) a small Solana program store (for learning / local iteration)
+- [x] Single root of trust (seed) — documented in `knowledge.md`
+- [x] Baby JubJub for encryption (same curve as Noir embedded ops)
 
-- [ ] Define the minimal wrapper APIs we will need around Light Protocol calls:
-  - commitment append + witness generation
-  - nullifier uniqueness / spentness checks (including batch)
-  - anchor/root validity (ring buffer expectations)
-- [ ] Ensure these abstractions *do not* leak Solana-specific details into `MaspClient` (client only talks to `Chain`/`Indexer`)
-- [ ] Ensure the store abstraction **hides witness/anchor validity complexity**:
-  - “append” returns enough information for later membership proofs
-  - “prove membership/non-membership” returns opaque proof objects
-  - client only sees `MembershipWitness` / `Anchor` and never cares how they’re produced
-- [ ] Optional experiment (low priority): a tiny Solana program implementing a commitment/nullifier store
-  - Goal: learn the operational shape (roots, proof requests) without committing to it
-  - Still expected to be replaced by Light Protocol + Helius
+### 0.13.4 Production-Likeness Review ✅ MOSTLY COMPLETE
 
-### 0.13.3 Document Key/Address Decisions
+#### Encryption / Note Handling ✅
 
-- [ ] Document whether we want separate keys for encryption vs spending/addressing (and why)
-  - Default assumption: **one root of trust (seed) is enough**
-  - If we choose separate keys, document the concrete benefit and migration plan
+- [x] `NoteEncryption` trait with ChaCha20-Poly1305 AEAD
+- [x] Baby JubJub ECDH (matches Noir embedded curve)
+- [x] Client verifies `H(note_plaintext) == commitment` before accepting notes
 
-### 0.13.4 Production-Likeness Review Checklist (Decisions or Explicit Deferrals)
+#### Calldata Layout (Deferred to Milestone 1)
 
-**Goal:** Before we implement real proofs/program/indexer, confirm that the *shape* of the current protocol matches the intended production architecture (or record why we’re deferring).
+- [ ] Freeze byte layout for program instructions (depends on on-chain POC)
+- [x] Indexer APIs expose ciphertext + epk + commitment + output index
 
-#### Encryption / Note Handling
+#### Byte Budget + Calldata Optimization (Deferred to Milestone 2)
 
-- [ ] Review `NoteEncryption` for production-shape correctness:
-  - ciphertext format is stable + versioned (if needed)
-  - AAD binding strategy is correct and documented
-  - domain separation + KDF context is sufficient
-- [ ] Decide whether to keep Baby JubJub-based ECDH for encryption or move to X25519:
-  - document tradeoffs (engineering complexity, interoperability, auditability)
-  - document the decision and how it affects address format
-- [ ] Ensure decrypted notes are always verified before being accepted:
-  - verify note plaintext ↔ commitment (cm) consistency
-  - verify “ownership” / recipient binding checks
+Circuits are stable. Optimize when building real on-chain transactions.
 
-#### Transaction Calldata Layout (Indexer Extraction)
+- [ ] Write tight byte budget for instruction data
+- [ ] Implement Option 1A: Tx A posts ciphertext, Tx B has only `ct_hashes` + proof
+- [ ] Remove `ephemeral_key` duplication
+- [ ] Compress Baby JubJub points (64B → 32B)
 
-- [ ] Define and freeze transaction calldata byte layout for our instruction(s):
-  - public data (cm, nf, anchor, etc.)
-  - encrypted output payload(s) (epk, ciphertext, optional metadata)
-- [ ] Ensure `Indexer` APIs expose enough information for clients to validate decrypted notes:
-  - ciphertext + epk
-  - the corresponding commitment (cm) and output index
-  - tx signature and ordering
-- [ ] Decide how we represent “indexing latency” in tests (ties to 0.13.1):
-  - client calls `wait_for_indexer_update()` between submit and scan
+#### Ciphertext DA + Binding (Option 1A) ✅ COMPLETE
 
-#### Byte Budget + Calldata Optimization (Post-Circuits)
+- [x] `ct_hash = H(DOM_CIPHERTEXT, ciphertext_bytes)` with `DOM_CIPHERTEXT = 4`
+- [x] `ct_hashes[MAX_OUTPUTS]` as explicit public inputs (not in `tx_binding`)
+- [x] Two-tx model mocked: Tx A posts ciphertexts, Tx B binds via `ct_hash`
+- [x] OOB notifications include both tx signatures
+- [x] Indexer APIs: `get_ciphertext_by_hash()`, `get_ciphertext_for_output()`
+- [x] Wallet verifies `ct_hash` before trial decryption
+- [x] Client computes `ct_hash(es)` before proof generation
+- [ ] Multi-tx submit flow (Jito bundling) — deferred, optional UX
 
-**Goal:** keep transactions comfortably under Solana’s packet limits while preserving production-grade privacy.
+#### Remaining Doc Cleanup (Move to 0.14)
 
-**Current inefficiencies (fixable):**
+- [ ] Reconcile `docs/encryption-comparison.md` with current decisions
+- [ ] Update `knowledge.md` "Status/Recent Completions"
 
-- We currently include **redundant ciphertext bytes in Tx B** even though Option 1A intends Tx A to carry ciphertexts.
-- We currently duplicate **`ephemeral_key`**:
-  - inside `EncryptedNote::to_bytes()` (ciphertext bytes already include `epk`)
-  - and again as `TransferOutput.ephemeral_key` / `ShieldRequest.ephemeral_key`
-- We currently carry fixed-size `[TransferOutput; MAX_OUTPUTS]` with Option-wrapped fields, which adds per-slot overhead even for disabled outputs.
+### 0.13.5 Protocol Soundness Review ✅ COMPLETE
 
-**Plan (after circuits are stable):**
-
-- [ ] Write a **tight byte budget** for `shield` and `transfer` instruction data:
-  - include Option/Vec length prefixes and per-slot overhead
-  - cover the common 1→2 case (payment + change)
-  - cover worst-case MAX_OUTPUTS (3) and explain why/when it matters
-- [ ] Make Option 1A real in the “production-shaped” path:
-  - Tx A posts `ciphertext_blob` (the canonical bytes)
-  - Tx B carries only commitments + `ct_hashes` + proof (no ciphertext bytes)
-- [ ] Remove `ephemeral_key` duplication in calldata:
-  - choose one canonical representation:
-    - **either** `ciphertext_blob` includes `epk` and Tx B does not carry `epk` separately
-    - **or** Tx B carries `epk` separately and `ciphertext` excludes it (not preferred)
-- [ ] Compress Baby JubJub points on the wire:
-  - switch `epk` encoding from uncompressed 64B (x||y) to compressed 32B
-  - define and document strict decoding + curve checks
-- [ ] Replace fixed-size output slots in on-chain calldata with a compact encoding:
-  - encode only enabled outputs (commitment + optional metadata) with explicit `output_count`
-  - keep fixed-size arrays only as an *internal* circuit ABI detail
-- [ ] Evaluate “derived blinding / derived note randomness” vs explicit randomness:
-  - must be safe under malicious sender behavior (marking/griefing model)
-  - must support mnemonic-only recovery (wallet can recompute commitment from recovered fields)
-  - document the decision in `knowledge.md` + `docs/protocol-soundness.md`
-  - **Option (byte-saving):** drop `note_randomness` (32B) from the encrypted note plaintext and instead derive it deterministically:
-    - candidate: `note_randomness = PRF(shared_secret, epk, domain)` where `shared_secret = esk * pk_d` (sender) = `ivk * epk` (recipient)
-    - recipient can recompute from `ivk` + `epk` during scanning; sender can recompute only if they retain `esk` or we enable `C_out`
-    - **Security note:** this does *not* prevent sender “marking”; sender still chooses `esk` and can choose it deterministically (no brute force required)
-
-#### Ciphertext DA + Binding (Outputs-only) — Implementation Plan (Option 1A baseline)
-
-**Goal:** implement the baseline from `docs/design-decisions/ciphertext-da-and-binding.md` and make it real in the client/indexer/program shape:
-
-- **Only outputs publish ciphertexts** (never inputs).
-- Ciphertexts are published in **Tx A** (posting tx(s), chunked as needed).
-- The MASP state transition **Tx B binds** to the posted bytes via `ct_hash` (per-output).
-
-**Plan (in recommended order):**
-
-- [x] **Decide the canonical hash and domain tag**:
-  - Pick `H` for `ct_hash = H(DOM_CIPHERTEXT, ephemeral_key || ciphertext_bytes)` and freeze `DOM_CIPHERTEXT = 7`.
-  - Ensure the hash choice is consistent across: wallet verification, tx binding, and (eventually) circuits.
-  - Record the decision in `knowledge.md` (and keep `docs/protocol-soundness.md` consistent).
-
-- [x] **Extend the protocol public-input layout / binding** (still mocks first):
-  - Add `ct_hashes[MAX_OUTPUTS]` to the Transfer public inputs (and `ct_hash` to Shield).
-  - `ct_hashes` are explicit public inputs to the proof (not inside `tx_binding` to avoid circularity with output nonce derivation).
-  - Update mock proof checks to enforce the chosen binding.
-
-- [x] **Define Tx A posting format** (production-shaped, even if mocked):
-  - Define a "ciphertext posting" transaction format that is indexer-parsable:
-    - `masp_tx_sig`: reference to the MASP state transition tx (Tx B)
-    - `output_index`: which output in Tx B this ciphertext corresponds to
-    - `ciphertext_blob`: `ephemeral_key || encrypted_note_plaintext`
-  - Define how the wallet/indexer links Tx A ↔ Tx B:
-    - via `ct_hash` matches
-    - via optional hints (OOB notification includes both Tx A and Tx B signatures)
-
-- [x] **Update OOB communication structs for a two-tx world**:
-  - Extended `PaymentNotification` with `masp_tx_sig` and `ciphertext_tx_sig` fields.
-  - Updated `OobNotificationBuilder` helpers to construct notifications with both signatures.
-  - Updated mocks + tests accordingly (OOB first-payment and subsequent payments).
-
-- [x] **Update Indexer APIs to serve Tx A bytes for outputs**:
-  - Added `get_ciphertext_by_hash(ct_hash)` method to `Indexer` trait.
-  - Added `get_ciphertext_for_output(tx_sig, output_index)` method to `Indexer` trait.
-  - Mock implementations model the separation:
-    - Tx A contains ciphertext bytes (outputs-only)
-    - Tx B contains commitments + bound `ct_hashes` (no ciphertext bytes)
-
-- [x] **Update wallet receive/sync flow to enforce output binding**:
-  - When scanning outputs:
-    - compute `ct_hash` over fetched ciphertext bytes and verify it matches Tx B's bound `ct_hash`.
-    - only then attempt trial decryption and perform plaintext↔commitment checks.
-  - Added negative tests:
-    - wrong ciphertext bytes (hash mismatch) rejected
-    - missing ciphertext treated as DA failure
-
-- [x] **Update client build_transfer/build_shield to compute and include ct_hashes**:
-  - Refactored `shield` and `transfer_to` client methods to compute `ct_hash`/`ct_hashes` from encrypted outputs *before* generating the proof.
-  - This resolves the circular dependency issue where proof generation needed ct_hash but ct_hash needed the ciphertext.
-
-- [ ] **Add multi-tx submit flow hooks (optional accelerator)**:
-  - Add a client flow that can submit "Tx A(s) + Tx B" as a single operation.
-  - Treat Jito bundling as an optional UX improvement (never a consensus assumption).
-
-- [ ] **Prepare for on-chain POC** (Milestone 1):
-  - Add a program instruction for posting ciphertext bytes (Tx A), designed for ledger-history DA (not permanent storage).
-  - Add Tx B instruction fields for `ct_hashes` and verify proof binding.
-  - Document any Solana-specific constraints (tx size, account metas) in `README.md` once the format is frozen.
-
-#### Witness/Anchor Validity (Abstracted by Stores)
-
-- [ ] Document the intended end state for anchors/witnesses:
-  - who serves membership witnesses (indexer)
-  - what the chain validates (anchor ring buffer)
-  - how Light Protocol proofs map into our `MembershipWitness` type
-
-#### Documentation Consistency
-
-- [ ] Reconcile docs with code for any “production-like” claims:
-  - `docs/encryption-comparison.md`
-  - `docs/payment-discovery-analysis.md`
-  - `knowledge.md` “Status/Recent Completions”
-  - ensure they match current decisions (e.g., whether C_out is in-scope right now)
-
-### 0.13.5 Protocol Soundness Review (Reference Implementation Audit)
-
-**Goal:** Create a single narrative doc that makes it easy to audit soundness/privacy end-to-end (client + chain + indexer + circuits).
-
-- [x] Create `docs/protocol-soundness.md` (soundness/privacy checklist + current gaps)
-- [x] MockChain: bind membership witness root to request anchor (transfer/unshield)
-- [x] MockSpendProver: enforce output nullifier nonce derivation for transfer outputs
-- [x] P0: Define and enforce **spend authorization** so a watch-only `FullViewingKey` cannot spend
-- [x] P1: Define `tx_binding_hash` inputs/layout and enforce it
-- [ ] P1: Model transparent boundary checks in mocks (optional for now; required for on-chain POC soundness)
-  - Shield: ensure `(token_address, amount)` deposit is enforced by the chain/program (mock currently does not model SPL transfers)
-  - Unshield: ensure `(token_address, amount, recipient)` withdrawal is enforced by the chain/program (mock currently does not model SPL transfers)
-- [x] P1: Client scanning re-verifies `H(note_plaintext)==commitment` before accepting a decrypted note (prevents griefing/unspendable notes)
+- [x] `docs/protocol-soundness.md` — normative protocol spec
+- [x] MockChain: bind membership witness root to anchor
+- [x] MockSpendProver: enforce output nullifier nonce derivation
+- [x] Spend authorization: `nsk` (secret) used for nullifiers, not `nk.x` (public)
+- [x] `tx_binding` layout enforced in mocks and circuits
+- [x] Client verifies `H(note_plaintext) == commitment` before accepting notes
+- [ ] Transparent boundary checks (SPL transfers) — deferred to Milestone 1 on-chain
 
 ---
 
-## Milestone 0.14: Real Prover Backend Bringup (Local) — Mocks Everywhere Else
+## Milestone 0.14: Real Prover Backend Bringup (Local) ⬅️ CURRENT
 
 **Goal:** Run the existing user flows with **real proofs**, while keeping chain/indexer mocked.
 
-**Why now:** This validates the end-to-end ZK plumbing (inputs ↔ circuit ↔ proof bytes ↔ verifier) before we add Solana complexity.
+**Why now:** Circuits are implemented. This validates end-to-end ZK plumbing before adding Solana complexity.
 
-### 0.14.1 Toolchain & Version Hygiene (Critical)
+**Current state:**
+- ✅ `CliUltraPlonkProver` implemented (shells out to `nargo` + `bb`)
+- ✅ `NoirRsUltraPlonkVerifier` implemented (`ultraplonk-core`)
+- ✅ Transfer pipeline test exists (`client/tests/masp_ultraplonk_pipeline.rs`)
+- ✅ Transfer E2E test exists (`client/tests/real_ultraplonk_transfer_e2e.rs`)
+- ⚠️ Shield/Unshield pipeline tests missing
+- ⚠️ Toolchain versions not pinned in docs
 
-⚠️ UltraPlonk and Groth16 paths may require different Noir/bb versions.
+### 0.14.1 Complete Pipeline Coverage (P0)
 
-- [ ] Pin toolchain versions (Noir + bb) per proof system and document them
-- [ ] Add scripts/docs to switch toolchains safely (avoid local version drift)
-- [ ] Update README with “newcomer path” to run proofs locally
+- [x] Transfer circuit: compile → prove → verify (pipeline test)
+- [ ] **Shield circuit: add pipeline test** (same pattern as transfer)
+- [ ] **Unshield circuit: add pipeline test** (same pattern as transfer)
+- [ ] Add negative tests: wrong public inputs should fail verification
 
-### 0.14.2 Integrate ONE Proof System First
+### 0.14.2 Toolchain & Version Hygiene
 
-Pick the easiest first (likely UltraPlonk):
+- [ ] Pin toolchain versions (Noir v1.0.0-beta.3 + bb 0.82.2) in README
+- [ ] Add `scripts/install-toolchain.sh` or document installation
+- [ ] Update README with "newcomer path" to run proofs locally
 
-- [ ] Implement `UltraPlonkProver` using `../solana-ultraplonk-verifier/` (local proving)
-- [ ] Implement matching local verifier and wire into `ProofVerifier::verify_local`
-- [ ] Add tests that run via our `SpendProver` / `ProofVerifier` abstraction (no Solana yet)
-- [ ] Review and adopt best build/test patterns from:
-  - `../solana-ultraplonk-verifier/WORKFLOW.md`
-  - `../mobile-solana-e2e/solana-groth16-verifier/` scripts
-  - Goal: newcomers can run “prove → verify” with 1–2 commands
-- [ ] Document and prototype **programmatic witness generation** (mobile requirement):
-  - Inputs encoded via Noir ABI (no `Prover.toml` in production)
-  - ACVM execution to solve witness in-memory
-  - Prover backend produces proof bytes (UltraPlonk/Groth16)
-  - Reference: `../mobile-solana-e2e/src/noir.rs`
+### 0.14.3 Fix Doc Drift (P1)
 
-### 0.14.3 Add Groth16 as Second Backend (After UltraPlonk Works)
+- [ ] Update `docs/circuit-security-requirements.md` to match N→M transfer model
+- [ ] Update `docs/implementation-status.md` — spend-auth is implemented, not placeholder
+- [ ] Document that shield `prove_asset_id_binding()` is no-op (chain computes asset_id)
 
-- [ ] Implement `Groth16Prover` using `../mobile-solana-e2e/solana-groth16-verifier/` (local proving)
-- [ ] Implement matching local verifier and wire into `ProofVerifier::verify_local`
-- [ ] Ensure public inputs layout is consistent across backends (document differences)
+### 0.14.4 Groth16 Backend (Alternative Path)
 
-### 0.14.4 Acceptance Criteria
+**References:**
+- `../noir-main/` — Noir fork with Groth16 support
+- `../acvm-backend-groth16/` — ACVM backend for Groth16 proving
+- `../mobile-solana-e2e/solana-groth16-verifier/` — Solana on-chain Groth16 verifier
 
-- [ ] `cargo test` passes with `MASP_PROOF_SYSTEM=ultraplonk` using **real proofs**
-- [ ] User flow tests pass with proofs real and everything else mocked
+**Tasks:**
+- [ ] Study `../acvm-backend-groth16/` integration pattern
+- [ ] Implement `Groth16Prover` for MASP circuits
+- [ ] Ensure public inputs layout is consistent with UltraPlonk
+- [ ] Benchmark: Groth16 proof size (~192B) vs UltraPlonk (~2KB)
+
+### 0.14.5 Acceptance Criteria
+
+- [ ] All 3 circuits have pipeline tests (compile → prove → verify)
+- [ ] `cargo test --features ultraplonk-verifier` passes with real proofs
+- [ ] Docs match implementation
+
+---
+
+## Decision: Full Solana Integration First ✅
+
+**Chosen path:** Complete doc hygiene (0.14.3) → Solana program with UltraPlonk (Milestone 1)
+
+**Rationale:** Validates the full on-chain protocol E2E before optimizing proof system. Groth16 can be added later if CU/size becomes a blocker.
 
 ---
 
@@ -493,100 +372,95 @@ backend-light = []    # Light Protocol (production)
 
 ## Milestone 1: Minimal On-chain POC (No Light)
 
-**Goal:** First Solana program that verifies something E2E.
+**Goal:** First Solana program that verifies proofs E2E.
 
-⚠️ **Before implementing circuits, read `docs/circuit-security-requirements.md`!**
+**Depends on:** Milestone 0.14 (real prover testing)
 
-### 1.0 Circuit Scaffolding & Auditability (Noir)
+### 1.0 Circuits ✅ COMPLETE
 
-**Goal:** Get a full end-to-end path compiling/proving/verifying with “noop” constraints first, then implement each required statement incrementally with targeted tests.
+All circuit constraints are implemented and tested with mock proofs.
 
-- [ ] Organize circuits so each security statement is a named function/module
-- [ ] `main.nr` for each circuit should clearly call each statement-check function (audit trail)
-- [ ] Stage 0 (noop): compile + prove + verify end-to-end with placeholder constraints
-- [ ] Stage 1+: implement statement checks one-by-one with unit tests + E2E tests
-  - [x] Stage-0 entrypoints refactored into explicit statement-check functions (transfer/unshield/shield)
-  - [x] Added protocol-level docs for responsibility split (circuit vs chain vs client/indexer)
+- [x] Shield: commitment integrity, amount range (u64), ct_hash binding
+- [x] Transfer: membership, nullifier (nsk), spend auth (EC), balance, output nonces, ct_hashes
+- [x] Unshield: transfer checks + public withdrawal binding (recipient limbs)
+- [x] Circuits organized with named statement-check functions (audit trail)
+- [x] Protocol-level docs for responsibility split (circuit vs chain vs client/indexer)
 
 ### 1.1 Program State
 
-- [ ] Commitment Merkle tree
-- [ ] Root stored in PDA
+- [ ] Commitment Merkle tree (program-owned accumulator)
+- [ ] Anchor history ring buffer (recent roots)
 - [ ] Nullifier PDAs (one per spent nullifier)
+- [ ] Pool token accounts (for SPL transfers)
 
-### 1.2 Shield Circuit (Noir)
+### 1.2 Program Instructions
 
-- [ ] Stage 0 (noop): define inputs + generate VK + local prove/verify
-- [ ] Implement: commitment integrity (recompute cm from note fields)
-- [ ] Implement: amount range check (u64)
-- [ ] Tests: per-statement + E2E
+- [ ] `initialize` - Create tree state + pool accounts
+- [ ] `shield` - Verify proof, transfer SPL in, append commitment
+- [ ] `transfer` - Verify proof, check nullifier, append commitment(s)
+- [ ] `unshield` - Verify proof, check nullifier, transfer SPL out
 
-### 1.3 Transfer Circuit (Noir)
+### 1.3 Proof Verification Integration
 
-- [ ] Stage 0 (noop): define inputs + generate VK + local prove/verify
-- [ ] Implement: membership proof against anchor
-- [ ] Implement: nullifier correctness (nk, nullifier_nonce)
-- [ ] Implement: balance conservation (single-asset first; multi-asset later in Milestone 5 with a hard-sound construction)
-- [ ] Tests: per-statement + E2E
+- [ ] Integrate `ultraplonk-core` verifier into program
+- [ ] Profile CU usage per circuit
+- [ ] Handle VK loading (embedded vs account-based)
 
-### 1.4 Unshield Circuit (Noir)
+### 1.4 Client Updates
 
-- [ ] Stage 0 (noop): define inputs + generate VK + local prove/verify
-- [ ] Implement: membership proof against anchor
-- [ ] Implement: nullifier correctness
-- [ ] Implement: public amount/recipient match expected
-- [ ] Tests: per-statement + E2E
+- [ ] Build real Solana transactions (not mock)
+- [ ] Submit to Surfpool/devnet
+- [ ] Handle transaction confirmation + indexing
 
-### 1.5 Program Instructions
-
-- [ ] `initialize` - Create tree state account
-- [ ] `shield` - Verify proof, append commitment
-- [ ] `transfer` - Verify proof, check nullifier, append commitment
-- [ ] `unshield` - Verify proof, check nullifier, release funds
-
-### 1.6 Client
-
-- [ ] Build shield transaction
-- [ ] Build transfer transaction
-- [ ] Build unshield transaction
-- [ ] Note management (create, store, scan)
-
-### 1.7 E2E Test
+### 1.5 E2E Test
 
 - [ ] Deploy to Surfpool
-- [ ] Shield → Transfer → Unshield flow
-- [ ] Verify double-spend rejected
-- [ ] Add/extend scripts so iteration is easy as circuits change:
-  - build circuit + regenerate artifacts + build program
-  - deploy program to Surfpool
-  - run user flows against Surfpool
-  - document the full newcomer workflow in `README.md`
+- [ ] Shield → Transfer → Unshield flow with real proofs
+- [ ] Verify double-spend rejected (nullifier uniqueness)
+- [ ] Document newcomer workflow in `README.md`
 
 ---
 
-## Milestone 2: Production UltraPlonk Verification
+## Milestone 2: Production Hardening
 
-**Goal:** Reliable proof verification within CU/tx limits.
+**Goal:** Production-ready verification and frozen formats.
+
+### 2.1 Performance
 
 - [ ] Profile CU usage for each circuit
 - [ ] Add phased verification if needed (multi-TX)
-- [ ] Freeze domain separation tags
-- [ ] Freeze note format
-- [ ] CI tests for verification
+- [ ] Optimize proof size / public input encoding
+
+### 2.2 Freeze Protocol Formats
+
+- [x] Domain separation tags (frozen in `client/src/domain.rs`)
+- [x] Note format (frozen in `docs/protocol-soundness.md`)
+- [ ] Ciphertext blob format (freeze before production)
+- [ ] Transaction calldata layout (freeze before production)
+
+### 2.3 Context Binding (P2)
+
+- [ ] Add `chain_id` / `program_id` to `tx_binding` to prevent cross-environment replay
+- [ ] Document migration path for existing proofs
+
+### 2.4 CI/CD
+
+- [ ] CI tests for proof verification
+- [ ] Automated circuit compilation + VK generation
 
 ---
 
-## Milestone 3: Privacy-Preserving Commitment Tree (No Light CPI)
+## Milestone 3: On-chain Commitment Tree ✅ DESIGN COMPLETE
 
-**Goal:** Commitment set storage that does **not** require referencing input commitments on-chain when spending (prevents linkability trails from shield → transfer/unshield).
+**Goal:** Privacy-preserving commitment storage (no linkability trails).
 
-- [ ] Update protocol spec + interfaces: spends should reveal **nullifiers + anchor**, not the input commitment object
-- [ ] Commitments stored in an on-chain **append-only Merkle accumulator** (program-owned state)
-- [ ] Program maintains an **anchor history ring buffer** (recent roots)
-- [ ] Indexer serves Merkle path witnesses (off-chain)
-- [ ] Spend circuit verifies Merkle path membership against a public `anchor`
-- [ ] Chain enforces `anchor` is a valid recent root
-- [ ] Update mocks (chain/indexer/circuits) to match this model (no Light validity proofs for commitments)
+**Status:** Design and circuits are complete. Implementation is part of Milestone 1.
+
+- [x] Spends reveal **nullifiers + anchor**, not input commitment references
+- [x] Commitment set is an append-only Merkle accumulator (not Light/content-addressed)
+- [x] Circuits verify Merkle path membership against public `anchor`
+- [x] `docs/protocol-soundness.md` documents the model
+- [ ] **On-chain implementation** — moved to Milestone 1.1 (program state)
 
 ---
 
@@ -613,15 +487,18 @@ backend-light = []    # Light Protocol (production)
 
 ---
 
-## Milestone 5: Multi-Asset (Hard-Sound Construction)
+## Milestone 5: Multi-Asset in Single Transfer
 
-**Goal:** Real MASP - multiple asset types.
+**Goal:** Allow multiple asset types within a single transfer (true MASP semantics).
 
-- [ ] Add asset_id to notes
-- [ ] Implement a hard-sound multi-asset value construction (e.g. value commitments) and corresponding circuit statements
-- [ ] Support multiple SPL mints at boundary
-- [ ] Asset type private inside pool
-- [ ] Decide whether `asset_id` should be `Poseidon(token_address)` (current plan) vs using token address directly; document tradeoffs and final decision
+**Current state:** Single-asset per transfer is enforced (hard-sound). Multi-asset deferred.
+
+- [x] `asset_id = Poseidon(token_address)` in notes
+- [x] Asset type is private inside pool
+- [x] Single-asset balance conservation enforced in circuits
+- [ ] Implement value commitments (Pedersen-style) for multi-asset-in-one-transfer
+- [ ] Update circuit constraints for multi-asset balance conservation
+- [ ] Support multiple SPL mints per transaction at boundary
 
 ---
 
@@ -848,6 +725,16 @@ Until this is implemented, users can:
 
 ---
 
+## Tech Debt / Cleanup (Low Priority)
+
+- [ ] **Reorganize circuit statements into directory structure**:
+  - Move `circuits/masp/common/src/statements.nr` → `circuits/masp/common/src/statements/`
+  - Each statement becomes its own file (e.g., `membership.nr`, `nullifier.nr`, `spend_auth.nr`)
+  - Co-locate tests with each statement file (`#[test]` in same module)
+  - Update imports in `transfer/`, `unshield/`, `shield/` circuits
+
+---
+
 ## Design Documents
 
 - **[Light Protocol Integration Analysis](docs/light-protocol-questions.md)** ⭐ Key findings: address CAN be set!
@@ -906,3 +793,4 @@ cd client && cargo test --test e2e_tests -- --nocapture
 - **Surfpool** is started manually (not via MCP)
 - **Update `knowledge.md`** when you learn something new
 - **Update this file** when completing tasks or discovering new ones
+
