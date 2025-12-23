@@ -206,16 +206,19 @@ mod tests {
 
     #[test]
     fn test_rpc_url_for_chain() {
-        // Default
+        // Mock (default) - no RPC URL
         std::env::remove_var("MASP_CHAIN");
-        assert_eq!(rpc_url_for_chain(), "http://127.0.0.1:8899");
+        assert_eq!(rpc_url_for_chain(), None);
 
         // Surfpool
         std::env::set_var("MASP_CHAIN", "surfpool");
-        assert_eq!(rpc_url_for_chain(), "http://127.0.0.1:8899");
+        assert_eq!(rpc_url_for_chain(), Some("http://127.0.0.1:8899".to_string()));
 
         // Custom URL
         std::env::set_var("MASP_CHAIN", "http://custom:1234");
-        assert_eq!(rpc_url_for_chain(), "http://custom:1234");
+        assert_eq!(rpc_url_for_chain(), Some("http://custom:1234".to_string()));
+
+        // Clean up
+        std::env::remove_var("MASP_CHAIN");
     }
 }
