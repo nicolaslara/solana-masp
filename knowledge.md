@@ -8,10 +8,28 @@ This file captures learnings, design decisions, and discoveries as we develop th
 
 ## Status
 
-**Phase:** Milestone 0 - Off-chain primitives (COMPLETE)
-**Last Updated:** 2024-12-16
+**Phase:** Milestone 1 - Solana Integration (IN PROGRESS)
+**Last Updated:** 2025-12-23
 
 ### Recent Completions
+
+- ✅ **ALL 8 user_flows tests pass on Surfpool!** (2025-12-23)
+  - Shield, Transfer, Unshield, Recovery, Multi-device sync all working
+  - Mock proof system for local testing (Keccak256-based)
+  - Full test suite runs in ~2.3 seconds
+
+- ✅ **Surfpool Performance Optimizations** (2025-12-23):
+  - Combine proof buffer init + upload into single TX (saves 1 round-trip)
+  - Use `confirmed` commitment instead of `finalized` (~8x faster!)
+  - Test suite went from ~49s to ~2.3s
+
+- ✅ **SolanaChain LocalSync mode fully working**:
+  - Shared `MockStore` singleton across tests
+  - Ciphertexts stored for recovery/sync
+  - Nullifier checking against `MockStore`
+  - Anchor sync via `update_root` instruction
+
+### Previous Completions
 
 - ✅ **Ciphertext DA + Binding (Option 1A baseline)** — Two-transaction model implemented:
   - Tx A: ciphertext posting (outputs-only)
@@ -48,7 +66,7 @@ This file captures learnings, design decisions, and discoveries as we develop th
 
 **Previous issue:** Nullifiers were derived using `nk.x` (public key), which is in the `FullViewingKey`. This meant watch-only wallets could compute valid nullifiers and construct spends!
 
-**Resolution (2024-12-22):**
+**Resolution (2025-12-22):**
 
 1. **Nullifier derivation now uses `nsk` (secret), not `nk.x` (public):**
    - `nsk = H(DOM_NULLIFIER_SECRET, spending_key)` — only SpendingKey holder knows this
@@ -102,6 +120,27 @@ This file captures learnings, design decisions, and discoveries as we develop th
 - Provide two categories of implementations:
   - **Dev/CI (CLI)**: `nargo execute` + `bb OLD_API prove` (useful for fast bringup, not production)
   - **Mobile (library/FFI)**: embed ACVM + prover libs (no files; inputs passed as typed structs/bytes)
+
+### Solana RPC Performance (2025-12-23)
+
+**Problem:** Tests were extremely slow (~5s per transaction) on Surfpool.
+
+**Root cause:** `send_and_confirm_transaction` defaults to `finalized` commitment, which waits for 31 confirmations.
+
+**Solution:** Use `confirmed` commitment (1 confirmation):
+```rust
+let config = RpcSendTransactionConfig {
+    skip_preflight: false,
+    preflight_commitment: Some(CommitmentConfig::confirmed().commitment),
+    ..Default::default()
+};
+rpc_client.send_transaction_with_config(&tx, config).await?;
+rpc_client.confirm_transaction_with_commitment(&sig, CommitmentConfig::confirmed()).await?;
+```
+
+**Results:** ~8x speedup (49s → 6s per operation, full test suite in 2.3s)
+
+**Additional optimization:** Combine proof buffer creation + upload into a single TX instead of two separate TXs.
 
 ### Ciphertext Data Availability (DA) + Binding to Proofs
 

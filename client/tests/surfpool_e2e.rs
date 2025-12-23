@@ -22,6 +22,7 @@
 
 use sha3::{Digest, Keccak256};
 use solana_client::rpc_client::RpcClient;
+use solana_commitment_config::CommitmentConfig;
 use solana_keypair::Keypair;
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},

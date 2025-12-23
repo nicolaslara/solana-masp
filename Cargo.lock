@@ -2040,6 +2040,7 @@ dependencies = [
  "serde_json",
  "sha3",
  "solana-client",
+ "solana-commitment-config",
  "solana-keypair",
  "solana-sdk",
  "taceo-poseidon2",

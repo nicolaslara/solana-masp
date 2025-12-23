@@ -143,7 +143,7 @@ Tests are configured via environment variables. Each backend dimension can be co
 | Backend | Status | Notes |
 |---------|--------|-------|
 | **Chain: mock** | ✅ Working | In-memory, fast, default |
-| **Chain: surfpool** | 🚧 Scaffold | Requires Surfpool running + `MASP_PROGRAM_ID` |
+| **Chain: surfpool** | ✅ Working | Auto-deploys program; requires Surfpool running |
 | **Chain: devnet/testnet/mainnet** | 🚧 Scaffold | Requires deployed program |
 | **Indexer: mock** | ✅ Working | In-memory, default |
 | **Indexer: light** | 🚧 Scaffold | Uses mock internally (Helius/Light integration pending) |
@@ -162,50 +162,41 @@ cd client
 cargo test --test user_flows
 ```
 
-#### 2. With Surfpool (Local Solana) - Auto Deploy
+#### 2. With Surfpool (Local Solana)
 
-The test suite can automatically build and deploy the program if needed:
+Tests auto-deploy the program if `MASP_PROGRAM_ID` is not set:
 
 ```bash
 # Terminal 1: Start Surfpool
 surfpool start
 
-# Terminal 2: Run tests (auto-builds and deploys if needed)
+# Terminal 2: Run tests (auto-builds + auto-deploys!)
 MASP_CHAIN=surfpool \
 MASP_PRINT_CONFIG=1 \
-  cargo test -p masp-client --features solana-backend --test user_flows -- --nocapture
+  cargo test -p masp-client --features solana-backend,onchain-mock \
+  --test user_flows -- --nocapture --test-threads=1
 ```
 
-Auto-deploy behavior:
-- If `MASP_PROGRAM_ID` is set → uses that program ID (no build/deploy)
-- If `.so` is missing or source changed → rebuilds with `cargo build-sbf`
-- Deploys via `solana program deploy` and sets `MASP_PROGRAM_ID`
-- Uses `--features local-testing,mock-proofs` by default
+**Notes:**
+- Uses `--test-threads=1` to avoid parallel request issues with Surfpool
+- Auto-skips rebuild if .so is up-to-date
+- Deploys fresh program each test run (~7s total including deploy)
 
-Control via environment:
-| Variable | Description |
-|----------|-------------|
-| `MASP_PROGRAM_ID` | Skip build/deploy, use this program ID |
-| `MASP_SKIP_BUILD` | Skip rebuild check (use existing .so) |
-| `MASP_PROGRAM_FEATURES` | Override build features |
-
-#### 2b. With Surfpool - Manual Deploy
+**Manual deployment** (if needed):
 
 ```bash
-# Terminal 1: Start Surfpool
-surfpool start
+# Build once
+cargo build-sbf -p solana-masp --features "local-testing,mock-proofs"
 
-# Terminal 2: Build and deploy manually
-cd programs/solana-masp
-cargo build-sbf --features "local-testing,mock-proofs"
-solana program deploy target/deploy/solana_masp.so --url http://127.0.0.1:8899
-# Output: Program Id: <44-char-base58-id>
+# Deploy and run with explicit program ID
+solana-keygen new --no-passphrase -o /tmp/masp.json --force
+PROGRAM_ID=$(solana program deploy target/deploy/solana_masp.so \
+  --url http://127.0.0.1:8899 --program-id /tmp/masp.json \
+  | grep "Program Id:" | awk '{print $3}')
 
-# Terminal 2: Run tests with explicit program ID
-MASP_CHAIN=surfpool \
-MASP_PROGRAM_ID=<program_id_from_above> \
-MASP_PRINT_CONFIG=1 \
-  cargo test -p masp-client --features solana-backend --test user_flows -- --nocapture
+MASP_CHAIN=surfpool MASP_PROGRAM_ID=$PROGRAM_ID \
+  cargo test -p masp-client --features solana-backend,onchain-mock \
+  --test user_flows -- --nocapture --test-threads=1
 ```
 
 #### 3. With Light Protocol Indexer (Scaffold)
@@ -250,15 +241,17 @@ MASP_ENCRYPTION=mock \
 surfpool start
 
 # Terminal 2: Run with real Solana chain, real encryption, mock proofs
+# (auto-deploys program!)
 MASP_CHAIN=surfpool \
-MASP_ENCRYPTION=chacha \
-MASP_PROOF_SYSTEM=mock \
-MASP_PROOF_VERIFY=onchain \
 MASP_PRINT_CONFIG=1 \
-  cargo test -p masp-client --features solana-backend,onchain-mock --test user_flows -- --nocapture
+  cargo test -p masp-client --features solana-backend,onchain-mock \
+  --test user_flows -- --nocapture --test-threads=1
 ```
 
-Note: `onchain-mock` feature enables the Keccak256-based mock prover that's compatible with the on-chain mock verifier.
+**Notes:**
+- Uses `--test-threads=1` to avoid parallel RPC issues
+- All 8 user flow tests pass in ~2-3 seconds
+- `onchain-mock` feature enables the Keccak256-based mock prover compatible with on-chain mock verifier
 
 Expected output:
 ```

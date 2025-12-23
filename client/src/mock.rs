@@ -307,6 +307,12 @@ impl MockStore {
         inner.get_node(inner.depth, 0)
     }
 
+    /// Get current leaf count
+    pub fn leaf_count(&self) -> u64 {
+        let inner = self.inner.read().unwrap();
+        inner.leaf_count
+    }
+
     /// Get leaf index for commitment
     pub fn get_leaf_index(&self, commitment: Commitment) -> Option<u64> {
         let inner = self.inner.read().unwrap();

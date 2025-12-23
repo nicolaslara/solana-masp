@@ -79,52 +79,15 @@ use test_env::TestEnv;
 mod program_deploy;
 
 // ============================================================================
-// Test Suite Setup
+// Test Setup
 // ============================================================================
 
-/// One-time setup for the test suite.
-///
-/// Ensures any required infrastructure (e.g., program deployment) is ready
-/// before tests run. Uses `OnceLock` so parallel tests all wait for setup to
-/// complete before proceeding.
-mod setup {
-    use super::*;
-    use std::sync::OnceLock;
-
-    /// Stores the setup result (Ok or error message)
-    static INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
-
-    /// Ensure test infrastructure is ready.
-    ///
-    /// Call this at the start of each test. Only the first call does work;
-    /// other tests block until setup completes, then proceed.
-    pub fn ensure_ready() {
-        let result = INIT_RESULT.get_or_init(do_setup);
-
-        if let Err(e) = result {
-            panic!("Test setup failed: {}", e);
-        }
-    }
-
-    fn do_setup() -> Result<(), String> {
-        let config = masp_client::BackendConfig::from_env();
-
-        // Deploy program if using a real Solana chain
-        if !matches!(config.chain, masp_client::ChainBackend::Mock) {
-            let rpc_url = program_deploy::rpc_url_for_chain(match &config.chain {
-                masp_client::ChainBackend::Surfpool => "surfpool",
-                masp_client::ChainBackend::Devnet => "devnet",
-                masp_client::ChainBackend::Testnet => "testnet",
-                masp_client::ChainBackend::Mainnet => "mainnet",
-                masp_client::ChainBackend::Custom(url) => url,
-                masp_client::ChainBackend::Mock => unreachable!(),
-            });
-
-            program_deploy::ensure_program_deployed(rpc_url)
-                .map_err(|e| format!("Program deployment failed: {}", e))?;
-        }
-
-        Ok(())
+/// Ensure program is deployed before tests run.
+/// Called at the start of each test - idempotent via OnceLock.
+fn setup() {
+    // Only relevant for Solana backends
+    if std::env::var("MASP_CHAIN").map_or(false, |c| c == "surfpool" || c.starts_with("http")) {
+        let _program_id = program_deploy::ensure_program_deployed();
     }
 }
 
@@ -150,7 +113,7 @@ mod tokens {
 /// User deposits tokens and has a spendable balance
 #[tokio::test]
 async fn flow_shield_deposit_tokens() {
-    setup::ensure_ready();
+    setup();
     let env = TestEnv::from_env();
     let mut alice = env.create_client(&[1u8; 32]);
 
@@ -178,7 +141,7 @@ async fn flow_shield_deposit_tokens() {
 /// User sends tokens to another user
 #[tokio::test]
 async fn flow_transfer_send_to_recipient() {
-    setup::ensure_ready();
+    setup();
     let env = TestEnv::from_env();
     let mut alice = env.create_client(&[1u8; 32]);
     let bob = env.create_client(&[2u8; 32]);
@@ -216,7 +179,7 @@ async fn flow_transfer_send_to_recipient() {
 /// User withdraws tokens from pool to public address
 #[tokio::test]
 async fn flow_unshield_withdraw() {
-    setup::ensure_ready();
+    setup();
     let env = TestEnv::from_env();
     let mut alice = env.create_client(&[1u8; 32]);
 
@@ -257,7 +220,7 @@ async fn flow_unshield_withdraw() {
 /// tags that Bob can discover without Alice's help.
 #[tokio::test]
 async fn flow_oob_first_payment() {
-    setup::ensure_ready();
+    setup();
     let env = TestEnv::from_env();
     let mut alice = env.create_client(&[1u8; 32]);
     let mut bob = env.create_client(&[2u8; 32]);
@@ -306,7 +269,7 @@ async fn flow_oob_first_payment() {
 /// User manages multiple token types
 #[tokio::test]
 async fn flow_multiasset_portfolio() {
-    setup::ensure_ready();
+    setup();
     let env = TestEnv::from_env();
     let mut alice = env.create_client(&[1u8; 32]);
 
@@ -351,9 +314,10 @@ async fn flow_multiasset_portfolio() {
 /// User loses wallet and recovers from seed
 #[tokio::test]
 async fn flow_recovery_from_seed() {
-    setup::ensure_ready();
+    setup();
     let env = TestEnv::from_env();
-    let alice_seed = [1u8; 32];
+    // Use unique seed to avoid conflicts with other tests sharing the MockStore
+    let alice_seed = [201u8; 32];
 
     let usdc = compute_asset_id(&tokens::usdc());
 
@@ -396,10 +360,11 @@ async fn flow_recovery_from_seed() {
 /// Recovered wallet can spend notes
 #[tokio::test]
 async fn flow_recovery_then_spend() {
-    setup::ensure_ready();
+    setup();
     let env = TestEnv::from_env();
-    let alice_seed = [1u8; 32];
-    let bob = env.create_client(&[2u8; 32]);
+    // Use unique seed to avoid conflicts with other tests sharing the MockStore
+    let alice_seed = [101u8; 32];
+    let bob = env.create_client(&[102u8; 32]);
 
     let usdc = compute_asset_id(&tokens::usdc());
 
@@ -451,9 +416,10 @@ async fn flow_recovery_then_spend() {
 /// - Conflict resolution for concurrent spends
 #[tokio::test]
 async fn flow_multidevice_sync() {
-    setup::ensure_ready();
+    setup();
     let env = TestEnv::from_env();
-    let alice_seed = [1u8; 32];
+    // Use unique seed to avoid conflicts with other tests sharing the MockStore
+    let alice_seed = [151u8; 32];
 
     let usdc = compute_asset_id(&tokens::usdc());
 
@@ -473,7 +439,7 @@ async fn flow_multidevice_sync() {
     assert_eq!(mobile.balance(usdc), 100);
 
     // Mobile spends some funds (creates change note)
-    let bob = env.create_client(&[2u8; 32]);
+    let bob = env.create_client(&[152u8; 32]);
     let bob_addr = bob.full_viewing_key().diversified_address(0);
     mobile
         .transfer_to(&env.encryption, &bob_addr, 60, usdc)
