@@ -15,7 +15,7 @@
 //! │  Indexer               │   │  Chain                        │
 //! │  (witness + scan)      │   │  (submit transactions)        │
 //! │                        │   │                               │
-//! │  Mock: MockNoteStore   │   │  Mock: MockChain              │
+//! │  Mock: MockStore   │   │  Mock: MockChain              │
 //! │  Prod: Helius RPC      │   │  Prod: Solana + Light Proto   │
 //! └────────────────────────┘   └──────────────────────────────┘
 //! ```

@@ -29,7 +29,7 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 
 **Chain/Indexer Synchronization (see `knowledge.md`):**
 
-- **Mode A (Local)**: Chain holds `Arc<MockNoteStore>`, updates it after TX success. Tests use this.
+- **Mode A (Local)**: Chain holds `Arc<MockStore>`, updates it after TX success. Tests use this.
 - **Mode B (External)**: Chain doesn't hold store; Helius/Light observes ledger independently.
 
 **Circuits (all implemented):**

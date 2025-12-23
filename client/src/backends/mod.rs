@@ -7,7 +7,7 @@
 //! - `SolanaChain` - Real Solana blockchain (Surfpool, testnet, mainnet)
 //!
 //! ## Indexers
-//! - `MockNoteStore` - In-memory mock for testing
+//! - `MockStore` - In-memory mock for testing
 //! - `LightIndexer` - Helius RPC with Light Protocol support
 //!
 //! ## Encryption
@@ -63,7 +63,7 @@ pub use config::{BackendConfig, ChainBackend, EncryptionBackend, IndexerBackend}
 pub use light::LightIndexer;
 
 #[cfg(feature = "solana-backend")]
-pub use solana::SolanaChain;
+pub use solana::{IndexerMode, SolanaChain};
 
 #[cfg(feature = "ultraplonk-verifier")]
 pub use ultraplonk_verifier::NoirRsUltraPlonkVerifier;

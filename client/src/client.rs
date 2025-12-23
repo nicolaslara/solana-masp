@@ -1124,18 +1124,18 @@ impl TransferData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mock::{MockChain, MockNoteStore};
+    use crate::mock::{MockChain, MockStore};
     use std::sync::Arc;
 
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
     fn setup() -> (
-        MaspClient<MockNoteStore, MockChain>,
-        Arc<MockNoteStore>,
+        MaspClient<MockStore, MockChain>,
+        Arc<MockStore>,
         Arc<MockChain>,
     ) {
-        let acc = Arc::new(MockNoteStore::new(8));
+        let acc = Arc::new(MockStore::new(8));
         let chain = Arc::new(MockChain::new(acc.clone(), 10));
         let sk = SpendingKey::from_bytes(&[42u8; 32]);
         let client = MaspClient::new(
@@ -1157,12 +1157,12 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(12345);
         let note1 = Note::new(&mut rng, asset_id, 100, recipient, 0);
         let cm1 = note1.commitment();
-        acc.insert(cm1, "tx_1");
+        acc.insert_note_commitment(cm1, "tx_1");
         client.add_note(note1, "tx_1".to_string());
 
         let note2 = Note::new(&mut rng, asset_id, 50, recipient, 0);
         let cm2 = note2.commitment();
-        acc.insert(cm2, "tx_2");
+        acc.insert_note_commitment(cm2, "tx_2");
         client.add_note(note2, "tx_2".to_string());
 
         assert_eq!(client.balance(asset_id), 150);
@@ -1181,7 +1181,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(12345);
         let note = Note::new(&mut rng, asset_id, 100, recipient, 0);
         let cm = note.commitment();
-        acc.insert(cm, "tx_1");
+        acc.insert_note_commitment(cm, "tx_1");
         client.add_note(note, "tx_1".to_string());
 
         let (owned, witness, nullifier) = client.prepare_spend(cm).await.unwrap();
@@ -1201,7 +1201,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(12345);
         let note = Note::new(&mut rng, asset_id, 100, recipient, 0);
         let cm = note.commitment();
-        acc.insert(cm, "tx_1");
+        acc.insert_note_commitment(cm, "tx_1");
         client.add_note(note, "tx_1".to_string());
 
         let other_recipient = client.fvk.diversified_address(1);

@@ -5,17 +5,17 @@
 //!
 //! ## Chain/Indexer Synchronization
 //!
-//! In test mode, the chain and indexer share the same `Arc<MockNoteStore>`.
+//! In test mode, the chain and indexer share the same `Arc<MockStore>`.
 //! When the chain processes transactions (shield, transfer, unshield), it
 //! updates the shared store directly. The indexer reads from the same store,
 //! so changes are visible immediately without external synchronization.
 //!
-//! This is "Mode A: Local Indexer" from `knowledge.md`. See
+//! This is "LocalSync" mode from `knowledge.md`. See
 //! `client/src/backends/solana.rs` for the full architecture documentation.
 //!
 //! ```text
-//! let shared_store = Arc::new(MockNoteStore::new(MERKLE_DEPTH));
-//! let chain = SolanaChain::surfpool(shared_store.clone(), ...);
+//! let shared_store = Arc::new(MockStore::new(MERKLE_DEPTH));
+//! let chain = SolanaChain::surfpool(IndexerMode::LocalSync(shared_store.clone()))?;
 //! let indexer: Arc<dyn Indexer> = shared_store; // Same Arc!
 //! ```
 //!
@@ -28,8 +28,10 @@
 //! - `MASP_PRINT_CONFIG=1` to print selection
 
 use masp_client::backends::proof_system::{Groth16ProverScaffold, Groth16VerifierScaffold};
-use masp_client::backends::{LightIndexer, SolanaChain};
-use masp_client::mock::{MockChain, MockChainOptions, MockNoteStore};
+use masp_client::backends::LightIndexer;
+#[cfg(feature = "solana-backend")]
+use masp_client::backends::{IndexerMode, SolanaChain};
+use masp_client::mock::{MockChain, MockChainOptions, MockStore};
 use masp_client::proofs::{MockProofVerifier, MockSpendProver};
 use masp_client::{
     BackendConfig, ChaChaPolyEncryption, Chain, ChainBackend, EncryptionBackend, Indexer,
@@ -70,7 +72,7 @@ impl TestEnv {
 
         // ARCHITECTURE: Shared store for "Mode A: Local Indexer" synchronization.
         //
-        // The chain and indexer share the same Arc<MockNoteStore>. When the chain
+        // The chain and indexer share the same Arc<MockStore>. When the chain
         // processes transactions (shield, transfer, unshield), it updates the store
         // directly. The indexer reads from the same store, so changes are visible
         // immediately without external synchronization.
@@ -80,7 +82,7 @@ impl TestEnv {
         //
         // See: knowledge.md "Architecture Decision: Chain/Indexer Synchronization"
         // See: client/src/backends/solana.rs for full architecture docs
-        let shared_store = Arc::new(MockNoteStore::new(masp_client::MERKLE_DEPTH));
+        let shared_store = Arc::new(MockStore::new(masp_client::MERKLE_DEPTH));
 
         fn ultraplonk_prover() -> Arc<dyn SpendProver> {
             // Use CLI-based prover that shells out to nargo + bb.
@@ -132,32 +134,52 @@ Compile tests with: `cargo test --features ultraplonk-verifier ...`"
                     verify_mode: config.proof_verify.clone(),
                 },
             )),
-            ChainBackend::Surfpool => Arc::new(SolanaChain::surfpool(
-                shared_store.clone(),
-                verifier.clone(),
-                config.proof_verify.clone(),
-            )),
-            ChainBackend::Devnet => Arc::new(SolanaChain::devnet(
-                shared_store.clone(),
-                verifier.clone(),
-                config.proof_verify.clone(),
-            )),
-            ChainBackend::Testnet => Arc::new(SolanaChain::testnet(
-                shared_store.clone(),
-                verifier.clone(),
-                config.proof_verify.clone(),
-            )),
-            ChainBackend::Mainnet => Arc::new(SolanaChain::mainnet(
-                shared_store.clone(),
-                verifier.clone(),
-                config.proof_verify.clone(),
-            )),
-            ChainBackend::Custom(url) => Arc::new(SolanaChain::new(
-                url,
-                shared_store.clone(),
-                verifier.clone(),
-                config.proof_verify.clone(),
-            )),
+            #[cfg(feature = "solana-backend")]
+            ChainBackend::Surfpool => Arc::new(
+                SolanaChain::surfpool(IndexerMode::LocalSync(shared_store.clone()))
+                    .expect("Failed to create Surfpool SolanaChain - is MASP_PROGRAM_ID set?"),
+            ),
+            #[cfg(feature = "solana-backend")]
+            ChainBackend::Devnet => Arc::new(
+                SolanaChain::devnet(IndexerMode::LocalSync(shared_store.clone()))
+                    .expect("Failed to create Devnet SolanaChain"),
+            ),
+            #[cfg(feature = "solana-backend")]
+            ChainBackend::Testnet => Arc::new(
+                SolanaChain::testnet(IndexerMode::LocalSync(shared_store.clone()))
+                    .expect("Failed to create Testnet SolanaChain"),
+            ),
+            #[cfg(feature = "solana-backend")]
+            ChainBackend::Mainnet => {
+                Arc::new(SolanaChain::mainnet().expect("Failed to create Mainnet SolanaChain"))
+            }
+            #[cfg(feature = "solana-backend")]
+            ChainBackend::Custom(url) => Arc::new(
+                SolanaChain::new(url, IndexerMode::LocalSync(shared_store.clone()))
+                    .expect("Failed to create custom SolanaChain"),
+            ),
+            #[cfg(not(feature = "solana-backend"))]
+            _ => {
+                eprintln!(
+                    "⚠️  MASP_CHAIN={} requires `solana-backend` feature. Using MockChain.",
+                    match &config.chain {
+                        ChainBackend::Mock => "mock",
+                        ChainBackend::Surfpool => "surfpool",
+                        ChainBackend::Devnet => "devnet",
+                        ChainBackend::Testnet => "testnet",
+                        ChainBackend::Mainnet => "mainnet",
+                        ChainBackend::Custom(url) => url,
+                    }
+                );
+                Arc::new(MockChain::new_with_options(
+                    shared_store.clone(),
+                    100,
+                    MockChainOptions {
+                        verifier: verifier.clone(),
+                        verify_mode: config.proof_verify.clone(),
+                    },
+                ))
+            }
         };
 
         // Encryption selection (pluggable, concrete enum)

@@ -4,7 +4,7 @@
 //!
 //! ## Status: SCAFFOLD
 //!
-//! Currently uses MockNoteStore internally to verify the plugging works.
+//! Currently uses MockStore internally to verify the plugging works.
 //! Will be replaced with real Helius/Light Protocol client.
 //!
 //! ## Future Implementation
@@ -31,7 +31,7 @@
 //!
 //! See: https://www.helius.dev/docs/api-reference/zk-compression/
 
-use crate::mock::MockNoteStore;
+use crate::mock::MockStore;
 use crate::proofs::MembershipWitness;
 use crate::traits::{Indexer, IndexerError, NoteCommitmentStore, OutputCiphertext, StoreError};
 use crate::types::{Anchor, Commitment};
@@ -42,12 +42,12 @@ use std::sync::Arc;
 ///
 /// ## Current Status: SCAFFOLD
 ///
-/// Uses MockNoteStore internally. Will be replaced with Helius client.
+/// Uses MockStore internally. Will be replaced with Helius client.
 pub struct LightIndexer {
     /// Helius API key (for future use)
     _api_key: Option<String>,
     /// Internal mock (temporary - will be replaced with real client)
-    inner: Arc<MockNoteStore>,
+    inner: Arc<MockStore>,
 }
 
 impl LightIndexer {
@@ -55,14 +55,14 @@ impl LightIndexer {
     ///
     /// This is the recommended constructor for tests so the chain and indexer
     /// share the same underlying state (scaffold mode).
-    pub fn with_mock_store(inner: Arc<MockNoteStore>, api_key: Option<&str>) -> Self {
+    pub fn with_mock_store(inner: Arc<MockStore>, api_key: Option<&str>) -> Self {
         println!("📡 LightIndexer: Initializing (scaffold mode)");
         if let Some(key) = api_key {
             println!("   API Key: {}...", &key[..8.min(key.len())]);
         } else {
             println!("   API Key: not configured");
         }
-        println!("   ⚠️  Using MockNoteStore internally until real implementation");
+        println!("   ⚠️  Using MockStore internally until real implementation");
 
         Self {
             _api_key: api_key.map(String::from),
@@ -71,7 +71,7 @@ impl LightIndexer {
     }
 
     /// Create with default Helius configuration
-    pub fn helius_with_mock_store(inner: Arc<MockNoteStore>) -> Self {
+    pub fn helius_with_mock_store(inner: Arc<MockStore>) -> Self {
         let api_key = std::env::var("HELIUS_API_KEY").ok();
         Self::with_mock_store(inner, api_key.as_deref())
     }
@@ -79,7 +79,7 @@ impl LightIndexer {
     /// Backwards-compatible constructor (creates its own internal mock store).
     /// Prefer `helius_with_mock_store` in tests.
     pub fn helius() -> Self {
-        Self::helius_with_mock_store(Arc::new(MockNoteStore::new(crate::MERKLE_DEPTH)))
+        Self::helius_with_mock_store(Arc::new(MockStore::new(crate::MERKLE_DEPTH)))
     }
 }
 
@@ -108,6 +108,18 @@ impl NoteCommitmentStore for LightIndexer {
         // Scaffold: delegate to mock
         // Future: Batch into single validity proof via Helius
         self.inner.get_witnesses(commitments).await
+    }
+
+    async fn is_valid_anchor(&self, anchor: &Anchor) -> Result<bool, StoreError> {
+        // Scaffold: delegate to mock
+        // Future: Query Light Protocol compressed account
+        self.inner.is_valid_anchor(anchor).await
+    }
+
+    async fn insert_commitment(&self, commitment: Commitment) -> Result<Anchor, StoreError> {
+        // Scaffold: delegate to mock
+        // Future: This would be done via Light Protocol CPI, not direct insert
+        self.inner.insert_commitment(commitment).await
     }
 }
 

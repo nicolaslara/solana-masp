@@ -128,6 +128,17 @@ pub trait NoteCommitmentStore: Send + Sync {
         }
         Ok(witnesses)
     }
+
+    /// Check if an anchor is valid (in recent history)
+    ///
+    /// This is crucial for preventing replay attacks - a transaction must
+    /// reference a recent tree root to be valid.
+    async fn is_valid_anchor(&self, anchor: &Anchor) -> Result<bool, StoreError>;
+
+    /// Insert a commitment into the store
+    ///
+    /// Returns the new anchor after insertion.
+    async fn insert_commitment(&self, commitment: Commitment) -> Result<Anchor, StoreError>;
 }
 
 // ============================================================================
@@ -161,6 +172,12 @@ pub enum NullifierError {
 pub trait NullifierSet: Send + Sync {
     /// Check if a nullifier has been spent
     async fn is_spent(&self, nullifier: &Nullifier) -> Result<bool, NullifierError>;
+
+    /// Mark a nullifier as spent (insert into set)
+    ///
+    /// Returns error if already spent (double-spend attempt).
+    /// Note: Different from `Chain::insert_nullifier` which submits a transaction.
+    async fn mark_spent(&self, nullifier: Nullifier) -> Result<(), NullifierError>;
 }
 
 // ============================================================================
@@ -1094,12 +1111,24 @@ impl<T: NoteCommitmentStore + ?Sized> NoteCommitmentStore for Arc<T> {
     ) -> Result<Vec<MembershipWitness>, StoreError> {
         (**self).get_witnesses(commitments).await
     }
+
+    async fn is_valid_anchor(&self, anchor: &Anchor) -> Result<bool, StoreError> {
+        (**self).is_valid_anchor(anchor).await
+    }
+
+    async fn insert_commitment(&self, commitment: Commitment) -> Result<Anchor, StoreError> {
+        (**self).insert_commitment(commitment).await
+    }
 }
 
 #[async_trait]
 impl<T: NullifierSet + ?Sized> NullifierSet for Arc<T> {
     async fn is_spent(&self, nullifier: &Nullifier) -> Result<bool, NullifierError> {
         (**self).is_spent(nullifier).await
+    }
+
+    async fn mark_spent(&self, nullifier: Nullifier) -> Result<(), NullifierError> {
+        (**self).mark_spent(nullifier).await
     }
 }
 

@@ -926,7 +926,7 @@ When running with real Solana transactions (Surfpool, Devnet), how does the inde
 
 ### Solution: Two Indexer Modes
 
-#### Mode A: Local Indexer (Testing / Surfpool)
+#### LocalSync: Local Indexer (Testing / Surfpool)
 
 ```text
 ┌──────────────┐        ┌───────────────┐
@@ -941,19 +941,19 @@ When running with real Solana transactions (Surfpool, Devnet), how does the inde
 └──────────────┘
 ```
 
-- Chain holds `Arc<MockNoteStore>` (or any `LocalIndexerSync` impl)
+- Chain holds `Arc<MockStore>` (or any `LocalIndexerSync` impl)
 - After successful TX, chain updates the store directly
 - Client's indexer is the **same Arc** — sees updates immediately
 - `wait_for_indexer_update()` is a no-op
 
 **Code pattern:**
 ```rust
-let shared_store = Arc::new(MockNoteStore::new(MERKLE_DEPTH));
+let shared_store = Arc::new(MockStore::new(MERKLE_DEPTH));
 let chain = SolanaChain::surfpool(shared_store.clone(), verifier, mode);
 let indexer: Arc<dyn Indexer> = shared_store; // Same Arc!
 ```
 
-#### Mode B: External Indexer (Devnet / Mainnet / Production)
+#### ExternalIndexer: External Indexer (Devnet / Mainnet / Production)
 
 ```text
 ┌──────────────┐        ┌───────────────┐
@@ -985,21 +985,68 @@ let indexer: Arc<dyn Indexer> = Arc::new(HeliusIndexer::new(rpc_url));
 
 ### Why This Works
 
-1. **MockChain already follows Mode A** — it holds `Arc<MockNoteStore>` and updates it directly
+1. **MockChain already follows LocalSync** — it holds `Arc<MockStore>` and updates it directly
 2. **SolanaChain scaffold wraps MockChain** — same pattern, just with "real" TXs in the future
-3. **The pattern scales to production** — just switch to Mode B when external indexer is available
+3. **The pattern scales to production** — just switch to ExternalIndexer when external indexer is available
 
 ### Key Insight
 
 The `wait_for_indexer_update()` method is the synchronization point:
-- Mode A (local): no-op (sync is immediate)
-- Mode B (external): polls external indexer until data appears
+- LocalSync (local): no-op (sync is immediate)
+- ExternalIndexer (external): polls external indexer until data appears
 
 ### Implementation Status
 
-- ✅ Mode A: Working via `MockChain` / `SolanaChain` scaffold with shared store
-- ⏳ Mode B: `HeliusIndexer` scaffold exists, real polling not yet implemented
-- ⏳ Real Solana TXs: `SolanaChain` currently delegates to `MockChain`
+- ✅ LocalSync: Working via `MockChain` / `SolanaChain` with shared store
+- ⏳ ExternalIndexer: `HeliusIndexer` scaffold exists, real polling not yet implemented
+
+---
+
+## Architecture Decision: Proof Verification Location (2025-12-23)
+
+### Question
+
+Should `SolanaChain` verify proofs locally before submitting to the chain?
+
+### Decision: No local verification in `SolanaChain`
+
+**Proof verification happens ONLY on-chain.** The chain backend just submits transactions.
+
+### Rationale
+
+1. **Redundant work** - Local verification + on-chain verification = 2x verification cost
+2. **On-chain is authoritative** - If the program accepts it, it's valid. If rejected, TX fails.
+3. **Simpler client** - No need to configure verifiers for chain backends
+4. **Different trust models** - MockChain may verify locally for testing, real chain does not
+
+### Where verification happens
+
+```text
+MockChain:
+  - Uses MockProofVerifier (or real verifier if configured)
+  - Verifies locally for test assertions
+  - No actual on-chain submission
+
+SolanaChain:
+  - NO local verification
+  - Submits TX → on-chain program verifies
+  - Invalid proof = TX failure (program error)
+```
+
+### API Simplification
+
+Before:
+```rust
+SolanaChain::surfpool(store, verifier, verify_mode)
+```
+
+After:
+```rust
+// IndexerMode determines how chain syncs with indexer
+SolanaChain::surfpool(IndexerMode::LocalSync(store))?   // Tests
+SolanaChain::surfpool(IndexerMode::External)?           // Production
+SolanaChain::mainnet()?  // Always External (no local store in prod)
+```
 
 ---
 

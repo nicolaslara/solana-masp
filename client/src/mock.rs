@@ -7,7 +7,7 @@
 //! ## Architecture
 //!
 //! ```text
-//! Client ─────────reads─────────▶ Indexer (MockNoteStore)
+//! Client ─────────reads─────────▶ Indexer (MockStore)
 //!    │                               ▲
 //!    │                               │ observes
 //!    └────submits────▶ Chain ────────┘
@@ -15,7 +15,7 @@
 //! ```
 //!
 //! The client READS from the indexer but only WRITES through the chain.
-//! When MockChain processes transactions, it updates MockNoteStore (the indexer).
+//! When MockChain processes transactions, it updates MockStore (the indexer).
 //!
 //! ## Two-Transaction Model (Ciphertext DA)
 //!
@@ -66,11 +66,12 @@ use std::sync::{Arc, RwLock};
 // Mock Note Store (Merkle Tree)
 // ============================================================================
 
-/// Mock note commitment store using in-memory Merkle tree
+/// Mock store for both note commitments and nullifiers
 ///
-/// Identifier scheme: commitment directly (no hash layer)
-pub struct MockNoteStore {
-    inner: Arc<RwLock<MockNoteStoreInner>>,
+/// Implements both `NoteCommitmentStore` and `NullifierSet` traits.
+/// Uses in-memory Merkle tree and HashSet for testing.
+pub struct MockStore {
+    inner: Arc<RwLock<MockStoreInner>>,
 }
 
 /// Stored ciphertext data (with ct_hash for binding verification).
@@ -81,7 +82,10 @@ struct StoredCiphertext {
     ct_hash: crate::types::CiphertextHash,
 }
 
-struct MockNoteStoreInner {
+/// How many recent anchors to keep (same as on-chain)
+const ANCHOR_HISTORY_SIZE: usize = 16;
+
+struct MockStoreInner {
     depth: usize,
     nodes: HashMap<(usize, u64), Fr>,
     commitments: HashMap<Commitment, u64>, // commitment -> leaf_index
@@ -93,9 +97,13 @@ struct MockNoteStoreInner {
     posted_ciphertexts: HashMap<(String, u32), StoredCiphertext>,
     /// Map from ct_hash -> (tx_sig, output_index) for retrieval by hash.
     ct_hash_index: HashMap<crate::types::CiphertextHash, (String, u32)>,
+    /// Anchor history - ring buffer of recent roots (mimics on-chain behavior)
+    anchor_history: Vec<Fr>,
+    /// Nullifier set - spent nullifiers (mimics on-chain PDA existence check)
+    nullifiers: HashSet<crate::types::Nullifier>,
 }
 
-impl MockNoteStore {
+impl MockStore {
     pub fn new(depth: usize) -> Self {
         let mut empty_nodes = vec![Fr::from(0u64)];
         for _ in 1..=depth {
@@ -103,8 +111,11 @@ impl MockNoteStore {
             empty_nodes.push(merkle_hash(prev, prev));
         }
 
+        // Compute initial empty root
+        let empty_root = empty_nodes[depth];
+
         Self {
-            inner: Arc::new(RwLock::new(MockNoteStoreInner {
+            inner: Arc::new(RwLock::new(MockStoreInner {
                 depth,
                 nodes: HashMap::new(),
                 commitments: HashMap::new(),
@@ -114,6 +125,8 @@ impl MockNoteStore {
                 tx_log: HashMap::new(),
                 posted_ciphertexts: HashMap::new(),
                 ct_hash_index: HashMap::new(),
+                anchor_history: vec![empty_root], // Start with empty tree root
+                nullifiers: HashSet::new(),
             })),
         }
     }
@@ -175,8 +188,11 @@ impl MockNoteStore {
         ))
     }
 
-    /// Insert a commitment
-    pub fn insert(&self, commitment: Commitment, tx_sig: &str) -> u64 {
+    /// Insert a commitment (internal implementation)
+    ///
+    /// Updates the Merkle tree and anchor history.
+    /// Returns (leaf_index, new_root).
+    fn insert_internal(&self, commitment: Commitment, tx_sig: &str) -> (u64, Fr) {
         let mut inner = self.inner.write().unwrap();
         let leaf_index = inner.leaf_count;
 
@@ -210,7 +226,46 @@ impl MockNoteStore {
             .push(commitment);
 
         inner.leaf_count += 1;
+
+        // Update anchor history (ring buffer)
+        let new_root = inner.get_node(inner.depth, 0);
+        if inner.anchor_history.len() >= ANCHOR_HISTORY_SIZE {
+            inner.anchor_history.remove(0);
+        }
+        inner.anchor_history.push(new_root);
+
+        (leaf_index, new_root)
+    }
+
+    /// Insert a commitment (with transaction signature for logging)
+    pub fn insert_note_commitment(&self, commitment: Commitment, tx_sig: &str) -> u64 {
+        let (leaf_index, _) = self.insert_internal(commitment, tx_sig);
         leaf_index
+    }
+
+    /// Check if an anchor is valid (in history)
+    pub fn is_valid_anchor_sync(&self, anchor: &Fr) -> bool {
+        let inner = self.inner.read().unwrap();
+        inner.anchor_history.contains(anchor)
+    }
+
+    /// Check if a nullifier is spent
+    pub fn is_nullifier_spent_sync(&self, nullifier: &crate::types::Nullifier) -> bool {
+        let inner = self.inner.read().unwrap();
+        inner.nullifiers.contains(nullifier)
+    }
+
+    /// Insert a nullifier (mark as spent)
+    pub fn insert_nullifier_sync(
+        &self,
+        nullifier: crate::types::Nullifier,
+    ) -> Result<(), crate::traits::NullifierError> {
+        let mut inner = self.inner.write().unwrap();
+        if inner.nullifiers.contains(&nullifier) {
+            return Err(crate::traits::NullifierError::AlreadySpent);
+        }
+        inner.nullifiers.insert(nullifier);
+        Ok(())
     }
 
     /// Insert a commitment with optional ciphertext data
@@ -228,7 +283,7 @@ impl MockNoteStore {
         ciphertext: Option<OutputCiphertextData>,
     ) -> u64 {
         // Insert into Merkle tree and indexes
-        let leaf_index = self.insert(commitment, tx_sig);
+        let leaf_index = self.insert_note_commitment(commitment, tx_sig);
 
         // Store ciphertext data for scanning (if provided)
         if let Some(ct_data) = ciphertext {
@@ -259,7 +314,7 @@ impl MockNoteStore {
     }
 }
 
-impl MockNoteStoreInner {
+impl MockStoreInner {
     fn get_node(&self, level: usize, index: u64) -> Fr {
         self.nodes
             .get(&(level, index))
@@ -287,7 +342,7 @@ impl MockNoteStoreInner {
 }
 
 #[async_trait]
-impl NoteCommitmentStore for MockNoteStore {
+impl NoteCommitmentStore for MockStore {
     async fn root(&self) -> Result<Anchor, StoreError> {
         Ok(self.current_root())
     }
@@ -310,10 +365,30 @@ impl NoteCommitmentStore for MockNoteStore {
 
         Ok(MembershipWitness::merkle_path(siblings, path_indices, root))
     }
+
+    async fn is_valid_anchor(&self, anchor: &Anchor) -> Result<bool, StoreError> {
+        Ok(self.is_valid_anchor_sync(anchor))
+    }
+
+    async fn insert_commitment(&self, commitment: Commitment) -> Result<Anchor, StoreError> {
+        let (_, new_root) = self.insert_internal(commitment, "trait_insert");
+        Ok(new_root)
+    }
 }
 
 #[async_trait]
-impl Indexer for MockNoteStore {
+impl NullifierSet for MockStore {
+    async fn is_spent(&self, nullifier: &crate::types::Nullifier) -> Result<bool, NullifierError> {
+        Ok(self.is_nullifier_spent_sync(nullifier))
+    }
+
+    async fn mark_spent(&self, nullifier: crate::types::Nullifier) -> Result<(), NullifierError> {
+        self.insert_nullifier_sync(nullifier)
+    }
+}
+
+#[async_trait]
+impl Indexer for MockStore {
     async fn scan_outputs_since(
         &self,
         since_tx: Option<&str>,
@@ -440,6 +515,15 @@ impl NullifierSet for MockNullifierSet {
         let set = self.nullifiers.read().unwrap();
         Ok(set.contains(nullifier))
     }
+
+    async fn mark_spent(&self, nullifier: Nullifier) -> Result<(), NullifierError> {
+        let mut set = self.nullifiers.write().unwrap();
+        if set.contains(&nullifier) {
+            return Err(NullifierError::AlreadySpent);
+        }
+        set.insert(nullifier);
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -448,7 +532,7 @@ impl NullifierSet for MockNullifierSet {
 
 /// Mock chain combining note store and nullifier set
 pub struct MockChain {
-    note_store: Arc<MockNoteStore>,
+    note_store: Arc<MockStore>,
     nullifier_set: MockNullifierSet,
     anchor_history: Arc<RwLock<Vec<Anchor>>>,
     max_anchors: usize,
@@ -478,12 +562,12 @@ impl Default for MockChainOptions {
 }
 
 impl MockChain {
-    pub fn new(note_store: Arc<MockNoteStore>, max_anchors: usize) -> Self {
+    pub fn new(note_store: Arc<MockStore>, max_anchors: usize) -> Self {
         Self::new_with_options(note_store, max_anchors, MockChainOptions::default())
     }
 
     pub fn new_with_options(
-        note_store: Arc<MockNoteStore>,
+        note_store: Arc<MockStore>,
         max_anchors: usize,
         options: MockChainOptions,
     ) -> Self {
@@ -500,7 +584,7 @@ impl MockChain {
     }
 
     /// Get the note store (for tests)
-    pub fn note_store(&self) -> &MockNoteStore {
+    pub fn note_store(&self) -> &MockStore {
         &self.note_store
     }
 
@@ -528,6 +612,10 @@ impl NullifierSet for MockChain {
     async fn is_spent(&self, nullifier: &Nullifier) -> Result<bool, NullifierError> {
         self.nullifier_set.is_spent(nullifier).await
     }
+
+    async fn mark_spent(&self, nullifier: Nullifier) -> Result<(), NullifierError> {
+        self.nullifier_set.mark_spent(nullifier).await
+    }
 }
 
 #[async_trait]
@@ -539,7 +627,7 @@ impl Chain for MockChain {
         commitment: Commitment,
     ) -> Result<InsertCommitmentResult, ChainError> {
         let tx_sig = self.next_tx_sig();
-        self.note_store.insert(commitment, &tx_sig);
+        self.note_store.insert_note_commitment(commitment, &tx_sig);
         self.update_anchor_history();
 
         Ok(InsertCommitmentResult { tx_sig, commitment })
@@ -639,7 +727,7 @@ impl Chain for MockChain {
             _ => None,
         };
 
-        // MOCK ONLY: we write directly into `MockNoteStore` here so tests can scan/witness
+        // MOCK ONLY: we write directly into `MockStore` here so tests can scan/witness
         // immediately without running a real indexer.
         //
         // PRODUCTION: the chain does NOT "update the indexer". Ciphertexts/commitments live
@@ -794,10 +882,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_note_store_insert_and_witness() {
-        let acc = MockNoteStore::new(4);
+        let acc = MockStore::new(4);
 
         let cm = Fr::from(42u64);
-        acc.insert(cm, "tx_1");
+        acc.insert_note_commitment(cm, "tx_1");
 
         assert!(acc.exists(cm).await.unwrap());
 
@@ -807,7 +895,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_not_found() {
-        let acc = MockNoteStore::new(4);
+        let acc = MockStore::new(4);
 
         let cm = Fr::from(42u64);
         let result = acc.get_witness(cm).await;
@@ -831,7 +919,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chain_shield() {
-        let acc = Arc::new(MockNoteStore::new(4));
+        let acc = Arc::new(MockStore::new(4));
         let chain = MockChain::new(acc.clone(), 10);
 
         let cm = Fr::from(42u64);
@@ -864,7 +952,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chain_transfer() {
-        let acc = Arc::new(MockNoteStore::new(4));
+        let acc = Arc::new(MockStore::new(4));
         let chain = MockChain::new(acc.clone(), 10);
 
         // Shield first (use a real note commitment so mock proof checks can validate preimage).
@@ -1000,7 +1088,7 @@ mod tests {
     async fn test_double_spend_prevented() {
         use crate::traits::TransferOutput;
 
-        let acc = Arc::new(MockNoteStore::new(4));
+        let acc = Arc::new(MockStore::new(4));
         let chain = MockChain::new(acc.clone(), 10);
 
         // Shield (use a real note commitment so mock proof checks can validate preimage).
@@ -1193,7 +1281,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_indexer_scan() {
-        let acc = Arc::new(MockNoteStore::new(4));
+        let acc = Arc::new(MockStore::new(4));
         let chain = MockChain::new(acc.clone(), 10);
 
         let cm1 = Fr::from(1u64);
@@ -1259,7 +1347,7 @@ mod tests {
     async fn test_indexer_get_commitments_for_tx() {
         use crate::traits::TransferOutput;
 
-        let acc = Arc::new(MockNoteStore::new(4));
+        let acc = Arc::new(MockStore::new(4));
         let chain = MockChain::new(acc.clone(), 10);
 
         // Use a SpendingKey-derived recipient so spend-authorization checks can succeed.
@@ -1420,7 +1508,7 @@ mod tests {
         use crate::hash::ciphertext_hash;
         use crate::traits::{CiphertextPostingRequest, Indexer, OutputCiphertextData};
 
-        let acc = Arc::new(MockNoteStore::new(20));
+        let acc = Arc::new(MockStore::new(20));
         let chain = MockChain::new(acc.clone(), 10);
 
         // Simulate Tx A: Post ciphertext data

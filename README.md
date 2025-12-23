@@ -70,8 +70,7 @@ solana-masp/
 │   └── Cargo.toml
 ├── scripts/
 │   ├── build.sh            # Build circuits + program (requires noir/bb)
-│   ├── deploy.sh           # Deploy to Surfpool
-│   └── test_e2e.mjs        # JS E2E (scaffolding; Rust tests are the main suite today)
+│   └── deploy.sh           # Deploy to Surfpool
 ├── tasks.md                # Implementation tracking
 └── README.md
 ```
@@ -109,39 +108,161 @@ cd client
 cargo test
 ```
 
-#### Running with different backends (tests)
+## User Flow Tests
 
-Tests can be configured via env vars (see `client/tests/test_env.rs`):
+The `user_flows` tests are the primary integration tests. They exercise complete user journeys
+(shield → transfer → unshield → recover) and can run against different backend configurations.
+
+### Quick Start
 
 ```bash
 cd client
+
+# Default: all mocks (fastest, no external dependencies)
+cargo test --test user_flows
+
+# Show which backends are selected
 MASP_PRINT_CONFIG=1 cargo test --test user_flows -- --nocapture
 ```
 
-Common knobs:
+### Backend Configuration
 
-- `MASP_CHAIN`: `mock|surfpool|devnet|testnet|mainnet|<custom_rpc_url>`
-- `MASP_INDEXER`: `mock|light` (light is a scaffold today; uses mock store internally)
-- `MASP_ENCRYPTION`: `chacha|mock` (mock is INSECURE, tests only)
-- `MASP_PROOF_SYSTEM`: `mock|ultraplonk|groth16` (non-mock are scaffolds today)
-- `MASP_PROOF_VERIFY`: `local|onchain`
-- `MASP_PRINT_CONFIG=1`: print chosen backends once per test run
+Tests are configured via environment variables. Each backend dimension can be configured independently:
 
-Examples:
+| Variable | Options | Default | Description |
+|----------|---------|---------|-------------|
+| `MASP_CHAIN` | `mock`, `surfpool`, `devnet`, `testnet`, `mainnet`, `<url>` | `mock` | Chain backend |
+| `MASP_INDEXER` | `mock`, `light` | `mock` | Indexer backend |
+| `MASP_ENCRYPTION` | `chacha`, `mock` | `chacha` | Note encryption |
+| `MASP_PROOF_SYSTEM` | `mock`, `ultraplonk`, `groth16` | `mock` | Proof system |
+| `MASP_PROOF_VERIFY` | `local`, `onchain` | `local` | Where proofs are verified |
+| `MASP_PRINT_CONFIG` | `1` | unset | Print backend selection |
+
+### Backend Status
+
+| Backend | Status | Notes |
+|---------|--------|-------|
+| **Chain: mock** | ✅ Working | In-memory, fast, default |
+| **Chain: surfpool** | 🚧 Scaffold | Requires Surfpool running + `MASP_PROGRAM_ID` |
+| **Chain: devnet/testnet/mainnet** | 🚧 Scaffold | Requires deployed program |
+| **Indexer: mock** | ✅ Working | In-memory, default |
+| **Indexer: light** | 🚧 Scaffold | Uses mock internally (Helius/Light integration pending) |
+| **Encryption: chacha** | ✅ Working | ChaCha20-Poly1305, production default |
+| **Encryption: mock** | ✅ Working | ⚠️ INSECURE - testing only |
+| **Proofs: mock** | ✅ Working | Real Rust checks, fake proof bytes |
+| **Proofs: ultraplonk** | 🚧 Scaffold | CLI-based (nargo + bb) |
+| **Proofs: groth16** | 🚧 Scaffold | Not yet implemented |
+
+### Example Configurations
+
+#### 1. Default (All Mocks) - Fastest
 
 ```bash
-# Exercise the SolanaChain scaffold selection (still uses mock internally today)
 cd client
-MASP_CHAIN=surfpool MASP_PRINT_CONFIG=1 cargo test --test user_flows -- --nocapture
-
-# Exercise the LightIndexer scaffold selection (still uses mock internally today)
-cd client
-MASP_INDEXER=light MASP_PRINT_CONFIG=1 cargo test --test user_flows -- --nocapture
-
-# Use mock encryption (INSECURE; for testing only)
-cd client
-MASP_ENCRYPTION=mock cargo test
+cargo test --test user_flows
 ```
+
+#### 2. With Surfpool (Local Solana)
+
+```bash
+# Terminal 1: Start Surfpool
+surfpool start
+
+# Terminal 2: Deploy program and run tests
+cd programs/solana-masp
+cargo build-sbf --features "local-testing,mock-proofs"
+solana program deploy target/deploy/solana_masp.so --url http://127.0.0.1:8899
+# Note the program ID
+
+# Terminal 2: Run tests
+cd ../client
+MASP_CHAIN=surfpool \
+MASP_PROGRAM_ID=<program_id> \
+MASP_PRINT_CONFIG=1 \
+  cargo test --features solana-backend --test user_flows -- --nocapture
+```
+
+#### 3. With Light Protocol Indexer (Scaffold)
+
+```bash
+cd client
+MASP_INDEXER=light \
+MASP_PRINT_CONFIG=1 \
+  cargo test --test user_flows -- --nocapture
+```
+
+Note: Currently uses mock store internally. Real Helius/Light integration is pending.
+
+#### 4. With Real UltraPlonk Proofs
+
+```bash
+# Requires: nargo v1.0.0-beta.3 + bb 0.82.2
+cd circuits/masp/transfer && nargo compile && cd ../../..
+
+cd client
+MASP_PROOF_SYSTEM=ultraplonk \
+MASP_PRINT_CONFIG=1 \
+  cargo test --features ultraplonk-verifier --test user_flows -- --nocapture
+```
+
+#### 5. Mock Encryption (Fast Tests)
+
+```bash
+cd client
+MASP_ENCRYPTION=mock \
+  cargo test --test user_flows
+```
+
+⚠️ **Warning:** Mock encryption is INSECURE. Only use for testing.
+
+#### 6. Full Production-like Stack (Future)
+
+```bash
+# Not yet implemented - this is the target configuration
+cd client
+MASP_CHAIN=devnet \
+MASP_INDEXER=light \
+MASP_PROOF_SYSTEM=ultraplonk \
+MASP_PROOF_VERIFY=onchain \
+MASP_PROGRAM_ID=<deployed_program> \
+HELIUS_API_KEY=<key> \
+  cargo test --features solana-backend,ultraplonk-verifier --test user_flows -- --nocapture
+```
+
+### Indexer Modes
+
+When using `SolanaChain`, the indexer can operate in two modes:
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| **LocalSync** | Chain shares `MockStore` with indexer | Tests, local dev |
+| **External** | Indexer observes ledger independently | Production |
+
+In tests, LocalSync mode is used automatically - the chain and indexer share the same
+`Arc<MockStore>`, so updates are instant. In production, an external indexer (Helius/Light)
+would poll the ledger asynchronously.
+
+### Test Files
+
+```text
+client/tests/
+├── user_flows.rs       # Main integration tests (8 flows)
+├── test_env.rs         # Backend configuration and setup
+└── surfpool_e2e.rs     # Direct Surfpool program tests (requires running Surfpool)
+```
+
+### What the Tests Cover
+
+| Test | Description |
+|------|-------------|
+| `flow_shield_deposit_tokens` | Deposit tokens into shielded pool |
+| `flow_transfer_send_to_recipient` | Send to another user |
+| `flow_unshield_withdraw` | Withdraw to public address |
+| `flow_oob_first_payment` | Out-of-band payment discovery |
+| `flow_multiasset_portfolio` | Multiple token types |
+| `flow_recovery_from_seed` | Recover wallet from seed |
+| `flow_recovery_then_spend` | Spend after recovery |
+| `flow_multidevice_sync` | Multi-device sync via recovery |
 
 ### Circuit Proof Pipeline Smoke Test (UltraPlonk)
 
@@ -211,19 +332,18 @@ cd programs/solana-masp
 cargo build-sbf
 ```
 
-### Test on Surfpool (Program Scaffolding)
-
-The JS script is still scaffolding and not the main test suite. The primary tests today are Rust integration/user-flow tests in `client/tests/`.
+### Deploy to Surfpool
 
 ```bash
-# Start Surfpool (via MCP)
-# Use: start_surfnet
+# Start Surfpool
+surfpool start
+
+# Build program with mock proofs for testing
+cd programs/solana-masp
+cargo build-sbf --features "local-testing,mock-proofs"
 
 # Deploy
-./scripts/deploy.sh
-
-# Run E2E tests
-node scripts/test_e2e.mjs
+solana program deploy target/deploy/solana_masp.so --url http://127.0.0.1:8899
 ```
 
 ## Operations

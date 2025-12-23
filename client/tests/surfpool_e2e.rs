@@ -18,17 +18,23 @@
 //! PROGRAM_ID=<pubkey> cargo test -p masp-client --test surfpool_e2e --features onchain-mock
 //! ```
 
+#![cfg(all(feature = "onchain-mock", feature = "solana-backend"))]
+
 use sha3::{Digest, Keccak256};
 use solana_client::rpc_client::RpcClient;
+use solana_keypair::Keypair;
 use solana_sdk::{
-    commitment_config::CommitmentConfig,
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
-    signature::{Keypair, Signer},
-    system_program,
+    signature::Signer,
     transaction::Transaction,
 };
 use std::str::FromStr;
+
+/// System Program ID
+const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+]);
 
 const RPC_URL: &str = "http://127.0.0.1:8899";
 
@@ -74,7 +80,11 @@ fn get_payer(client: &RpcClient) -> Keypair {
     if std::path::Path::new(&config_path).exists() {
         let keypair_bytes: Vec<u8> =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-        Keypair::from_bytes(&keypair_bytes).unwrap()
+        // SDK 3.x uses TryFrom instead of from_bytes
+        let keypair_array: [u8; 64] = keypair_bytes
+            .try_into()
+            .expect("keypair should be 64 bytes");
+        Keypair::try_from(&keypair_array[..]).expect("valid keypair")
     } else {
         let keypair = Keypair::new();
         println!("Generated new keypair, requesting airdrop...");
@@ -111,7 +121,7 @@ fn test_surfpool_initialize() {
         accounts: vec![
             AccountMeta::new(payer.pubkey(), true),
             AccountMeta::new(tree_state_pda, false),
-            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
         ],
         data: vec![IX_INITIALIZE],
     };
@@ -248,7 +258,7 @@ fn test_surfpool_shield_full_flow() {
             accounts: vec![
                 AccountMeta::new(payer.pubkey(), true),
                 AccountMeta::new(proof_buffer.pubkey(), true), // Buffer must sign for creation
-                AccountMeta::new_readonly(system_program::id(), false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
             ],
             data,
         };
