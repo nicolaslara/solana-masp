@@ -177,12 +177,14 @@ MASP_PRINT_CONFIG=1 \
 ```
 
 Auto-deploy behavior:
+
 - If `MASP_PROGRAM_ID` is set → uses that program ID (no build/deploy)
 - If `.so` is missing or source changed → rebuilds with `cargo build-sbf`
 - Deploys via `solana program deploy` and sets `MASP_PROGRAM_ID`
 - Uses `--features local-testing,mock-proofs` by default
 
 Control via environment:
+
 | Variable | Description |
 |----------|-------------|
 | `MASP_PROGRAM_ID` | Skip build/deploy, use this program ID |
@@ -261,6 +263,7 @@ MASP_PRINT_CONFIG=1 \
 Note: `onchain-mock` feature enables the Keccak256-based mock prover that's compatible with the on-chain mock verifier.
 
 Expected output:
+
 ```
 ╔══════════════════════════════════════╗
 ║       MASP Backend Configuration     ║
