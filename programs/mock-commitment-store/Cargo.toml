@@ -1,0 +1,28 @@
+[package]
+name = "mock-commitment-store"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Mock commitment store for MASP local testing (NOT for production)"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+# Solana program SDK
+solana-program = "3.0"
+# Pin base64ct to avoid edition2024 requirement (1.8+ needs Rust 1.85)
+base64ct = "=1.6.0"
+
+# Serialization
+borsh = "1.5"
+
+# Error handling
+thiserror = "2"
+
+[features]
+default = []
+no-entrypoint = []
+
+## NOTE:
+## Profile settings must live at the workspace root `Cargo.toml`.

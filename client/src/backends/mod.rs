@@ -61,6 +61,8 @@ pub use cli_ultraplonk::{CircuitType, CliProofManager, CliUltraPlonkProver};
 pub use config::ProofSystemBackend;
 pub use config::{BackendConfig, ChainBackend, EncryptionBackend, IndexerBackend};
 pub use light::LightIndexer;
+
+#[cfg(feature = "solana-backend")]
 pub use solana::SolanaChain;
 
 #[cfg(feature = "ultraplonk-verifier")]

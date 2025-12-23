@@ -23,8 +23,14 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 - Poseidon2 hashing (Noir stdlib + `taceo-poseidon2` in Rust)
 - **Value rule (current)**: single-asset per transfer (hard-sound). Multi-asset deferred to Milestone 5.
 - Trait-based client (Indexer + Chain abstractions)
-- On-chain commitment-tree accumulator (anchors); membership proven via Merkle paths (privacy-preserving)
-- Light Protocol for nullifier set (Milestone 4+)
+- **Commitment tree**: Off-chain (indexer maintains full tree); on-chain program only validates anchors
+- **Nullifier set**: On-chain PDAs (existence = spent)
+- Light Protocol for compressed state (Milestone 4+)
+
+**Chain/Indexer Synchronization (see `knowledge.md`):**
+
+- **Mode A (Local)**: Chain holds `Arc<MockNoteStore>`, updates it after TX success. Tests use this.
+- **Mode B (External)**: Chain doesn't hold store; Helius/Light observes ledger independently.
 
 **Circuits (all implemented):**
 
@@ -390,25 +396,58 @@ All circuit constraints are implemented and tested with mock proofs.
 - [x] Circuits organized with named statement-check functions (audit trail)
 - [x] Protocol-level docs for responsibility split (circuit vs chain vs client/indexer)
 
-### 1.1 Program State
+### 1.1 Program State ✅ SCAFFOLDED
 
-- [ ] Commitment Merkle tree (program-owned accumulator)
-- [ ] Anchor history ring buffer (recent roots)
-- [ ] Nullifier PDAs (one per spent nullifier)
+The program delegates to a **Commitment Store** via CPI. See `knowledge.md` for architecture.
+
+- [x] `TreeState` PDA - anchor history + leaf count
+- [x] `NullifierAccount` PDAs - one per spent nullifier (existence = spent)
+- [x] `ProofBuffer` - temporary account for proof upload
 - [ ] Pool token accounts (for SPL transfers)
 
-### 1.2 Program Instructions
+### 1.1.1 Mock State Stores ✅ SCAFFOLDED
 
-- [ ] `initialize` - Create tree state + pool accounts
-- [ ] `shield` - Verify proof, transfer SPL in, append commitment
-- [ ] `transfer` - Verify proof, check nullifier, append commitment(s)
-- [ ] `unshield` - Verify proof, check nullifier, transfer SPL out
+Separate program (`programs/mock-commitment-store/`) for local testing.
+Implements BOTH stores in one program for testing simplicity:
 
-### 1.3 Proof Verification Integration
+**NoteCommitmentStore** (membership proofs):
+- [x] `StoreState` - anchor history + leaf count
+- [x] `insert_commitment` instruction
 
-- [ ] Integrate `ultraplonk-core` verifier into program
+**NullifierSet** (non-membership proofs):
+- [x] `NullifierAccount` - PDA per nullifier (existence = spent)
+- [x] `insert_nullifier` instruction
+
+**Ciphertexts** (NOT in this store):
+- Stored as transaction calldata in MASP shield/transfer instructions
+- Indexer observes ledger and indexes for efficient lookup
+- See `knowledge.md` for architecture details
+
+⚠️ **FOR LOCAL TESTING ONLY** - use Light Protocol in production:
+- Production uses **non-membership proofs** for nullifiers (not PDAs)
+- Production uses **validity proofs** for commitments (not naive tree)
+
+### 1.2 Program Instructions ✅ SCAFFOLDED
+
+- [x] `initialize` - Create tree state
+- [x] `init_proof_buffer` - Create buffer for proof upload
+- [x] `upload_chunk` - Upload proof data in chunks
+- [x] `shield` - Verify proof, create nullifier PDA, TODO: SPL transfer
+- [x] `transfer` - Verify proof, check nullifier, create nullifier PDAs
+- [x] `unshield` - Verify proof, check nullifier, TODO: SPL transfer
+- [x] `update_root` - Update anchor history (⚠️ LOCAL TESTING ONLY, feature-gated)
+
+### 1.3 Proof Verification Integration ✅ SCAFFOLDED
+
+Proof system is swappable via features. See `knowledge.md` for architecture.
+
+- [x] `ProofSystem` enum (UltraPlonk, Groth16)
+- [x] Namespaced modules: `verify::ultraplonk`, `verify::groth16`
+- [x] Feature-gated proof system selection
+- [x] VK naming convention: `{proof_system}_vk_{circuit}.bin`
+- [ ] Build.rs for VK generation (ultraplonk first)
+- [ ] Real verification integration (uncomment stubs)
 - [ ] Profile CU usage per circuit
-- [ ] Handle VK loading (embedded vs account-based)
 
 ### 1.4 Client Updates
 

@@ -69,9 +69,12 @@ pub mod client;
 
 // Re-exports
 pub use backends::config::ProofVerificationMode;
+pub use backends::LightIndexer;
 pub use backends::ProofSystemBackend;
 pub use backends::{BackendConfig, ChainBackend, EncryptionBackend, IndexerBackend};
-pub use backends::{LightIndexer, SolanaChain};
+
+#[cfg(feature = "solana-backend")]
+pub use backends::SolanaChain;
 pub use client::{MaspClient, OwnedNote, SyncResult};
 pub use encryption::{
     encrypt_note, trial_decrypt, try_decrypt_note, verify_decrypted_note, verify_note_commitment,
@@ -86,6 +89,8 @@ pub use oob::{
     PaymentNotification,
 };
 pub use proofs::{MembershipWitness, StoreId};
+#[cfg(feature = "onchain-mock")]
+pub use proofs::{OnChainMockProofVerifier, OnChainMockSpendProver};
 pub use traits::{
     Chain, ChainError, CiphertextPostingRequest, CiphertextPostingResult, Indexer, IndexerError,
     InputSlot, InsertCommitmentResult, NoteCommitmentStore, NullifierError, NullifierSet,

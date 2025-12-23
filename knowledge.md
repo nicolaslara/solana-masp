@@ -915,3 +915,304 @@ Groth16 tradeoffs:
 
 - **Pros:** ~192B proofs (vs ~2KB UltraPlonk), ~81K CU (vs ~500K-1M)
 - **Cons:** Requires trusted setup per circuit, different toolchain
+
+---
+
+## Architecture Decision: Chain/Indexer Synchronization (2025-12-23)
+
+### Problem
+
+When running with real Solana transactions (Surfpool, Devnet), how does the indexer know about new commitments and nullifiers created by the chain?
+
+### Solution: Two Indexer Modes
+
+#### Mode A: Local Indexer (Testing / Surfpool)
+
+```text
+┌──────────────┐        ┌───────────────┐
+│ SolanaChain  │───────▶│ Solana Program│
+│              │        └───────────────┘
+│  holds Arc   │               │
+│  to store    │               │
+│      │       │               │
+│      ▼       │               │
+│ LocalStore   │◀──────────────┘
+│ (in-memory)  │  chain updates store after TX success
+└──────────────┘
+```
+
+- Chain holds `Arc<MockNoteStore>` (or any `LocalIndexerSync` impl)
+- After successful TX, chain updates the store directly
+- Client's indexer is the **same Arc** — sees updates immediately
+- `wait_for_indexer_update()` is a no-op
+
+**Code pattern:**
+```rust
+let shared_store = Arc::new(MockNoteStore::new(MERKLE_DEPTH));
+let chain = SolanaChain::surfpool(shared_store.clone(), verifier, mode);
+let indexer: Arc<dyn Indexer> = shared_store; // Same Arc!
+```
+
+#### Mode B: External Indexer (Devnet / Mainnet / Production)
+
+```text
+┌──────────────┐        ┌───────────────┐
+│ SolanaChain  │───────▶│ Solana Program│
+│ (no store)   │        └───────────────┘
+└──────────────┘               │
+                               │ emits events
+                               ▼
+                       ┌───────────────┐
+                       │ Helius / Light│ (external)
+                       └───────────────┘
+                               ▲
+                               │ client polls
+                       ┌───────────────┐
+                       │ HeliusIndexer │
+                       └───────────────┘
+```
+
+- Chain does NOT hold a local store
+- External indexer (Helius) observes the ledger independently
+- Client calls `wait_for_indexer_update(tx_sig)` which polls until data appears
+
+**Code pattern:**
+```rust
+let chain = SolanaChain::devnet_external(verifier, mode);
+let indexer: Arc<dyn Indexer> = Arc::new(HeliusIndexer::new(rpc_url));
+// Indexer is completely separate from chain
+```
+
+### Why This Works
+
+1. **MockChain already follows Mode A** — it holds `Arc<MockNoteStore>` and updates it directly
+2. **SolanaChain scaffold wraps MockChain** — same pattern, just with "real" TXs in the future
+3. **The pattern scales to production** — just switch to Mode B when external indexer is available
+
+### Key Insight
+
+The `wait_for_indexer_update()` method is the synchronization point:
+- Mode A (local): no-op (sync is immediate)
+- Mode B (external): polls external indexer until data appears
+
+### Implementation Status
+
+- ✅ Mode A: Working via `MockChain` / `SolanaChain` scaffold with shared store
+- ⏳ Mode B: `HeliusIndexer` scaffold exists, real polling not yet implemented
+- ⏳ Real Solana TXs: `SolanaChain` currently delegates to `MockChain`
+
+---
+
+## Architecture Decision: Proof System Namespacing (2025-12-23)
+
+### Problem
+
+The program may need to support multiple proof systems (UltraPlonk, Groth16).
+Different proof systems have:
+- Different proof sizes (2144 bytes vs 192 bytes)
+- Different verification costs (~500K CU vs ~81K CU)
+- Different VK formats
+- Different verification APIs
+
+### Solution: Feature-gated proof system modules
+
+```text
+programs/solana-masp/src/verify.rs
+├── ProofSystem enum (UltraPlonk, Groth16)
+├── CURRENT_PROOF_SYSTEM (compile-time selected via features)
+├── verify_proof() - dispatches to configured backend
+│
+├── mod ultraplonk
+│   ├── PROOF_SIZE = 2144
+│   ├── VK_SIZE = 1632
+│   ├── vks::VK_SHIELD/TRANSFER/UNSHIELD (feature-gated)
+│   └── verify() implementation
+│
+└── mod groth16
+    ├── PROOF_SIZE = 192
+    ├── VK_SIZE_TYPICAL = 384
+    ├── vks::VK_SHIELD/TRANSFER/UNSHIELD (feature-gated)
+    └── verify() implementation
+```
+
+### Configuration
+
+```toml
+# Cargo.toml features
+[features]
+default = ["ultraplonk"]
+ultraplonk = []
+groth16 = []
+ultraplonk-real-vks = ["ultraplonk"]  # Requires build.rs
+groth16-real-vks = ["groth16"]        # Requires build.rs
+local-testing = []  # Enables update_root instruction (DO NOT use in production!)
+```
+
+```bash
+# Build commands
+cargo build-sbf --features ultraplonk    # Default
+cargo build-sbf --no-default-features --features groth16  # Groth16
+```
+
+### VK Naming Convention
+
+VKs are namespaced by proof system to avoid confusion:
+
+```text
+OUT_DIR/
+├── ultraplonk_vk_shield.bin
+├── ultraplonk_vk_transfer.bin
+├── ultraplonk_vk_unshield.bin
+├── groth16_vk_shield.bin
+├── groth16_vk_transfer.bin
+└── groth16_vk_unshield.bin
+```
+
+### Implementation Status
+
+- ✅ `ProofSystem` enum and `CURRENT_PROOF_SYSTEM` constant
+- ✅ `ultraplonk` and `groth16` modules with placeholder verification
+- ✅ Feature flags for proof system selection
+- ⏳ Real VK embedding via build.rs
+- ⏳ Real verification implementation
+
+---
+
+## Architecture Decision: Two Separate External Stores (2025-12-23)
+
+### Problem
+
+The MASP needs to store:
+1. **Commitments** in a Merkle tree (for **membership** proofs)
+2. **Nullifiers** in a set (for **non-membership** proofs / double-spend prevention)
+3. **Ciphertexts** (for wallet recovery - must be on-chain!)
+
+In production, we want to use Light Protocol for efficient compressed state.
+For local testing, we need simple mocks that work without Light Protocol.
+
+### Solution: Two Separate Stores
+
+The MASP uses **two logically separate stores**, matching `client/src/traits.rs`:
+
+```text
+┌───────────────────────────────────────────────────────────────────┐
+│                         MASP Program                               │
+│  - Verify ZK proofs                                                │
+│  - SPL token transfers                                             │
+│  - CPI to external stores                                          │
+└─────────────────────┬───────────────────────┬─────────────────────┘
+                      │ CPI                   │ CPI
+                      ▼                       ▼
+        ┌─────────────────────────┐  ┌─────────────────────────┐
+        │  NoteCommitmentStore    │  │      NullifierSet        │
+        │  (membership proofs)    │  │  (non-membership proofs) │
+        └─────────────────────────┘  └─────────────────────────┘
+                      │                       │
+         ┌────────────┴────────────┐  ┌───────┴───────────────┐
+         ▼                         ▼  ▼                       ▼
+  ┌───────────────┐    ┌───────────────┐   ┌───────────────┐
+  │ MockStore     │    │ Light Protocol│   │ Light Protocol│
+  │ (PDAs, naive) │    │ (compressed)  │   │ (compressed)  │
+  └───────────────┘    └───────────────┘   └───────────────┘
+```
+
+### NoteCommitmentStore
+
+Stores note commitments in a Merkle tree.
+
+```rust
+// Interface (client trait + on-chain CPI)
+insert_commitment(commitment) -> new_root
+get_root() -> current_root
+is_valid_anchor(anchor) -> bool
+get_witness(commitment) -> MembershipWitness
+```
+
+- Mock: Naive on-chain Merkle tree
+- Production: Light Protocol with **validity proofs**
+
+### NullifierSet
+
+Stores spent nullifiers for double-spend prevention.
+
+```rust
+// Interface (client trait + on-chain CPI)
+insert_nullifier(nullifier) -> Result (fails if exists)
+is_spent(nullifier) -> bool
+```
+
+- Mock: PDA per nullifier (existence = spent)
+- Production: Light Protocol with **non-membership proofs**
+  - Prove nullifier NOT in tree → insert → now in tree
+
+### Why Two Separate Stores?
+
+1. **Different proof types**: Membership (commitment in tree) vs non-membership (nullifier NOT in set)
+2. **Matches client traits**: `NoteCommitmentStore` + `NullifierSet` in `client/src/traits.rs`
+3. **Light Protocol may use different trees**: Different compressed account structures
+4. **Independent scaling**: Nullifier set grows faster (one per spend vs one per note)
+
+### MockStores (programs/mock-commitment-store/)
+
+⚠️ **FOR LOCAL TESTING ONLY - NOT PRODUCTION SAFE**
+
+For testing simplicity, we combine both stores in one mock program:
+- Simple on-chain Merkle tree (NoteCommitmentStore)
+- PDA-based nullifier storage (NullifierSet)
+- Direct ciphertext account storage
+- ~100x more expensive than Light Protocol
+
+### Light Protocol (production)
+
+- Both stores use ZK-compressed accounts
+- Commitments: Validity proofs for membership
+- Nullifiers: Non-membership proofs (prove doesn't exist → insert)
+- 200x cheaper account creation
+- Ciphertext stored via compressed accounts
+
+### Ciphertexts: Transaction Calldata (NOT in External Stores)
+
+⚠️ **Key architectural point:** Ciphertexts are stored as **transaction calldata**,
+NOT in external stores like Light Protocol.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Ciphertext Storage Architecture                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Tx A: shield/transfer instruction                                      │
+│        └── instruction data includes ciphertext bytes                   │
+│            └── permanently stored in ledger history (archives)          │
+│                                                                         │
+│  Tx B: references ct_hash in ZK proof public inputs                     │
+│        └── binds proof to the ciphertext in Tx A                        │
+│                                                                         │
+│  Indexer: Observes ledger, indexes ciphertexts for efficient lookup     │
+│           └── get_ciphertext_by_hash(ct_hash)                           │
+│           └── get_ciphertext_for_output(tx_sig, output_index)           │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Why NOT in external stores:**
+- Ciphertexts don't need membership/non-membership proofs
+- They're just data blobs that need to be permanently available
+- Ledger history is the most decentralized storage
+- Indexer is just an optimization layer (can be rebuilt from ledger)
+
+**Why this matters:**
+1. **Wallet recovery** - Replay ledger to find all ciphertexts (no indexer needed)
+2. **Censorship resistance** - Ciphertexts are in permanent ledger history
+3. **Auditability** - All data needed to verify state is on-chain
+4. **Simplicity** - No need for Light Protocol for ciphertexts
+
+**The indexer is a convenience layer:**
+- Indexes ciphertexts for efficient lookup by ct_hash
+- Can be rebuilt from scratch by replaying the ledger
+- Is NOT the source of truth
+
+### Implementation Status
+
+- ✅ MockStores program scaffolded (`programs/mock-commitment-store/`)
+- ⏳ MASP CPI integration (Milestone 1)
+- ⏳ Light Protocol integration (Milestone 4)

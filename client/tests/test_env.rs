@@ -3,6 +3,24 @@
 //! Goal: run the same tests with different backend implementations configured
 //! via environment variables.
 //!
+//! ## Chain/Indexer Synchronization
+//!
+//! In test mode, the chain and indexer share the same `Arc<MockNoteStore>`.
+//! When the chain processes transactions (shield, transfer, unshield), it
+//! updates the shared store directly. The indexer reads from the same store,
+//! so changes are visible immediately without external synchronization.
+//!
+//! This is "Mode A: Local Indexer" from `knowledge.md`. See
+//! `client/src/backends/solana.rs` for the full architecture documentation.
+//!
+//! ```text
+//! let shared_store = Arc::new(MockNoteStore::new(MERKLE_DEPTH));
+//! let chain = SolanaChain::surfpool(shared_store.clone(), ...);
+//! let indexer: Arc<dyn Indexer> = shared_store; // Same Arc!
+//! ```
+//!
+//! ## Backend Configuration
+//!
 //! Backends are configured with:
 //! - `MASP_CHAIN`      (mock|surfpool|devnet|testnet|mainnet|<custom_url>)
 //! - `MASP_INDEXER`    (mock|light)
@@ -50,7 +68,18 @@ impl TestEnv {
             PRINT_ONCE.call_once(|| config.print_config());
         }
 
-        // Shared store so chain writes are visible to the indexer in scaffold mode.
+        // ARCHITECTURE: Shared store for "Mode A: Local Indexer" synchronization.
+        //
+        // The chain and indexer share the same Arc<MockNoteStore>. When the chain
+        // processes transactions (shield, transfer, unshield), it updates the store
+        // directly. The indexer reads from the same store, so changes are visible
+        // immediately without external synchronization.
+        //
+        // In production (Mode B), the chain would NOT hold the store, and an external
+        // indexer (Helius/Light) would observe the ledger independently.
+        //
+        // See: knowledge.md "Architecture Decision: Chain/Indexer Synchronization"
+        // See: client/src/backends/solana.rs for full architecture docs
         let shared_store = Arc::new(MockNoteStore::new(masp_client::MERKLE_DEPTH));
 
         fn ultraplonk_prover() -> Arc<dyn SpendProver> {

@@ -641,7 +641,7 @@ impl SpendProver for MockSpendProver {
     }
 }
 
-/// Mock verifier that always returns true
+/// Mock verifier that checks proof == poseidon2_hash(public_inputs)
 pub struct MockProofVerifier;
 
 #[async_trait]
@@ -651,7 +651,7 @@ impl ProofVerifier for MockProofVerifier {
         public_inputs: &ProofPublicInputs,
         proof: &ProofBytes,
     ) -> Result<bool, ProofSystemError> {
-        // Bind verification to the public inputs (prevents “swap public inputs under same proof” in mocks).
+        // Bind verification to the public inputs (prevents "swap public inputs under same proof" in mocks).
         let expected = mock_proof_for_public_inputs(public_inputs);
         Ok(proof.as_bytes() == expected.as_bytes())
     }
@@ -660,6 +660,143 @@ impl ProofVerifier for MockProofVerifier {
         "mock"
     }
 }
+
+// ============================================================================
+// On-Chain Mock Prover/Verifier (for testing with Solana program)
+// ============================================================================
+//
+// ⚠️ FOR LOCAL TESTING ONLY - Feature-gated behind `onchain-mock`
+//
+// This code is only compiled when the `onchain-mock` feature is enabled.
+// It generates proofs compatible with the on-chain `mock` verifier.
+
+#[cfg(feature = "onchain-mock")]
+mod onchain_mock {
+    use super::*;
+    use sha3::{Digest, Keccak256};
+
+    /// Compute the expected on-chain mock proof for given public inputs.
+    ///
+    /// This uses keccak256 to match the on-chain mock verifier.
+    /// Formula: proof = keccak256(circuit_type || public_inputs_bytes)
+    pub fn onchain_mock_proof_for_public_inputs(public_inputs: &ProofPublicInputs) -> ProofBytes {
+        let circuit_type: u8 = match public_inputs {
+            ProofPublicInputs::Shield(_) => 0,
+            ProofPublicInputs::Transfer(_) => 1,
+            ProofPublicInputs::Unshield(_) => 2,
+        };
+
+        // Build the same byte layout as on-chain verifier:
+        // [circuit_type: u8] [public_input_0: [u8; 32]] [public_input_1: [u8; 32]] ...
+        let mut hasher = Keccak256::new();
+        hasher.update([circuit_type]);
+
+        match public_inputs {
+            ProofPublicInputs::Shield(pi) => {
+                hasher.update(field_to_bytes(&pi.new_commitment));
+                hasher.update(field_to_bytes(&pi.public_asset_id));
+                // public_amount as 32-byte big-endian
+                let mut amount_bytes = [0u8; 32];
+                amount_bytes[24..32].copy_from_slice(&pi.public_amount.to_be_bytes());
+                hasher.update(amount_bytes);
+                hasher.update(field_to_bytes(&pi.ct_hash));
+            }
+            ProofPublicInputs::Transfer(pi) => {
+                hasher.update(field_to_bytes(&pi.anchor));
+                for nf in &pi.nullifiers {
+                    hasher.update(field_to_bytes(nf));
+                }
+                for cm in &pi.output_commitments {
+                    hasher.update(field_to_bytes(cm));
+                }
+                // input_count as 32-byte big-endian
+                let mut count_bytes = [0u8; 32];
+                count_bytes[28..32].copy_from_slice(&pi.input_count.to_be_bytes());
+                hasher.update(count_bytes);
+                // output_count as 32-byte big-endian
+                count_bytes = [0u8; 32];
+                count_bytes[28..32].copy_from_slice(&pi.output_count.to_be_bytes());
+                hasher.update(count_bytes);
+                for ct in &pi.ct_hashes {
+                    hasher.update(field_to_bytes(ct));
+                }
+                hasher.update(field_to_bytes(&pi.tx_binding));
+            }
+            ProofPublicInputs::Unshield(pi) => {
+                hasher.update(field_to_bytes(&pi.anchor));
+                hasher.update(field_to_bytes(&pi.nullifier));
+                hasher.update(field_to_bytes(&pi.tx_binding));
+                // public_amount as 32-byte big-endian
+                let mut amount_bytes = [0u8; 32];
+                amount_bytes[24..32].copy_from_slice(&pi.public_amount.to_be_bytes());
+                hasher.update(amount_bytes);
+                // recipient limbs as 32-byte big-endian each
+                for limb in &pi.public_recipient_limbs {
+                    let mut limb_bytes = [0u8; 32];
+                    limb_bytes[24..32].copy_from_slice(&limb.to_be_bytes());
+                    hasher.update(limb_bytes);
+                }
+                hasher.update(field_to_bytes(&pi.public_asset_id));
+            }
+        }
+
+        let hash: [u8; 32] = hasher.finalize().into();
+        ProofBytes::new(hash.to_vec())
+    }
+
+    /// On-chain mock prover for testing with Solana program.
+    ///
+    /// This prover generates proofs compatible with the on-chain `mock` verifier
+    /// (keccak256-based). Use this when testing against a Solana program compiled
+    /// with `local-testing` and `mock-proofs` features.
+    ///
+    /// ⚠️ This does NOT verify circuit statements - it just generates the expected hash.
+    /// For statement checking, use `MockSpendProver` which validates in Rust.
+    pub struct OnChainMockSpendProver;
+
+    impl SpendProver for OnChainMockSpendProver {
+        fn prove(
+            &self,
+            public_inputs: &ProofPublicInputs,
+            _private_inputs: &ProofPrivateInputs,
+        ) -> Result<ProofBytes, ProofSystemError> {
+            // Note: Unlike MockSpendProver, we don't check statements here.
+            // This is just for generating proofs that the on-chain mock verifier will accept.
+            // For statement validation, use MockSpendProver first, then this for on-chain.
+            Ok(onchain_mock_proof_for_public_inputs(public_inputs))
+        }
+
+        fn system_name(&self) -> &'static str {
+            "onchain-mock"
+        }
+    }
+
+    /// On-chain mock verifier (client-side, for testing on-chain mock proofs locally).
+    ///
+    /// This verifier checks proofs generated by `OnChainMockSpendProver`.
+    pub struct OnChainMockProofVerifier;
+
+    #[async_trait]
+    impl ProofVerifier for OnChainMockProofVerifier {
+        async fn verify_local(
+            &self,
+            public_inputs: &ProofPublicInputs,
+            proof: &ProofBytes,
+        ) -> Result<bool, ProofSystemError> {
+            let expected = onchain_mock_proof_for_public_inputs(public_inputs);
+            Ok(proof.as_bytes() == expected.as_bytes())
+        }
+
+        fn system_name(&self) -> &'static str {
+            "onchain-mock"
+        }
+    }
+}
+
+#[cfg(feature = "onchain-mock")]
+pub use onchain_mock::{
+    onchain_mock_proof_for_public_inputs, OnChainMockProofVerifier, OnChainMockSpendProver,
+};
 
 // ============================================================================
 // Tests

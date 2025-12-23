@@ -2,6 +2,8 @@
 //!
 //! ## Architecture Overview
 //!
+//! The MASP uses **two separate stores** for state management:
+//!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │                      MaspClient                              │
@@ -11,26 +13,34 @@
 //!                     ▼                   ▼
 //! ┌───────────────────────────┐   ┌─────────────────────────────┐
 //! │    NoteCommitmentStore    │   │      NullifierSet           │
-//! │  (stores note commitments)│   │  (tracks spent nullifiers)  │
+//! │  (membership proofs)      │   │  (non-membership proofs)    │
 //! │                           │   │                             │
-//! │  Mock: Merkle tree        │   │  Mock: HashSet              │
+//! │  Mock: In-memory tree     │   │  Mock: HashSet              │
 //! │  Prod: Light Protocol     │   │  Prod: Light Protocol       │
 //! └───────────────────────────┘   └─────────────────────────────┘
 //! ```
 //!
 //! ## What We Prove
 //!
-//! 1. **Membership** - commitment exists in store
+//! 1. **Membership** - commitment exists in store (NoteCommitmentStore)
 //!    - Mock: Merkle path verification
-//!    - Light: Groth16 validity proof
+//!    - Light: Validity proof (commitment is in compressed tree)
 //!
-//! 2. **Non-membership** - nullifier NOT in set
+//! 2. **Non-membership** - nullifier NOT in set (NullifierSet)
 //!    - Mock: HashSet.contains() == false
-//!    - Light: Address insert succeeds
+//!    - Light: **Non-membership proof** (nullifier is NOT in compressed tree)
+//!    - Note: Light Protocol proves the nullifier doesn't exist, then inserts
 //!
-//! 3. **Spend validity** - ZK proof of valid note
+//! 3. **Spend validity** - ZK proof of valid note (SpendProver)
 //!    - Current: UltraPlonk (via SpendProver trait)
 //!    - Future: Could support other proving systems
+//!
+//! ## Why Two Separate Stores?
+//!
+//! - Different proof types: membership vs non-membership
+//! - Different semantics: append-only tree vs existence set
+//! - Light Protocol may use different compressed account trees
+//! - Cleaner separation of concerns
 //!
 //! ## Feature-Based Configuration
 //!
@@ -564,6 +574,9 @@ pub enum ChainError {
 
     #[error("Connection error: {0}")]
     ConnectionError(String),
+
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Shield (deposit) request
