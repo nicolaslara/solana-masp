@@ -61,227 +61,250 @@ The client and indexer jointly enforce correct note discovery and wallet state:
 **Public Inputs:**
 
 - `new_commitment` - The note commitment being created
-- `asset_id` - Which token (derived from mint address)
-- `amount` - Deposit amount (public for matching with token transfer)
+- `public_asset_id` - Which token (derived from mint address)
+- `public_amount` - Deposit amount (public for matching with token transfer)
+- `ct_hash` - Ciphertext binding hash (Option 1A weak binding)
 
 **Private Inputs:**
 
 - `recipient` - Diversified address (pk_d.x)
+- `diversifier_index` - Index for address derivation
 - `nullifier_nonce` - Random, unique per note
 - `note_randomness` - Random, hides note contents
 
 ### Required Constraints (Shield)
 
-#### 1.1 Commitment Integrity ✅ CRITICAL
+#### 1.1 Commitment Integrity ✅ CRITICAL ✅ IMPLEMENTED
 
 ```text
-commitment == Poseidon(DOM_NOTE_COMMIT, asset_id, amount, recipient, nullifier_nonce, note_randomness)
+commitment == Poseidon2(DOM_NOTE_COMMIT, asset_id, amount, recipient, diversifier_index, nullifier_nonce, note_randomness)
 ```
 
 **Why:** Prevents creating commitments that don't correspond to valid notes.
+
+**Implementation:** `circuits/masp/shield/src/main.nr` → `prove_note_preimage_hashes_to_commitment()`
+
+#### 1.2 Amount Range Check ✅ CRITICAL ✅ IMPLEMENTED
+
+```text
+amount < 2^64
+```
+
+**Why:** Prevents overflow attacks in balance conservation.
+
+**Implementation:** Enforced by Noir's `u64` type system (automatic range constraints).
+
+#### 1.3 Asset ID Binding ⚠️ CHAIN-ENFORCED
+
+```text
+asset_id == Poseidon(DOM_ASSET, token_address)
+```
+
+**Current implementation:** `prove_asset_id_binding()` is a **no-op** in the circuit. The chain program MUST compute `asset_id = H(token_address)` from the actual SPL mint and use that value as the public input.
+
+**Why this is safe:** The prover cannot choose an arbitrary `asset_id` — it's computed by the chain from the real token being deposited.
+
+#### 1.4 Ciphertext Hash Binding ✅ IMPLEMENTED
+
+```text
+ct_hash != 0  (for enabled outputs)
+```
+
+**Why:** Binds the proof to a specific ciphertext (Option 1A weak binding). The wallet verifies `ct_hash == H(DOM_CIPHERTEXT, ciphertext_bytes)` when accepting notes.
+
+**Implementation:** `circuits/masp/shield/src/main.nr` → `assert(public.ct_hash != 0)`
 
 ### Who checks what (Shield)
 
 - **Circuit must prove**
   - Commitment integrity (cm matches note fields)
-  - Amount range check (u64)
-  - Asset id binding (asset_id corresponds to the token being deposited)
+  - Amount range check (u64 type)
+  - Ciphertext hash is non-zero
 - **Chain must enforce**
+  - Asset ID derivation from actual SPL mint
   - Actual SPL transfer of `(token_address, amount)` into the pool
   - Proof verification with `vk_shield`
   - Commitment append to the commitment set
 - **Client/indexer must support**
   - Storing ciphertexts in transaction data for later scanning
   - Client-side commitment verification after decryption
-
-#### 1.2 Amount Range Check ✅ CRITICAL
-
-```text
-amount < 2^64
-```
-
-**Why:** Prevents overflow attacks in balance conservation. Without this, an attacker could create a note with amount = p - 100 (where p is field modulus), which looks like a huge positive number but wraps to negative.
-
-#### 1.3 Asset ID Derivation ✅ CRITICAL
-
-```text
-asset_id == Poseidon(DOM_ASSET, token_address)
-```
-
-**Why:** Binds the commitment to the actual token being deposited. Must match the public token being transferred on-chain.
-
-#### 1.4 Recipient Format (Optional but Recommended)
-
-```text
-recipient is a valid field element (< field modulus)
-```
-
-**Why:** Prevents invalid addresses that could lock funds.
-
-### Planned Statement Checklist (Shield)
-
-The `shield` circuit entrypoint should be a clear audit trail that calls one function per statement:
-
-- **Commitment preimage**: `new_commitment == H(asset_id, amount, recipient, nullifier_nonce, note_randomness)`
-- **Amount range check**: `amount < 2^64`
-- **Asset binding**: `asset_id` corresponds to the deposited token (program enforces SPL transfer)
+  - Verify `ct_hash` matches fetched ciphertext bytes
 
 ---
 
-## 2. Transfer Circuit (Shielded Spend + Output)
+## 2. Transfer Circuit (N→M Shielded Transfer)
+
+The transfer circuit supports flexible **N inputs → M outputs** within fixed compile-time maxima.
+
+- **MAX_INPUTS = 3**
+- **MAX_OUTPUTS = 3**
+
+Disabled slots are padded with zeros and gated by enable flags.
 
 **Public Inputs:**
 
-- `anchor` - Merkle root from history (proves tree state)
-- `input_commitment` - Commitment being spent (binds membership witness to note preimage)
-- `nullifier` - Reveals spent note (double-spend prevention)
-- `new_commitment` - Output note commitment
-- `tx_binding_hash` - Prevents transaction malleability
+| Input | Type | Description |
+|-------|------|-------------|
+| `anchor` | Field | Shared Merkle root for all inputs |
+| `nullifiers[3]` | [Field; 3] | Padded with 0 for disabled inputs |
+| `output_commitments[3]` | [Field; 3] | Padded with 0 for disabled outputs |
+| `input_count` | u32 | Number of enabled inputs (1–3) |
+| `output_count` | u32 | Number of enabled outputs (1–3) |
+| `ct_hashes[3]` | [Field; 3] | Ciphertext hashes (0 for disabled) |
+| `tx_binding` | Field | Transaction binding hash |
 
-**Private Inputs (Spend side):**
+**Private Inputs (per input slot):**
 
-- `note` - Full note plaintext being spent
-- `merkle_path` - Siblings proving membership
-- `spending_key` (or `ask`, `nsk`) - Proves ownership
+- `enabled` - Whether this slot is active
+- `note_*` - Full note plaintext fields
+- `spending_key` - Root secret (circuit derives `ask`, `nsk`)
+- `siblings[32]`, `path_indices[32]` - Merkle path
 
-**Private Inputs (Output side):**
+**Private Inputs (per output slot):**
 
-- `output_note` - New note being created
-- `output_randomness` - For commitment hiding
+- `enabled` - Whether this slot is active
+- `note_*` - Output note plaintext fields
+
+**Private Input (shared):**
+
+- `transfer_asset_id` - Single asset for all enabled inputs/outputs
 
 ### Required Constraints (Transfer)
 
-#### 2.1 Membership Proof ✅ CRITICAL
+#### 2.1 Membership Proof ✅ CRITICAL ✅ IMPLEMENTED
 
+For each **enabled** input:
 ```text
-merkle_root(note.commitment, merkle_path) == anchor
+merkle_root(input_commitment, siblings, path_indices) == anchor
 ```
 
-**Why:** Proves the input note exists in the commitment tree. Without this, an attacker could spend non-existent notes.
+**Implementation:** `circuits/masp/common/src/statements.nr` → `prove_merkle_membership()`
 
-**Implementation note (Light Protocol):** in production, membership is expected to be proven by a **separate validity proof**
-(e.g. Light Groth16) verified on-chain. In that model, the MASP spend circuit does **not** verify a Merkle path; instead it must
-take `input_commitment` as a public input and prove knowledge of its preimage.
+#### 2.2 Commitment Re-derivation ✅ CRITICAL ✅ IMPLEMENTED
 
-#### 2.2 Commitment Re-derivation ✅ CRITICAL
-
+For each **enabled** input:
 ```text
-input_commitment == Poseidon(DOM_NOTE_COMMIT, note.asset_id, note.amount, note.recipient, note.nullifier_nonce, note.note_randomness)
+input_commitment == Poseidon2(DOM_NOTE_COMMIT, note_asset_id, note_amount, note_recipient, diversifier_index, nullifier_nonce, note_randomness)
 ```
 
-**Why:** Proves the spender knows the actual note contents, not just the commitment hash.
+**Implementation:** `compute_note_commitment()` in circuit
 
-#### 2.3 Nullifier Derivation ✅ CRITICAL
+#### 2.3 Nullifier Derivation ✅ CRITICAL ✅ IMPLEMENTED
 
+For each **enabled** input:
 ```text
-nullifier == Poseidon(DOM_NULLIFIER, nk, note.nullifier_nonce)
+nullifier == Poseidon2(DOM_NULLIFIER, nsk, note_nullifier_nonce)
 ```
 
-Where `nk` is derived from the spending key.
+**CRITICAL SECURITY:** Uses `nsk` (nullifier SECRET), NOT `nk.x` (public). This ensures FullViewingKey holders cannot spend.
 
-**Why:** Only the note owner can derive the correct nullifier. This proves ownership AND enables double-spend prevention.
+**Implementation:** `prove_nullifier_derivation()` with `auth_result.nsk`
 
-#### 2.4 Ownership Authorization ✅ CRITICAL
+#### 2.4 Ownership Authorization ✅ CRITICAL ✅ IMPLEMENTED
 
+Full EC-based spend authorization:
 ```text
-note.recipient == pk_d.x
-pk_d == ivk * g_d
-ivk == H(ak.x, nk.x)
-ak == ask * G
-nk == nsk * G
+ask = H(DOM_AUTH_SECRET, spending_key)
+nsk = H(DOM_NULLIFIER_SECRET, spending_key)
+ak = ask * G
+nk = nsk * G
+ivk = H(DOM_IVK, ak.x, nk.x)
+g_d = H(diversifier_index) * G
+pk_d = ivk * g_d
+assert(note_recipient == pk_d.x)
 ```
 
-**Why:** Proves the spender owns the note (their address is the recipient).
+**Implementation:** `prove_spend_authorization()` + `verify_inputs_same_owner()` (uses Grumpkin EC ops)
 
-#### 2.5 Output Commitment Integrity ✅ CRITICAL
+#### 2.5 Output Commitment Integrity ✅ CRITICAL ✅ IMPLEMENTED
 
+For each **enabled** output:
 ```text
-new_commitment == Poseidon(DOM_NOTE_COMMIT, output_note.asset_id, output_note.amount, output_note.recipient, output_note.nullifier_nonce, output_note.note_randomness)
+output_commitment == Poseidon2(DOM_NOTE_COMMIT, out_asset_id, out_amount, out_recipient, out_diversifier_index, out_nullifier_nonce, out_randomness)
 ```
 
-**Why:** Output commitment must correspond to a valid note.
+**Implementation:** Recomputes and asserts against `public.output_commitments[j]`
 
-#### 2.6 Output Amount Range Check ✅ CRITICAL
+#### 2.6 Amount Range Check ✅ CRITICAL ✅ IMPLEMENTED
 
+All amounts are `u64` in Noir → automatic range constraints.
+
+#### 2.7 Balance Conservation ✅ CRITICAL ✅ IMPLEMENTED
+
+Single-asset semantics:
 ```text
-output_note.amount < 2^64
+Σ(enabled_input_amounts) == Σ(enabled_output_amounts)
 ```
 
-**Why:** Same overflow prevention as shield.
+All enabled inputs/outputs must share the same `asset_id`.
 
-#### 2.7 Balance Conservation ✅ CRITICAL
+**Implementation:** `verify_balance_conservation()` in `transfer/src/main.nr`
 
-**Single-asset (simple):**
+#### 2.8 Output Nonce Derivation ✅ CRITICAL ✅ IMPLEMENTED
 
+For each **enabled** output:
 ```text
-input_note.amount == output_note.amount + change_note.amount
+out_nullifier_nonce == Poseidon2(DOM_NULLIFIER_NONCE, tx_binding, output_index)
 ```
 
-**Why:** Prevents creating value from nothing.
+**Why:** With multiple inputs, we can't use `input_commitment` for nonce derivation. Using `tx_binding` ensures uniqueness.
 
-**Note on multi-asset:** We intentionally do **not** use “single field equation” tag schemes for consensus soundness.
-For true multi-asset-in-one-action semantics, the intended solution is **value commitments** (Pedersen-style)
-with per-asset generators (or equivalent hard-binding construction) + range checks. See `tasks.md` Milestone 5.
+**Implementation:** `derive_output_nonce()` in circuit
 
-#### 2.8 Asset Type Preservation ✅ CRITICAL (for single-asset transfer)
+#### 2.9 Transaction Binding ✅ CRITICAL ✅ IMPLEMENTED
 
 ```text
-input_note.asset_id == output_note.asset_id
-input_note.asset_id == change_note.asset_id
+tx_binding == Poseidon2(DOM_TX_BINDING, 2, anchor, input_count, output_count, h_nf)
+where h_nf = Poseidon2(nullifiers[0..MAX_INPUTS])
 ```
 
-**Why:** Prevents cross-asset transfers (unless explicitly designed for swaps).
+**Why:** Prevents relayers from reordering/splicing nullifiers across transactions.
 
-#### 2.9 Nullifier Nonce Derivation ✅ CRITICAL
+**Implementation:** `compute_tx_binding()` in circuit
+
+#### 2.10 Ciphertext Hash Binding ✅ IMPLEMENTED
+
+For each **enabled** output: `ct_hashes[j] != 0`
+For each **disabled** output: `ct_hashes[j] == 0`
+
+**Implementation:** `verify_ct_hashes()` in circuit
+
+#### 2.11 Count Correctness + Slot Gating ✅ IMPLEMENTED
 
 ```text
-output_note.nullifier_nonce == Poseidon(DOM_NULLIFIER_NONCE, input_commitment, output_index)
+1 ≤ input_count ≤ MAX_INPUTS
+1 ≤ output_count ≤ MAX_OUTPUTS
+input_count == Σ(input_enabled[i])
+output_count == Σ(output_enabled[j])
 ```
 
-**Why:** Ensures each output note has a unique nullifier nonce derived from the transaction. Prevents nullifier collisions.
+Disabled inputs: `public.nullifiers[i] == 0`
+Disabled outputs: `public.output_commitments[j] == 0`
 
-#### 2.10 Transaction Binding ✅ CRITICAL
-
-```text
-tx_binding_hash == Poseidon(DOM_TX_BINDING, anchor, nullifier, new_commitment, ...)
-```
-
-**Why:** Binds all transaction components together, preventing component substitution attacks.
-
-### Planned Statement Checklist (Transfer)
-
-The `transfer` circuit entrypoint should be a clear audit trail that calls one function per statement:
-
-- **External membership**: membership witness is verified outside the circuit (Merkle path in mocks; Light validity proof on-chain in production).
-  - Circuit must still bind `input_commitment` to note plaintext (preimage knowledge).
-- **Input commitment preimage**: `input_commitment == H(note_fields...)`
-- **Nullifier derivation / ownership binding**: `nullifier == H(nk, note_nullifier_nonce)` (+ later full Orchard/Sapling-style authorization)
-- **Output commitments well-formed**: each `output_commitment_i == H(out_note_i_fields...)`
-- **Output nullifier nonce derivation** (later): derive each output’s `nullifier_nonce` from transaction context to avoid collisions
-- **Amount range checks**: all amounts < 2^64
-- **Balance conservation**:
-  - single-asset first
-  - multi-asset later (Milestone 5) via a hard-binding construction (value commitments preferred)
-- **Transaction binding**: `tx_binding_hash` commits to the full action intent
+**Implementation:** `verify_counts()`, `verify_disabled_nullifiers()`, `verify_disabled_outputs()`
 
 ### Who checks what (Transfer)
 
 - **Circuit must prove**
-  - Membership against `anchor`
-  - Input commitment preimage (knowledge of note plaintext)
-  - Nullifier derivation from `nk` and note nonce (ownership binding)
-  - Output commitment preimages (outputs are real notes)
-  - Amount range checks
-  - Balance conservation (single-asset first; multi-asset later in Milestone 5 via a hard-binding construction)
-  - Tx binding (proof is bound to the specific transaction intent)
+  - Membership against shared `anchor` for all enabled inputs
+  - Input commitment preimage (note plaintext knowledge)
+  - SpendingKey-only nullifier derivation (`nsk`, not `nk.x`)
+  - Full EC spend authorization
+  - Output commitment integrity
+  - Deterministic output nonce derivation
+  - Single-asset balance conservation
+  - Transaction binding
+  - Ciphertext hash binding
+  - Count/gating correctness
 - **Chain must enforce**
   - Anchor validity (root history policy)
-  - Nullifier uniqueness (reject double-spends)
+  - Nullifier uniqueness for all non-zero nullifiers
   - Proof verification with `vk_transfer`
-  - Append output commitments + store ciphertexts
+  - Append non-zero output commitments
 - **Client/indexer must support**
-  - Indexer serving ciphertexts + witnesses
-  - Client verifying ciphertext decrypts to a note matching the output commitment
+  - Indexer serving ciphertexts + Merkle witnesses
+  - Client verifying `ct_hash` before trial decryption
+  - Client verifying plaintext ↔ commitment consistency
 
 ---
 
@@ -289,58 +312,103 @@ The `transfer` circuit entrypoint should be a clear audit trail that calls one f
 
 **Public Inputs:**
 
-- `anchor` - Merkle root
-- `input_commitment` - Commitment being spent (binds membership witness to note preimage)
-- `nullifier` - Spent note identifier
-- `amount` - Amount being withdrawn (NOW PUBLIC)
-- `recipient` - Transparent recipient address (NOW PUBLIC)
-- `asset_id` - Which token (NOW PUBLIC)
+| Input | Type | Description |
+|-------|------|-------------|
+| `anchor` | Field | Merkle root for membership proof |
+| `nullifier` | Field | Spent note identifier |
+| `tx_binding` | Field | Transaction binding hash |
+| `public_amount` | u64 | Amount being withdrawn |
+| `public_recipient_limbs` | [u64; 4] | Recipient as 4×u64 LE limbs |
+| `public_asset_id` | Field | Which token |
 
 **Private Inputs:**
 
-- `note` - Full note plaintext
-- `merkle_path` - Membership proof
-- `spending_key` - Proves ownership
+- `note_*` - Full note plaintext fields
+- `spending_key` - Root secret (circuit derives `ask`, `nsk`)
+- `siblings[32]`, `path_indices[32]` - Merkle path
 
 ### Required Constraints (Unshield)
 
-#### 3.1-3.4 Same as Transfer (Membership, Commitment, Nullifier, Ownership)
+#### 3.1 Membership Proof ✅ CRITICAL ✅ IMPLEMENTED
 
-#### 3.5 Public Output Binding ✅ CRITICAL
+```text
+merkle_root(input_commitment, siblings, path_indices) == anchor
+```
+
+**Implementation:** `prove_merkle_membership()` with private `input_commitment`
+
+#### 3.2 Commitment Re-derivation ✅ CRITICAL ✅ IMPLEMENTED
+
+```text
+input_commitment == Poseidon2(DOM_NOTE_COMMIT, note_fields...)
+```
+
+**Implementation:** `prove_note_preimage_hashes_to_commitment()`
+
+#### 3.3 Nullifier Derivation ✅ CRITICAL ✅ IMPLEMENTED
+
+```text
+nullifier == Poseidon2(DOM_NULLIFIER, nsk, note_nullifier_nonce)
+```
+
+**CRITICAL SECURITY:** Uses `nsk` (secret), NOT `nk.x` (public).
+
+**Implementation:** `prove_nullifier_derivation()` with `auth_result.nsk`
+
+#### 3.4 Ownership Authorization ✅ CRITICAL ✅ IMPLEMENTED
+
+Same EC-based authorization as Transfer.
+
+**Implementation:** `prove_spend_authorization()`
+
+#### 3.5 Public Withdrawal Binding ✅ CRITICAL ✅ IMPLEMENTED
 
 ```text
 note.amount == public_amount
 note.asset_id == public_asset_id
 ```
 
-**Why:** The withdrawn amount and asset MUST match what's in the note. Otherwise, an attacker could withdraw more than they deposited.
+**Implementation:** `check_public_withdraw_binding_single_asset_action()`
 
-### Planned Statement Checklist (Unshield)
+#### 3.6 Transaction Binding ✅ CRITICAL ✅ IMPLEMENTED
 
-The `unshield` circuit entrypoint should be a clear audit trail that calls one function per statement:
+```text
+tx_binding == Poseidon2(DOM_TX_BINDING, 3, anchor, nullifier, public_amount, 
+                        limbs[0], limbs[1], limbs[2], limbs[3], public_asset_id)
+```
 
-- **External membership**: membership witness is verified outside the circuit (Merkle path in mocks; Light validity proof on-chain in production).
-  - Circuit must still bind `input_commitment` to note plaintext (preimage knowledge).
-- **Input commitment preimage**: `input_commitment == H(note_fields...)`
-- **Nullifier derivation / ownership binding**: `nullifier == H(nk, note_nullifier_nonce)` (+ later full authorization)
-- **Public withdrawal binding**:
-  - `note.amount == public_amount`
-  - `note.asset_id == public_asset_id`
-  - recipient encoding must match program semantics
+**Why:** Binds the recipient address to the proof intent, preventing recipient swaps.
+
+**CRITICAL:** `input_commitment` is NOT in `tx_binding` (it's private; proof binds via preimage knowledge).
+
+**Implementation:** Inline Poseidon2 in `unshield/src/main.nr`
+
+#### 3.7 Recipient Encoding ✅ IMPLEMENTED
+
+Recipient is encoded as **4×u64 little-endian limbs**, NOT as a single Field.
+
+**Why:** BN254 scalar field modulus p < 2^254, so `Fr::from_be_bytes_mod_order(32-byte pubkey)` is many-to-one. Distinct 32-byte recipients could collide to the same Field value.
+
+**Implementation:** `public_recipient_limbs: [u64; 4]` as public inputs; chain recomputes limbs from actual recipient and rejects mismatches.
 
 ### Who checks what (Unshield)
 
 - **Circuit must prove**
-  - Membership, input preimage, nullifier derivation, ownership authorization (same as transfer)
-  - Public output binding:
-    - `note.amount == public_amount`
-    - `note.asset_id == public_asset_id`
-    - (Recipient encoding decision must match program semantics)
+  - Membership against `anchor`
+  - Input commitment preimage (note plaintext knowledge)
+  - SpendingKey-only nullifier derivation (`nsk`, not `nk.x`)
+  - Full EC spend authorization
+  - Public withdrawal binding (amount, asset)
+  - Transaction binding (includes recipient limbs)
 - **Chain must enforce**
   - Anchor validity
   - Nullifier uniqueness
   - Proof verification with `vk_unshield`
+  - Recompute `public_recipient_limbs` from actual recipient bytes and reject mismatch
   - SPL transfer of `(token_address, amount)` to `recipient`
+- **Client/indexer must support**
+  - Indexer serving Merkle witnesses
+  - Client building correct `public_recipient_limbs` encoding
 
 ---
 
@@ -351,12 +419,19 @@ The `unshield` circuit entrypoint should be a clear audit trail that calls one f
 All hash operations MUST use domain tags:
 
 ```text
-DomainTag::NoteCommitment = 1
-DomainTag::Nullifier = 2
-DomainTag::AssetId = 3
-DomainTag::MerkleNode = 4
-... (see domain.rs for full list)
+DomainTag::NoteCommitment = 1      // Note commitment
+DomainTag::Nullifier = 2           // Nullifier derivation
+DomainTag::AssetId = 3             // Asset ID binding
+DomainTag::Ciphertext = 4          // ct_hash (client-side only)
+DomainTag::TransactionBinding = 5  // tx_binding
+DomainTag::NullifierNonce = 6      // Output nonce derivation
+DomainTag::MerkleNode = 7          // Merkle tree internal nodes
+DomainTag::IncomingViewingKey = 8  // IVK derivation
+DomainTag::AuthorizationSecret = 9 // ask = H(9, spending_key)
+DomainTag::NullifierSecret = 10    // nsk = H(10, spending_key)
 ```
+
+**Source of truth:** `circuits/masp/common/src/statements.nr` (circuit), `client/src/domain.rs` (Rust)
 
 **Why:** Prevents cross-domain attacks where a hash from one context is reused in another.
 

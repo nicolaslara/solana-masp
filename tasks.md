@@ -1,8 +1,8 @@
 # Solana MASP - Tasks
 
-## Status: ✅ Circuits Implemented → Ready for Real Prover Testing (0.14)
+## Status: ✅ Circuits Complete + Verified → Ready for Solana Integration (Milestone 1)
 
-**Current state:** Circuit constraints are implemented and match `docs/protocol-soundness.md`. Mock proofs pass. Ready to validate with real UltraPlonk proofs.
+**Current state:** All 3 circuits (shield, transfer, unshield) are implemented, match `docs/protocol-soundness.md`, and verified with real UltraPlonk proofs. Ready for on-chain integration.
 
 ## Before Starting
 
@@ -36,15 +36,15 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 
 ## Next Priority Order
 
-**Current sprint:**
+**Completed in current sprint:**
 
-1. ✅ Real prover testing (0.14.1) — transfer circuit validated
-2. ⬅️ **Doc cleanup (0.14.3)** — fix drift in `docs/circuit-security-requirements.md` and `docs/implementation-status.md`
-3. **Shield/Unshield pipeline tests (0.14.1)** — add remaining circuit tests
+1. ✅ Real prover testing (0.14.1) — all 3 circuits validated (transfer, shield, unshield)
+2. ✅ Doc cleanup (0.14.3) — fixed drift in `docs/circuit-security-requirements.md` and `docs/implementation-status.md`
+3. ✅ Shield/Unshield pipeline tests (0.14.1) — all 3 circuits have compile→prove→verify tests
 
-**Next:**
+**Next sprint:**
 
-4. **Solana program (Milestone 1)** — proof verification + commitment accumulator + nullifier set + SPL transfers
+4. ⬅️ **Solana program (Milestone 1)** — proof verification + commitment accumulator + nullifier set + SPL transfers
 
 ---
 
@@ -279,40 +279,32 @@ Circuits are stable. Optimize when building real on-chain transactions.
 
 ---
 
-## Milestone 0.14: Real Prover Backend Bringup (Local) ⬅️ CURRENT
+## Milestone 0.14: Real Prover Backend Bringup (Local) ✅ COMPLETE
 
 **Goal:** Run the existing user flows with **real proofs**, while keeping chain/indexer mocked.
 
-**Why now:** Circuits are implemented. This validates end-to-end ZK plumbing before adding Solana complexity.
+**Result:** All 3 circuits validated with real UltraPlonk proofs. Docs updated to match implementation.
 
-**Current state:**
-- ✅ `CliUltraPlonkProver` implemented (shells out to `nargo` + `bb`)
-- ✅ `NoirRsUltraPlonkVerifier` implemented (`ultraplonk-core`)
-- ✅ Transfer pipeline test exists (`client/tests/masp_ultraplonk_pipeline.rs`)
-- ✅ Transfer E2E test exists (`client/tests/real_ultraplonk_transfer_e2e.rs`)
-- ⚠️ Shield/Unshield pipeline tests missing
-- ⚠️ Toolchain versions not pinned in docs
-
-### 0.14.1 Complete Pipeline Coverage (P0)
+### 0.14.1 Complete Pipeline Coverage ✅
 
 - [x] Transfer circuit: compile → prove → verify (pipeline test)
-- [ ] **Shield circuit: add pipeline test** (same pattern as transfer)
-- [ ] **Unshield circuit: add pipeline test** (same pattern as transfer)
-- [ ] Add negative tests: wrong public inputs should fail verification
+- [x] Shield circuit: pipeline test added
+- [x] Unshield circuit: pipeline test added
+- [ ] Add negative tests: wrong public inputs should fail verification (deferred)
 
-### 0.14.2 Toolchain & Version Hygiene
+### 0.14.2 Toolchain & Version Hygiene (deferred)
 
 - [ ] Pin toolchain versions (Noir v1.0.0-beta.3 + bb 0.82.2) in README
 - [ ] Add `scripts/install-toolchain.sh` or document installation
 - [ ] Update README with "newcomer path" to run proofs locally
 
-### 0.14.3 Fix Doc Drift (P1)
+### 0.14.3 Fix Doc Drift ✅
 
-- [ ] Update `docs/circuit-security-requirements.md` to match N→M transfer model
-- [ ] Update `docs/implementation-status.md` — spend-auth is implemented, not placeholder
-- [ ] Document that shield `prove_asset_id_binding()` is no-op (chain computes asset_id)
+- [x] Update `docs/circuit-security-requirements.md` to match N→M transfer model
+- [x] Update `docs/implementation-status.md` — spend-auth is implemented, not placeholder
+- [x] Document that shield `prove_asset_id_binding()` is no-op (chain computes asset_id)
 
-### 0.14.4 Groth16 Backend (Alternative Path)
+### 0.14.4 Groth16 Backend (Alternative Path - deferred)
 
 **References:**
 - `../noir-main/` — Noir fork with Groth16 support
@@ -325,11 +317,11 @@ Circuits are stable. Optimize when building real on-chain transactions.
 - [ ] Ensure public inputs layout is consistent with UltraPlonk
 - [ ] Benchmark: Groth16 proof size (~192B) vs UltraPlonk (~2KB)
 
-### 0.14.5 Acceptance Criteria
+### 0.14.5 Acceptance Criteria ✅
 
-- [ ] All 3 circuits have pipeline tests (compile → prove → verify)
-- [ ] `cargo test --features ultraplonk-verifier` passes with real proofs
-- [ ] Docs match implementation
+- [x] All 3 circuits have pipeline tests (compile → prove → verify)
+- [x] `cargo test --features ultraplonk-verifier` passes with real proofs
+- [x] Docs match implementation
 
 ---
 
@@ -370,11 +362,11 @@ backend-light = []    # Light Protocol (production)
 
 ---
 
-## Milestone 1: Minimal On-chain POC (No Light)
+## Milestone 1: Minimal On-chain POC (No Light) ⬅️ CURRENT
 
 **Goal:** First Solana program that verifies proofs E2E.
 
-**Depends on:** Milestone 0.14 (real prover testing)
+**Depends on:** Milestone 0.14 ✅ (real prover testing complete)
 
 ### 1.0 Circuits ✅ COMPLETE
 

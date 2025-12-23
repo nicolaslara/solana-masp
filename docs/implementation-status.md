@@ -17,7 +17,7 @@ This document tracks the implementation status of protocol statements from `docs
 |----|-----------|------|---------|-------|
 | **S1** | Transparent boundary correctness (token transfer) | ❌ | n/a | Chain-only; no SPL transfers in mocks yet |
 | **S2** | Commitment integrity: `cm == H(note_fields...)` | ✅ | ✅ | `compute_note_commitment` |
-| **S3** | Asset binding: `asset_id == H(token_address)` | ✅ | ⚠️ | Mock checks; circuit placeholder (chain validates SPL) |
+| **S3** | Asset binding: `asset_id == H(token_address)` | ✅ | n/a | **Chain-only by design:** chain computes `asset_id` from SPL mint; circuit uses chain-provided value |
 | **S4** | Amount range: `amount < 2^64` | ✅ | ✅ | Rust u64 type; Noir u64 type |
 | **S5** | Output ciphertext hash binding (ct_hash) | ✅ | ✅ | Option 1A weak binding; `assert(ct_hash != 0)` |
 
@@ -31,7 +31,7 @@ This document tracks the implementation status of protocol statements from `docs
 ### Circuit Implementation Locations (Shield)
 
 - **S2**: `circuits/masp/shield/src/main.nr` → calls `prove_note_preimage_hashes_to_commitment()`
-- **S3**: `circuits/masp/common/src/statements.nr` → `prove_asset_id_binding()` (placeholder)
+- **S3**: Chain-enforced (not in circuit); `prove_asset_id_binding()` is a no-op placeholder for documentation
 - **S4**: Noir type system (`u64`)
 - **S5**: `circuits/masp/shield/src/main.nr` → `assert(public.ct_hash != 0)`
 
@@ -69,7 +69,7 @@ This document tracks the implementation status of protocol statements from `docs
 ### Circuit Implementation Locations (Transfer)
 
 - **T1**: `circuits/masp/common/src/statements.nr` → `prove_merkle_membership()`
-- **T2**: `circuits/masp/common/src/statements.nr` → `prove_spend_authorization()` (placeholder)
+- **T2**: `circuits/masp/common/src/statements.nr` → `prove_spend_authorization()` (full Grumpkin EC ops)
 - **T2b**: `circuits/masp/transfer/src/main.nr` → `compute_tx_binding()`
 - **T3**: `circuits/masp/transfer/src/main.nr` → `prove_note_preimage_hashes_to_commitment()`
 - **T4**: `circuits/masp/common/src/statements.nr` → `prove_nullifier_derivation()`
