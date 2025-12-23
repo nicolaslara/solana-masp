@@ -128,6 +128,7 @@ This file captures learnings, design decisions, and discoveries as we develop th
 **Root cause:** `send_and_confirm_transaction` defaults to `finalized` commitment, which waits for 31 confirmations.
 
 **Solution:** Use `confirmed` commitment (1 confirmation):
+
 ```rust
 let config = RpcSendTransactionConfig {
     skip_preflight: false,
