@@ -912,5 +912,6 @@ If we need smaller proofs / lower CU:
 - `../mobile-solana-e2e/solana-groth16-verifier/` — Solana on-chain Groth16 verifier
 
 Groth16 tradeoffs:
+
 - **Pros:** ~192B proofs (vs ~2KB UltraPlonk), ~81K CU (vs ~500K-1M)
 - **Cons:** Requires trusted setup per circuit, different toolchain

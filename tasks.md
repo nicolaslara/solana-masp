@@ -44,7 +44,7 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 
 **Next:**
 
-4. **Solana program (Milestone 1)** — proof verification + commitment accumulator + nullifier set + SPL transfers
+1. **Solana program (Milestone 1)** — proof verification + commitment accumulator + nullifier set + SPL transfers
 
 ---
 
@@ -220,6 +220,7 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 ### 0.13.2 Store Abstractions (Deferred to Milestone 3/4)
 
 Light Protocol integration deferred. Current model:
+
 - Mock in-memory Merkle tree for commitments
 - Mock in-memory set for nullifiers
 - Abstractions exist (`MembershipWitness`, `Anchor`) for later swap
@@ -286,6 +287,7 @@ Circuits are stable. Optimize when building real on-chain transactions.
 **Why now:** Circuits are implemented. This validates end-to-end ZK plumbing before adding Solana complexity.
 
 **Current state:**
+
 - ✅ `CliUltraPlonkProver` implemented (shells out to `nargo` + `bb`)
 - ✅ `NoirRsUltraPlonkVerifier` implemented (`ultraplonk-core`)
 - ✅ Transfer pipeline test exists (`client/tests/masp_ultraplonk_pipeline.rs`)
@@ -315,11 +317,13 @@ Circuits are stable. Optimize when building real on-chain transactions.
 ### 0.14.4 Groth16 Backend (Alternative Path)
 
 **References:**
+
 - `../noir-main/` — Noir fork with Groth16 support
 - `../acvm-backend-groth16/` — ACVM backend for Groth16 proving
 - `../mobile-solana-e2e/solana-groth16-verifier/` — Solana on-chain Groth16 verifier
 
 **Tasks:**
+
 - [ ] Study `../acvm-backend-groth16/` integration pattern
 - [ ] Implement `Groth16Prover` for MASP circuits
 - [ ] Ensure public inputs layout is consistent with UltraPlonk
@@ -793,4 +797,3 @@ cd client && cargo test --test e2e_tests -- --nocapture
 - **Surfpool** is started manually (not via MCP)
 - **Update `knowledge.md`** when you learn something new
 - **Update this file** when completing tasks or discovering new ones
-
