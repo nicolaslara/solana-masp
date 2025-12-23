@@ -177,12 +177,31 @@ MASP_PRINT_CONFIG=1 \
   --test user_flows -- --nocapture --test-threads=1
 ```
 
+<<<<<<< HEAD
 **Notes:**
 - Uses `--test-threads=1` to avoid parallel request issues with Surfpool
 - Auto-skips rebuild if .so is up-to-date
 - Deploys fresh program each test run (~7s total including deploy)
 
 **Manual deployment** (if needed):
+=======
+Auto-deploy behavior:
+
+- If `MASP_PROGRAM_ID` is set → uses that program ID (no build/deploy)
+- If `.so` is missing or source changed → rebuilds with `cargo build-sbf`
+- Deploys via `solana program deploy` and sets `MASP_PROGRAM_ID`
+- Uses `--features local-testing,mock-proofs` by default
+
+Control via environment:
+
+| Variable | Description |
+|----------|-------------|
+| `MASP_PROGRAM_ID` | Skip build/deploy, use this program ID |
+| `MASP_SKIP_BUILD` | Skip rebuild check (use existing .so) |
+| `MASP_PROGRAM_FEATURES` | Override build features |
+
+#### 2b. With Surfpool - Manual Deploy
+>>>>>>> 737df988aecd70d80a76c3395c2653c7150cb6f8
 
 ```bash
 # Build once
@@ -254,6 +273,7 @@ MASP_PRINT_CONFIG=1 \
 - `onchain-mock` feature enables the Keccak256-based mock prover compatible with on-chain mock verifier
 
 Expected output:
+
 ```
 ╔══════════════════════════════════════╗
 ║       MASP Backend Configuration     ║

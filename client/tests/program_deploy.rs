@@ -8,6 +8,7 @@
 //!
 //! Usage: Call `ensure_program_deployed()` at the start of test setup.
 
+use masp_client::backends::config::ChainBackend;
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -15,14 +16,10 @@ use std::sync::OnceLock;
 /// Stores the deployed program ID (set once per test suite)
 static DEPLOYED_PROGRAM_ID: OnceLock<String> = OnceLock::new();
 
-/// Get the RPC URL for the current chain configuration
-pub fn rpc_url_for_chain() -> String {
-    match std::env::var("MASP_CHAIN").as_deref() {
-        Ok("surfpool") => "http://127.0.0.1:8899".to_string(),
-        Ok("devnet") => "https://api.devnet.solana.com".to_string(),
-        Ok(url) if url.starts_with("http") => url.to_string(),
-        _ => "http://127.0.0.1:8899".to_string(), // Default to local
-    }
+/// Get the RPC URL for the current chain configuration.
+/// Uses the canonical `ChainBackend` from the client library.
+pub fn rpc_url_for_chain() -> Option<String> {
+    ChainBackend::from_env_or_default().rpc_url().map(|s| s.to_string())
 }
 
 /// Check if the .so needs to be rebuilt (any source file newer than .so)
@@ -189,8 +186,9 @@ pub fn ensure_program_deployed() -> &'static str {
             }
         }
 
-        // Deploy
-        let rpc_url = rpc_url_for_chain();
+        // Deploy - only if we have a real chain backend
+        let rpc_url = rpc_url_for_chain()
+            .expect("Cannot auto-deploy to mock chain - set MASP_CHAIN=surfpool or provide MASP_PROGRAM_ID");
         match deploy_program(&rpc_url) {
             Ok(id) => {
                 // Also set env var so other parts of the test can see it
