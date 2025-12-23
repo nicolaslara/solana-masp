@@ -411,19 +411,23 @@ Separate program (`programs/mock-commitment-store/`) for local testing.
 Implements BOTH stores in one program for testing simplicity:
 
 **NoteCommitmentStore** (membership proofs):
+
 - [x] `StoreState` - anchor history + leaf count
 - [x] `insert_commitment` instruction
 
 **NullifierSet** (non-membership proofs):
+
 - [x] `NullifierAccount` - PDA per nullifier (existence = spent)
 - [x] `insert_nullifier` instruction
 
 **Ciphertexts** (NOT in this store):
+
 - Stored as transaction calldata in MASP shield/transfer instructions
 - Indexer observes ledger and indexes for efficient lookup
 - See `knowledge.md` for architecture details
 
 ⚠️ **FOR LOCAL TESTING ONLY** - use Light Protocol in production:
+
 - Production uses **non-membership proofs** for nullifiers (not PDAs)
 - Production uses **validity proofs** for commitments (not naive tree)
 

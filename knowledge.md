@@ -947,6 +947,7 @@ When running with real Solana transactions (Surfpool, Devnet), how does the inde
 - `wait_for_indexer_update()` is a no-op
 
 **Code pattern:**
+
 ```rust
 let shared_store = Arc::new(MockStore::new(MERKLE_DEPTH));
 let chain = SolanaChain::surfpool(shared_store.clone(), verifier, mode);
@@ -977,6 +978,7 @@ let indexer: Arc<dyn Indexer> = shared_store; // Same Arc!
 - Client calls `wait_for_indexer_update(tx_sig)` which polls until data appears
 
 **Code pattern:**
+
 ```rust
 let chain = SolanaChain::devnet_external(verifier, mode);
 let indexer: Arc<dyn Indexer> = Arc::new(HeliusIndexer::new(rpc_url));
@@ -992,6 +994,7 @@ let indexer: Arc<dyn Indexer> = Arc::new(HeliusIndexer::new(rpc_url));
 ### Key Insight
 
 The `wait_for_indexer_update()` method is the synchronization point:
+
 - LocalSync (local): no-op (sync is immediate)
 - ExternalIndexer (external): polls external indexer until data appears
 
@@ -1036,11 +1039,13 @@ SolanaChain:
 ### API Simplification
 
 Before:
+
 ```rust
 SolanaChain::surfpool(store, verifier, verify_mode)
 ```
 
 After:
+
 ```rust
 // IndexerMode determines how chain syncs with indexer
 SolanaChain::surfpool(IndexerMode::LocalSync(store))?   // Tests
@@ -1056,6 +1061,7 @@ SolanaChain::mainnet()?  // Always External (no local store in prod)
 
 The program may need to support multiple proof systems (UltraPlonk, Groth16).
 Different proof systems have:
+
 - Different proof sizes (2144 bytes vs 192 bytes)
 - Different verification costs (~500K CU vs ~81K CU)
 - Different VK formats
@@ -1130,6 +1136,7 @@ OUT_DIR/
 ### Problem
 
 The MASP needs to store:
+
 1. **Commitments** in a Merkle tree (for **membership** proofs)
 2. **Nullifiers** in a set (for **non-membership** proofs / double-spend prevention)
 3. **Ciphertexts** (for wallet recovery - must be on-chain!)
@@ -1204,6 +1211,7 @@ is_spent(nullifier) -> bool
 ⚠️ **FOR LOCAL TESTING ONLY - NOT PRODUCTION SAFE**
 
 For testing simplicity, we combine both stores in one mock program:
+
 - Simple on-chain Merkle tree (NoteCommitmentStore)
 - PDA-based nullifier storage (NullifierSet)
 - Direct ciphertext account storage
@@ -1242,18 +1250,21 @@ NOT in external stores like Light Protocol.
 ```
 
 **Why NOT in external stores:**
+
 - Ciphertexts don't need membership/non-membership proofs
 - They're just data blobs that need to be permanently available
 - Ledger history is the most decentralized storage
 - Indexer is just an optimization layer (can be rebuilt from ledger)
 
 **Why this matters:**
+
 1. **Wallet recovery** - Replay ledger to find all ciphertexts (no indexer needed)
 2. **Censorship resistance** - Ciphertexts are in permanent ledger history
 3. **Auditability** - All data needed to verify state is on-chain
 4. **Simplicity** - No need for Light Protocol for ciphertexts
 
 **The indexer is a convenience layer:**
+
 - Indexes ciphertexts for efficient lookup by ct_hash
 - Can be rebuilt from scratch by replaying the ledger
 - Is NOT the source of truth

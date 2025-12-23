@@ -174,6 +174,7 @@ Disabled slots are padded with zeros and gated by enable flags.
 #### 2.1 Membership Proof ✅ CRITICAL ✅ IMPLEMENTED
 
 For each **enabled** input:
+
 ```text
 merkle_root(input_commitment, siblings, path_indices) == anchor
 ```
@@ -183,6 +184,7 @@ merkle_root(input_commitment, siblings, path_indices) == anchor
 #### 2.2 Commitment Re-derivation ✅ CRITICAL ✅ IMPLEMENTED
 
 For each **enabled** input:
+
 ```text
 input_commitment == Poseidon2(DOM_NOTE_COMMIT, note_asset_id, note_amount, note_recipient, diversifier_index, nullifier_nonce, note_randomness)
 ```
@@ -192,6 +194,7 @@ input_commitment == Poseidon2(DOM_NOTE_COMMIT, note_asset_id, note_amount, note_
 #### 2.3 Nullifier Derivation ✅ CRITICAL ✅ IMPLEMENTED
 
 For each **enabled** input:
+
 ```text
 nullifier == Poseidon2(DOM_NULLIFIER, nsk, note_nullifier_nonce)
 ```
@@ -203,6 +206,7 @@ nullifier == Poseidon2(DOM_NULLIFIER, nsk, note_nullifier_nonce)
 #### 2.4 Ownership Authorization ✅ CRITICAL ✅ IMPLEMENTED
 
 Full EC-based spend authorization:
+
 ```text
 ask = H(DOM_AUTH_SECRET, spending_key)
 nsk = H(DOM_NULLIFIER_SECRET, spending_key)
@@ -219,6 +223,7 @@ assert(note_recipient == pk_d.x)
 #### 2.5 Output Commitment Integrity ✅ CRITICAL ✅ IMPLEMENTED
 
 For each **enabled** output:
+
 ```text
 output_commitment == Poseidon2(DOM_NOTE_COMMIT, out_asset_id, out_amount, out_recipient, out_diversifier_index, out_nullifier_nonce, out_randomness)
 ```
@@ -232,6 +237,7 @@ All amounts are `u64` in Noir → automatic range constraints.
 #### 2.7 Balance Conservation ✅ CRITICAL ✅ IMPLEMENTED
 
 Single-asset semantics:
+
 ```text
 Σ(enabled_input_amounts) == Σ(enabled_output_amounts)
 ```
@@ -243,6 +249,7 @@ All enabled inputs/outputs must share the same `asset_id`.
 #### 2.8 Output Nonce Derivation ✅ CRITICAL ✅ IMPLEMENTED
 
 For each **enabled** output:
+
 ```text
 out_nullifier_nonce == Poseidon2(DOM_NULLIFIER_NONCE, tx_binding, output_index)
 ```
