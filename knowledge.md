@@ -18,11 +18,12 @@ This file captures learnings, design decisions, and discoveries as we develop th
 - Fixed by standardizing the header layout to:
   - `[status, circuit_type, data_len(u16 LE), pi_count]`
 
-### 🎉 MAJOR MILESTONE: UltraPlonk Verification Working on Solana!
+### 🎉 MAJOR MILESTONE: UltraPlonk Verification Working on Solana
 
 **Achievement**: Full ZK proof verification on Solana via CPI architecture.
 
 **Summary**:
+
 - ✅ **ALL 9 user_flows tests pass with real UltraPlonk proofs on Surfpool!**
 - ✅ Shield, Transfer, Unshield all verified via CPI to `masp-verifier`
 - ✅ Full test suite completes in ~16 seconds (includes proof generation + verification)
@@ -35,6 +36,7 @@ This file captures learnings, design decisions, and discoveries as we develop th
 **Solution**: Isolate verification in a separate `masp-verifier` program and call via CPI.
 
 **Flow**:
+
 1. Client creates proof buffer (owned by `masp-verifier`)
 2. Client uploads proof in chunks via verifier's `UploadChunk` instruction
 3. Client calls MASP instruction (Shield/Transfer/Unshield) with verifier program account
@@ -43,12 +45,14 @@ This file captures learnings, design decisions, and discoveries as we develop th
 6. MASP continues with state updates if verification succeeds
 
 **Key Implementation Details**:
+
 - `masp-verifier` embeds all 3 VKs (Shield, Transfer, Unshield)
 - Buffer header includes circuit type selector
 - CPI requires verifier program in account_infos
 - Account order varies by instruction (Shield has verifier at end, Transfer has it before nullifiers)
 
 **Configuration**:
+
 ```bash
 MASP_PROGRAM_ID=<masp>
 MASP_VERIFIER_ID=<verifier>  # Optional: enables CPI mode
@@ -60,6 +64,7 @@ MASP_PROOF_SYSTEM=ultraplonk
 **Why it happened**: `ultraplonk_core::verifier::verify_inner` uses 4160 bytes of stack (limit 4096).
 
 **What didn't work**:
+
 - Boxing VK/Proof (heap doesn't help `verify_inner` stack)
 - `#[inline(always)]` on wrappers
 - Removing `msg!` logging
