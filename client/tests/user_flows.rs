@@ -86,7 +86,7 @@ mod program_deploy;
 /// Called at the start of each test - idempotent via OnceLock.
 fn setup() {
     // Only relevant for Solana backends
-    if std::env::var("MASP_CHAIN").map_or(false, |c| c == "surfpool" || c.starts_with("http")) {
+    if std::env::var("MASP_CHAIN").is_ok_and(|c| c == "surfpool" || c.starts_with("http")) {
         let _program_id = program_deploy::ensure_program_deployed();
     }
 }
@@ -106,6 +106,24 @@ mod tokens {
     }
 }
 
+/// Generate a deterministic seed from a string identifier.
+///
+/// Use this to create unique user seeds per test, preventing interference
+/// when tests run in batch against the same program.
+///
+/// # Example
+/// ```ignore
+/// let alice = env.create_client(&seed("flow_shield_alice"));
+/// let bob = env.create_client(&seed("flow_shield_bob"));
+/// ```
+fn seed(id: &str) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+    let hash = Keccak256::digest(id.as_bytes());
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&hash);
+    result
+}
+
 // ============================================================================
 // Shield - Onboard by depositing tokens
 // ============================================================================
@@ -115,7 +133,7 @@ mod tokens {
 async fn flow_shield_deposit_tokens() {
     setup();
     let env = TestEnv::from_env();
-    let mut alice = env.create_client(&[1u8; 32]);
+    let mut alice = env.create_client(&seed("flow_shield_alice"));
 
     let usdc = compute_asset_id(&tokens::usdc());
 
@@ -143,8 +161,8 @@ async fn flow_shield_deposit_tokens() {
 async fn flow_transfer_send_to_recipient() {
     setup();
     let env = TestEnv::from_env();
-    let mut alice = env.create_client(&[1u8; 32]);
-    let bob = env.create_client(&[2u8; 32]);
+    let mut alice = env.create_client(&seed("flow_transfer_alice"));
+    let bob = env.create_client(&seed("flow_transfer_bob"));
 
     let usdc = compute_asset_id(&tokens::usdc());
 
@@ -181,7 +199,7 @@ async fn flow_transfer_send_to_recipient() {
 async fn flow_unshield_withdraw() {
     setup();
     let env = TestEnv::from_env();
-    let mut alice = env.create_client(&[1u8; 32]);
+    let mut alice = env.create_client(&seed("flow_unshield_alice"));
 
     let usdc = compute_asset_id(&tokens::usdc());
 
@@ -222,8 +240,8 @@ async fn flow_unshield_withdraw() {
 async fn flow_oob_first_payment() {
     setup();
     let env = TestEnv::from_env();
-    let mut alice = env.create_client(&[1u8; 32]);
-    let mut bob = env.create_client(&[2u8; 32]);
+    let mut alice = env.create_client(&seed("flow_oob_alice"));
+    let mut bob = env.create_client(&seed("flow_oob_bob"));
 
     let usdc = compute_asset_id(&tokens::usdc());
 
@@ -271,7 +289,7 @@ async fn flow_oob_first_payment() {
 async fn flow_multiasset_portfolio() {
     setup();
     let env = TestEnv::from_env();
-    let mut alice = env.create_client(&[1u8; 32]);
+    let mut alice = env.create_client(&seed("flow_multiasset_alice"));
 
     let usdc = compute_asset_id(&tokens::usdc());
     let sol = compute_asset_id(&tokens::sol());
@@ -290,7 +308,7 @@ async fn flow_multiasset_portfolio() {
     assert_eq!(alice.balance(sol), 50);
 
     // Alice sends some USDC (SOL unaffected)
-    let bob = env.create_client(&[2u8; 32]);
+    let bob = env.create_client(&seed("flow_multiasset_bob"));
     let bob_addr = bob.full_viewing_key().diversified_address(0);
     alice
         .transfer_to(&env.encryption, &bob_addr, 30, usdc)
@@ -316,8 +334,8 @@ async fn flow_multiasset_portfolio() {
 async fn flow_recovery_from_seed() {
     setup();
     let env = TestEnv::from_env();
-    // Use unique seed to avoid conflicts with other tests sharing the MockStore
-    let alice_seed = [201u8; 32];
+    // Use unique seed to avoid conflicts with other tests sharing state
+    let alice_seed = seed("flow_recovery_from_seed_alice");
 
     let usdc = compute_asset_id(&tokens::usdc());
 
@@ -362,9 +380,9 @@ async fn flow_recovery_from_seed() {
 async fn flow_recovery_then_spend() {
     setup();
     let env = TestEnv::from_env();
-    // Use unique seed to avoid conflicts with other tests sharing the MockStore
-    let alice_seed = [101u8; 32];
-    let bob = env.create_client(&[102u8; 32]);
+    // Use unique seed to avoid conflicts with other tests sharing state
+    let alice_seed = seed("flow_recovery_then_spend_alice");
+    let bob = env.create_client(&seed("flow_recovery_then_spend_bob"));
 
     let usdc = compute_asset_id(&tokens::usdc());
 
@@ -418,8 +436,8 @@ async fn flow_recovery_then_spend() {
 async fn flow_multidevice_sync() {
     setup();
     let env = TestEnv::from_env();
-    // Use unique seed to avoid conflicts with other tests sharing the MockStore
-    let alice_seed = [151u8; 32];
+    // Use unique seed to avoid conflicts with other tests sharing state
+    let alice_seed = seed("flow_multidevice_alice");
 
     let usdc = compute_asset_id(&tokens::usdc());
 
@@ -439,7 +457,7 @@ async fn flow_multidevice_sync() {
     assert_eq!(mobile.balance(usdc), 100);
 
     // Mobile spends some funds (creates change note)
-    let bob = env.create_client(&[152u8; 32]);
+    let bob = env.create_client(&seed("flow_multidevice_bob"));
     let bob_addr = bob.full_viewing_key().diversified_address(0);
     mobile
         .transfer_to(&env.encryption, &bob_addr, 60, usdc)

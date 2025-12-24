@@ -346,6 +346,7 @@ mod real_backend {
         }
 
         /// Ensure program is initialized (idempotent).
+        /// Also syncs MockStore with on-chain state if in LocalSync mode.
         async fn ensure_initialized(&self) -> Result<(), ChainError> {
             if self.initialized.load(std::sync::atomic::Ordering::Relaxed) {
                 return Ok(());
@@ -355,9 +356,18 @@ mod real_backend {
 
             // Check if already initialized on-chain
             match self.rpc_client.get_account(&tree_state_pda).await {
-                Ok(_) => {
+                Ok(account) => {
                     self.initialized
                         .store(true, std::sync::atomic::Ordering::Relaxed);
+
+                    // Sync MockStore with on-chain leaf count if in LocalSync mode
+                    if let Some(store) = self.local_store() {
+                        if let Some(leaf_count) =
+                            Self::parse_leaf_count_from_tree_state(&account.data)
+                        {
+                            store.sync_leaf_count(leaf_count);
+                        }
+                    }
                     return Ok(());
                 }
                 Err(_) => {
@@ -383,6 +393,21 @@ mod real_backend {
             println!("✅ MASP program initialized");
 
             Ok(())
+        }
+
+        /// Parse leaf count from on-chain tree state account data.
+        /// TreeState layout: version (1) + current_root (32) + leaf_count (8) + ...
+        fn parse_leaf_count_from_tree_state(data: &[u8]) -> Option<u64> {
+            // Offset: 1 (version) + 32 (current_root) = 33
+            const LEAF_COUNT_OFFSET: usize = 1 + 32;
+            if data.len() >= LEAF_COUNT_OFFSET + 8 {
+                let bytes: [u8; 8] = data[LEAF_COUNT_OFFSET..LEAF_COUNT_OFFSET + 8]
+                    .try_into()
+                    .ok()?;
+                Some(u64::from_le_bytes(bytes))
+            } else {
+                None
+            }
         }
 
         /// Maximum chunk size for proof upload (Solana TX limit ~1232 bytes, leave room for overhead)
@@ -704,6 +729,101 @@ mod real_backend {
         /// Shield circuit uses ~1.4M CUs, need headroom for other instructions
         const VERIFICATION_COMPUTE_UNITS: u32 = 2_000_000;
 
+        /// Parse a Solana ClientError for known MASP-specific errors.
+        ///
+        /// Extracts error codes from the error string and maps to ChainError.
+        /// Also checks for known error message patterns.
+        fn parse_client_error(err: solana_client::client_error::ClientError) -> ChainError {
+            let err_str = err.to_string();
+
+            // Try to extract custom error code from the error string
+            // Format: "InstructionError(0, Custom(N))" where N is the error code
+            if let Some(code) = Self::extract_custom_error_code(&err_str) {
+                return Self::error_code_to_chain_error(code);
+            }
+
+            // Fall back to string pattern matching
+            Self::parse_error_message(&err_str)
+        }
+
+        /// Extract custom program error code from error string.
+        ///
+        /// Looks for patterns like "Custom(0)" or "custom program error: 0x0"
+        fn extract_custom_error_code(err_str: &str) -> Option<u32> {
+            // Pattern 1: Custom(N)
+            if let Some(start) = err_str.find("Custom(") {
+                let after = &err_str[start + 7..];
+                if let Some(end) = after.find(')') {
+                    if let Ok(code) = after[..end].parse::<u32>() {
+                        return Some(code);
+                    }
+                }
+            }
+
+            // Pattern 2: custom program error: 0xN
+            if let Some(start) = err_str.find("custom program error: 0x") {
+                let after = &err_str[start + 24..];
+                // Take characters until non-hex
+                let hex_str: String = after
+                    .chars()
+                    .take_while(|c| c.is_ascii_hexdigit())
+                    .collect();
+                if let Ok(code) = u32::from_str_radix(&hex_str, 16) {
+                    return Some(code);
+                }
+            }
+
+            None
+        }
+
+        /// Map MASP program error codes to ChainError variants.
+        ///
+        /// Error codes match `MaspError` enum in `programs/solana-masp/src/error.rs`.
+        fn error_code_to_chain_error(code: u32) -> ChainError {
+            // Codes match the discriminant order in MaspError enum
+            match code {
+                0 => ChainError::DoubleSpend,   // NullifierAlreadySpent
+                1 => ChainError::InvalidAnchor, // InvalidAnchor
+                2 => ChainError::InvalidProof,  // ProofVerificationFailed
+                3 => ChainError::InvalidProof,  // InvalidProofData
+                4 => ChainError::InvalidProof,  // InvalidPublicInputs
+                5 => ChainError::Other("Tree full".to_string()), // TreeFull
+                6 => ChainError::Other("Invalid owner".to_string()), // InvalidOwner
+                7 => ChainError::Other("Not initialized".to_string()), // NotInitialized
+                8 => ChainError::Other("Already initialized".to_string()), // AlreadyInitialized
+                9 => ChainError::Other("Invalid instruction".to_string()), // InvalidInstruction
+                10 => ChainError::Other("Overflow".to_string()), // Overflow
+                11 => ChainError::InvalidProof, // InvalidVk
+                12 => ChainError::Other("Buffer incomplete".to_string()), // BufferIncomplete
+                13 => ChainError::Other("Invalid account data".to_string()), // InvalidAccountData
+                14 => ChainError::Other("Invalid authority".to_string()), // InvalidAuthority
+                15 => ChainError::Other("State inconsistency".to_string()), // StateInconsistency
+                _ => ChainError::Other(format!("Program error code: {}", code)),
+            }
+        }
+
+        /// Parse error message string for known patterns (fallback)
+        fn parse_error_message(err_msg: &str) -> ChainError {
+            if err_msg.contains("Nullifier already spent")
+                || err_msg.contains("NullifierAlreadySpent")
+            {
+                ChainError::DoubleSpend
+            } else if err_msg.contains("Invalid anchor") || err_msg.contains("InvalidAnchor") {
+                ChainError::InvalidAnchor
+            } else if err_msg.contains("Proof verification failed")
+                || err_msg.contains("VerificationFailed")
+            {
+                ChainError::InvalidProof
+            } else if err_msg.contains("AccountInUse")
+                || err_msg.contains("account is already in use")
+            {
+                // This can happen when trying to create a nullifier PDA that already exists
+                ChainError::DoubleSpend
+            } else {
+                ChainError::Other(err_msg.to_string())
+            }
+        }
+
         /// Send transaction with fast confirmation (confirmed, not finalized)
         async fn send_transaction(
             &self,
@@ -742,7 +862,7 @@ mod real_backend {
                 .rpc_client
                 .send_transaction_with_config(&tx, config)
                 .await
-                .map_err(|e| ChainError::Other(format!("Transaction failed: {}", e)))?;
+                .map_err(Self::parse_client_error)?;
 
             // Wait for confirmation with 'confirmed' commitment
             self.rpc_client

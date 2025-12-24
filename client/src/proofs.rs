@@ -746,23 +746,26 @@ mod onchain_mock {
 
     /// On-chain mock prover for testing with Solana program.
     ///
-    /// This prover generates proofs compatible with the on-chain `mock` verifier
-    /// (keccak256-based). Use this when testing against a Solana program compiled
-    /// with `local-testing` and `mock-proofs` features.
+    /// This prover:
+    /// 1. Validates circuit statements using the same logic as `MockSpendProver`
+    /// 2. Generates proofs compatible with the on-chain `mock` verifier (keccak256-based)
     ///
-    /// ⚠️ This does NOT verify circuit statements - it just generates the expected hash.
-    /// For statement checking, use `MockSpendProver` which validates in Rust.
+    /// Use this when testing against a Solana program compiled with `local-testing`
+    /// and `mock-proofs` features.
     pub struct OnChainMockSpendProver;
 
     impl SpendProver for OnChainMockSpendProver {
         fn prove(
             &self,
             public_inputs: &ProofPublicInputs,
-            _private_inputs: &ProofPrivateInputs,
+            private_inputs: &ProofPrivateInputs,
         ) -> Result<ProofBytes, ProofSystemError> {
-            // Note: Unlike MockSpendProver, we don't check statements here.
-            // This is just for generating proofs that the on-chain mock verifier will accept.
-            // For statement validation, use MockSpendProver first, then this for on-chain.
+            // First, validate circuit statements using the same logic as MockSpendProver.
+            // This ensures invalid proofs are rejected (e.g., Alice can't spend Bob's note).
+            let mock_prover = super::MockSpendProver;
+            mock_prover.prove(public_inputs, private_inputs)?;
+
+            // Then generate the on-chain compatible proof hash
             Ok(onchain_mock_proof_for_public_inputs(public_inputs))
         }
 

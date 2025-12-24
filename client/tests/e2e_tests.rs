@@ -52,6 +52,24 @@ mod tokens {
     }
 }
 
+/// Generate a deterministic seed from a string identifier.
+///
+/// Use this to create unique user seeds per test, preventing interference
+/// when tests run in batch against the same program.
+///
+/// # Example
+/// ```ignore
+/// let alice = env.create_client(&seed("test_shield_alice"));
+/// let bob = env.create_client(&seed("test_shield_bob"));
+/// ```
+fn seed(id: &str) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+    let hash = Keccak256::digest(id.as_bytes());
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&hash);
+    result
+}
+
 /// Mock proof that always validates (for testing without real ZK)
 fn prove_transfer(
     env: &TestEnv,
@@ -624,14 +642,17 @@ async fn test_encrypted_note_wrong_recipient_fails() {
     use rand::SeedableRng;
 
     let env = TestEnv::from_env();
-    let mut alice = env.create_client(&[1u8; 32]);
+    let alice_seed = seed("test_encrypted_note_wrong_alice");
+    let bob_seed = seed("test_encrypted_note_wrong_bob");
+    let charlie_seed = seed("test_encrypted_note_wrong_charlie");
+    let mut alice = env.create_client(&alice_seed);
 
     // Bob and Charlie have different keys
-    let bob_sk = masp_client::SpendingKey::from_bytes(&[2u8; 32]);
+    let bob_sk = masp_client::SpendingKey::from_bytes(&bob_seed);
     let bob_fvk = bob_sk.to_full_viewing_key();
     let bob_addr = bob_fvk.diversified_address(0);
 
-    let charlie_sk = masp_client::SpendingKey::from_bytes(&[3u8; 32]);
+    let charlie_sk = masp_client::SpendingKey::from_bytes(&charlie_seed);
     let charlie_fvk = charlie_sk.to_full_viewing_key();
 
     let mut rng = StdRng::seed_from_u64(99999);
@@ -759,8 +780,10 @@ async fn test_alice_pays_bob() {
 #[tokio::test]
 async fn test_bob_unshields_received_payment() {
     let env = TestEnv::from_env();
-    let mut alice = env.create_client(&[1u8; 32]);
-    let mut bob = env.create_client(&[2u8; 32]);
+    let alice_seed = seed("test_bob_unshields_alice");
+    let bob_seed = seed("test_bob_unshields_bob");
+    let mut alice = env.create_client(&alice_seed);
+    let mut bob = env.create_client(&bob_seed);
 
     let usdc_asset = compute_asset_id(&tokens::usdc());
 
@@ -779,7 +802,7 @@ async fn test_bob_unshields_received_payment() {
         .unwrap();
 
     let transfer_req =
-        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &alice_seed));
     let transfer_result = env.chain.transfer(transfer_req).await.unwrap();
 
     alice.mark_spent(note.commitment());
@@ -803,7 +826,8 @@ async fn test_bob_unshields_received_payment() {
 #[tokio::test]
 async fn test_double_spend_rejected() {
     let env = TestEnv::from_env();
-    let mut alice = env.create_client(&[1u8; 32]);
+    let alice_seed = seed("test_double_spend_alice");
+    let mut alice = env.create_client(&alice_seed);
 
     // Shield
     let (note, shield_req) = alice.build_shield(&tokens::usdc(), 100);
@@ -821,7 +845,7 @@ async fn test_double_spend_rejected() {
         .unwrap();
 
     let transfer_req =
-        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &alice_seed));
     env.chain.transfer(transfer_req.clone()).await.unwrap();
 
     // Second transfer with SAME nullifier should fail
@@ -912,7 +936,8 @@ async fn test_spend_nonexistent_note_rejected() {
 #[tokio::test]
 async fn test_client_rejects_already_spent() {
     let env = TestEnv::from_env();
-    let mut alice = env.create_client(&[1u8; 32]);
+    let alice_seed = seed("test_client_rejects_already_spent_alice");
+    let mut alice = env.create_client(&alice_seed);
 
     // Shield
     let (note, shield_req) = alice.build_shield(&tokens::usdc(), 100);
@@ -930,7 +955,7 @@ async fn test_client_rejects_already_spent() {
         .unwrap();
 
     let transfer_req =
-        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &alice_seed));
     env.chain.transfer(transfer_req).await.unwrap();
     alice.mark_spent(note.commitment());
 
@@ -947,8 +972,10 @@ async fn test_client_rejects_already_spent() {
 #[tokio::test]
 async fn test_cannot_spend_others_note_wrong_nullifier() {
     let env = TestEnv::from_env();
-    let mut alice = env.create_client(&[1u8; 32]);
-    let mut bob = env.create_client(&[2u8; 32]);
+    let alice_seed = seed("test_cannot_spend_others_alice");
+    let bob_seed = seed("test_cannot_spend_others_bob");
+    let mut alice = env.create_client(&alice_seed);
+    let mut bob = env.create_client(&bob_seed);
 
     // Bob shields a note - commitment is public on-chain
     let (bob_note, shield_req) = bob.build_shield(&tokens::usdc(), 100);
@@ -1025,7 +1052,7 @@ async fn test_cannot_spend_others_note_wrong_nullifier() {
                     note_diversifier_index: bob_note.diversifier_index,
                     note_nullifier_nonce: bob_note.nullifier_nonce,
                     note_randomness: bob_note.note_randomness,
-                    spending_key: masp_client::SpendingKey::from_bytes(&[1u8; 32]).as_field(),
+                    spending_key: masp_client::SpendingKey::from_bytes(&alice_seed).as_field(),
                     membership_witness: alice_witness,
                 },
                 masp_client::InputSlot::default(),
@@ -1057,7 +1084,7 @@ async fn test_cannot_spend_others_note_wrong_nullifier() {
         .await
         .unwrap();
 
-    let bob_req = bob_transfer.to_request(prove_transfer(&env, &bob, &bob_transfer, &[2u8; 32]));
+    let bob_req = bob_transfer.to_request(prove_transfer(&env, &bob, &bob_transfer, &bob_seed));
 
     // This succeeds because Bob's nullifier wasn't spent
     let result = env.chain.transfer(bob_req).await;
@@ -1205,7 +1232,7 @@ async fn test_zero_amount_shield() {
 async fn test_shielded_sync_full_recovery() {
     let env = TestEnv::from_env();
     let encryption = &env.encryption;
-    let alice_seed = [1u8; 32];
+    let alice_seed = seed("test_shielded_sync_full_recovery_alice");
 
     // Phase 1: Alice creates some transactions
     let mut alice = env.create_client(&alice_seed);
@@ -1235,7 +1262,7 @@ async fn test_shielded_sync_full_recovery() {
         .await
         .unwrap();
     let transfer_req =
-        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]));
+        transfer_data.to_request(prove_transfer(&env, &alice, &transfer_data, &alice_seed));
     let _transfer_result = env.chain.transfer(transfer_req).await.unwrap();
     alice.mark_spent(note1.commitment());
 
@@ -1277,8 +1304,8 @@ async fn test_recovered_note_can_be_spent() {
 
     let env = TestEnv::from_env();
     let encryption = &env.encryption;
-    let alice_seed = [1u8; 32];
-    let bob_seed = [2u8; 32];
+    let alice_seed = seed("test_recovered_note_can_be_spent_alice");
+    let bob_seed = seed("test_recovered_note_can_be_spent_bob");
 
     // Phase 1: Alice shields a note
     let alice = env.create_client(&alice_seed);
@@ -1521,8 +1548,10 @@ async fn test_oob_vs_full_sync_semantics() {
     let env = TestEnv::from_env();
     let encryption = &env.encryption;
 
-    let mut alice = env.create_client(&[1u8; 32]);
-    let mut bob = env.create_client(&[2u8; 32]);
+    let alice_seed = seed("test_oob_vs_full_sync_alice");
+    let bob_seed = seed("test_oob_vs_full_sync_bob");
+    let mut alice = env.create_client(&alice_seed);
+    let mut bob = env.create_client(&bob_seed);
 
     // Create many notes (only one is for Bob)
     for _i in 0..10 {
@@ -1564,7 +1593,7 @@ async fn test_oob_vs_full_sync_semantics() {
     };
     let ct_hashes = masp_client::TransferPublicInputs::placeholder_ct_hashes(output_count);
     let transfer_req = transfer_data.to_request_with_outputs(
-        prove_transfer(&env, &alice, &transfer_data, &[1u8; 32]),
+        prove_transfer(&env, &alice, &transfer_data, &alice_seed),
         outputs,
         ct_hashes,
     );

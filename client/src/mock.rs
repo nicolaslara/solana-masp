@@ -313,6 +313,15 @@ impl MockStore {
         inner.leaf_count
     }
 
+    /// Sync leaf count with on-chain state.
+    /// Used when reconnecting to an already-initialized program.
+    pub fn sync_leaf_count(&self, on_chain_leaf_count: u64) {
+        let mut inner = self.inner.write().unwrap();
+        if on_chain_leaf_count > inner.leaf_count {
+            inner.leaf_count = on_chain_leaf_count;
+        }
+    }
+
     /// Get leaf index for commitment
     pub fn get_leaf_index(&self, commitment: Commitment) -> Option<u64> {
         let inner = self.inner.read().unwrap();

@@ -39,13 +39,8 @@
 //!
 //! ## Program Deployment (Solana)
 //!
-//! For Solana backends, deploy a fresh program before running tests:
-//! ```bash
-//! solana-keygen new --no-passphrase -o /tmp/masp_test.json --force
-//! solana program deploy target/deploy/solana_masp.so \
-//!   --url http://127.0.0.1:8899 --program-id /tmp/masp_test.json
-//! MASP_PROGRAM_ID=<id> cargo test ...
-//! ```
+//! For Surfpool/Devnet, the program is auto-deployed if MASP_PROGRAM_ID is not set.
+//! For Mainnet, MASP_PROGRAM_ID is required (no auto-deploy for safety).
 
 use masp_client::backends::proof_system::{Groth16ProverScaffold, Groth16VerifierScaffold};
 use masp_client::backends::LightIndexer;
@@ -60,22 +55,32 @@ use masp_client::{
 };
 use std::sync::{Arc, OnceLock};
 
-/// Singleton TestEnv - shared across all tests in the suite.
+// Import program deployment helpers
+// Note: This module is loaded multiple times because test_env.rs is included
+// by multiple test files (e2e_tests.rs, user_flows.rs, etc.)
+#[allow(dead_code, clippy::duplicate_mod)]
+#[path = "program_deploy.rs"]
+mod program_deploy;
+#[cfg(feature = "solana-backend")]
+use program_deploy::ensure_program_deployed;
+
+/// Shared TestEnv for Mock chain mode only.
 ///
-/// Uses OnceLock so the first test to call `from_env()` creates the environment,
-/// and all subsequent tests reuse it. This ensures:
-/// - MockStore accumulates state across tests (like a real indexer)
-/// - Chain connection is reused (efficient)
-/// - All tests see the same state progression
-static SHARED_ENV: OnceLock<TestEnv> = OnceLock::new();
+/// For Surfpool/Devnet, each test gets a fresh environment because each
+/// test deploys its own program instance. Sharing MockStore across tests
+/// would accumulate irrelevant state from other programs.
+///
+/// For Mock chain, sharing makes sense because there's no real deployment.
+static MOCK_CHAIN_ENV: OnceLock<TestEnv> = OnceLock::new();
 
 /// Test environment using runtime-configurable backends.
 ///
 /// We store trait objects for backends to allow runtime selection.
 /// `MaspClient` supports this via `MaspClient<dyn Indexer, dyn Chain>`.
 ///
-/// **Note:** All tests in a suite share a single TestEnv instance via `from_env()`.
-/// This ensures consistent state accumulation like a production indexer would have.
+/// **Note:** For Mock chain, tests share a single TestEnv via OnceLock.
+/// For Surfpool/Devnet, each test gets a fresh TestEnv since each test
+/// deploys its own program instance.
 pub struct TestEnv {
     #[allow(dead_code)]
     pub config: BackendConfig,
@@ -91,17 +96,35 @@ pub struct TestEnv {
 unsafe impl Send for TestEnv {}
 unsafe impl Sync for TestEnv {}
 
+impl Clone for TestEnv {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            indexer: self.indexer.clone(),
+            chain: self.chain.clone(),
+            encryption: self.encryption.clone(),
+            prover: self.prover.clone(),
+            verifier: self.verifier.clone(),
+        }
+    }
+}
+
 impl TestEnv {
-    /// Get shared test environment from env vars.
+    /// Get test environment from env vars.
     ///
-    /// All tests in the suite share a single TestEnv instance. This ensures
-    /// the MockStore accumulates state like a real indexer would, and the
-    /// on-chain state stays in sync with local expectations.
-    ///
-    /// The first call creates the environment; subsequent calls return a clone
-    /// of the shared instance.
-    pub fn from_env() -> &'static Self {
-        SHARED_ENV.get_or_init(Self::create_new)
+    /// For Mock chain: shares a single TestEnv across tests (efficient).
+    /// For Surfpool/Devnet: creates a fresh TestEnv per call because each
+    /// test deploys its own program and needs a clean MockStore.
+    pub fn from_env() -> Self {
+        let config = BackendConfig::from_env();
+
+        // For Mock chain, share the environment (no deployment involved)
+        if matches!(config.chain, ChainBackend::Mock) {
+            return MOCK_CHAIN_ENV.get_or_init(Self::create_new).clone();
+        }
+
+        // For real chains, create a fresh environment per test
+        Self::create_new()
     }
 
     /// Create a new environment (internal - called once via OnceLock).
@@ -211,15 +234,23 @@ Compile tests with: `cargo test --features ultraplonk-verifier ...`"
                 },
             )),
             #[cfg(feature = "solana-backend")]
-            ChainBackend::Surfpool => Arc::new(
-                SolanaChain::surfpool(IndexerMode::LocalSync(shared_store.clone()))
-                    .expect("Failed to create Surfpool SolanaChain"),
-            ),
+            ChainBackend::Surfpool => {
+                // Auto-deploy program if needed
+                ensure_program_deployed();
+                Arc::new(
+                    SolanaChain::surfpool(IndexerMode::LocalSync(shared_store.clone()))
+                        .expect("Failed to create Surfpool SolanaChain"),
+                )
+            }
             #[cfg(feature = "solana-backend")]
-            ChainBackend::Devnet => Arc::new(
-                SolanaChain::devnet(IndexerMode::LocalSync(shared_store.clone()))
-                    .expect("Failed to create Devnet SolanaChain"),
-            ),
+            ChainBackend::Devnet => {
+                // Auto-deploy program if needed
+                ensure_program_deployed();
+                Arc::new(
+                    SolanaChain::devnet(IndexerMode::LocalSync(shared_store.clone()))
+                        .expect("Failed to create Devnet SolanaChain"),
+                )
+            }
             #[cfg(feature = "solana-backend")]
             ChainBackend::Testnet => Arc::new(
                 SolanaChain::testnet(IndexerMode::LocalSync(shared_store.clone()))
