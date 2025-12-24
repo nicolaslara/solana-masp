@@ -297,20 +297,21 @@ pub enum BufferStatus {
 
 /// Proof buffer header
 ///
-/// Layout: [status: u8][proof_len: u16 LE][pi_count: u8][circuit_type: u8][...data...]
+/// Layout (canonical, matches verifier + inputs parsing):
+/// [status: u8][circuit_type: u8][data_len: u16 LE][pi_count: u8][...data...]
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
 pub struct ProofBufferHeader {
     /// Buffer status
     pub status: u8,
 
-    /// Current length of uploaded data
+    /// Circuit type (0=shield, 1=transfer, 2=unshield)
+    pub circuit_type: u8,
+
+    /// Current length of uploaded data (public inputs bytes + proof bytes uploaded so far)
     pub data_len: u16,
 
     /// Number of public inputs
     pub pi_count: u8,
-
-    /// Circuit type (0=shield, 1=transfer, 2=unshield)
-    pub circuit_type: u8,
 }
 
 impl ProofBufferHeader {

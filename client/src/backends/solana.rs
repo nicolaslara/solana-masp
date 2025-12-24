@@ -77,6 +77,7 @@ mod real_backend {
     use solana_client::nonblocking::rpc_client::RpcClient;
     use solana_client::rpc_config::RpcSendTransactionConfig;
     use solana_commitment_config::CommitmentConfig;
+    use solana_compute_budget_interface::ComputeBudgetInstruction;
     use solana_sdk::{
         instruction::{AccountMeta, Instruction},
         pubkey::Pubkey,
@@ -87,10 +88,7 @@ mod real_backend {
     use std::sync::Arc;
 
     /// System Program ID (11111111111111111111111111111111)
-    const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0,
-    ]);
+    const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0; 32]);
 
     // Instruction discriminators (must match solana-masp program)
     const IX_INITIALIZE: u8 = 0;
@@ -107,14 +105,56 @@ mod real_backend {
     const CIRCUIT_TRANSFER: u8 = 1;
     const CIRCUIT_UNSHIELD: u8 = 2;
 
+    /// Create an instruction for System Program's CreateAccount
+    fn create_account_instruction(
+        payer: &Pubkey,
+        new_account: &Pubkey,
+        lamports: u64,
+        space: u64,
+        owner: &Pubkey,
+    ) -> Instruction {
+        // System program CreateAccount instruction
+        // Discriminator: 0 (CreateAccount)
+        // Data layout: lamports (u64 LE) + space (u64 LE) + owner (32 bytes)
+        let mut data = vec![0, 0, 0, 0]; // CreateAccount discriminator
+        data.extend_from_slice(&lamports.to_le_bytes());
+        data.extend_from_slice(&space.to_le_bytes());
+        data.extend_from_slice(owner.as_ref());
+
+        Instruction {
+            program_id: SYSTEM_PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(*payer, true),
+                AccountMeta::new(*new_account, true),
+            ],
+            data,
+        }
+    }
+
     /// Derive tree state PDA
     fn derive_tree_state_pda(program_id: &Pubkey) -> (Pubkey, u8) {
         Pubkey::find_program_address(&[b"masp", b"state"], program_id)
     }
 
-    /// Derive nullifier PDA
-    fn derive_nullifier_pda(program_id: &Pubkey, nullifier: &[u8; 32]) -> (Pubkey, u8) {
+    /// Derive nullifier PDA (under MASP program, for direct mode)
+    fn derive_nullifier_pda_masp(program_id: &Pubkey, nullifier: &[u8; 32]) -> (Pubkey, u8) {
         Pubkey::find_program_address(&[b"nullifier", nullifier], program_id)
+    }
+
+    /// Derive nullifier PDA (under mock store, for mock-commitment-store mode)
+    fn derive_nullifier_pda_store(nullifier: &[u8; 32]) -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[b"nullifier", nullifier], &MOCK_COMMITMENT_STORE_ID)
+    }
+
+    /// Mock commitment store program ID (must match what MASP program expects)
+    /// Deploy with: `solana program deploy --program-id programs/mock-commitment-store/mock-store-keypair.json`
+    const MOCK_COMMITMENT_STORE_ID: Pubkey =
+        Pubkey::from_str_const("9QnviXVA1YyeaL9raJU7AaP2i6hkXvgB7vw5j9KvrxZc");
+
+    /// Derive commitment store state PDA (for mock-commitment-store)
+    /// Seeds: ["mock_store", "state"]
+    fn derive_commitment_store_state_pda() -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[b"mock_store", b"state"], &MOCK_COMMITMENT_STORE_ID)
     }
 
     /// Real Solana chain backend
@@ -126,6 +166,16 @@ mod real_backend {
     /// - `IndexerMode::LocalSync(store)` - Chain updates store after each TX (tests)
     /// - `IndexerMode::External` - Chain just submits; external indexer observes (production)
     ///
+    /// ## Verification Mode
+    ///
+    /// - `verifier_program_id = None` - Embedded verification (MASP program verifies internally)
+    /// - `verifier_program_id = Some(id)` - CPI verification (MASP CPIs to separate verifier)
+    ///
+    /// ## Commitment Store
+    ///
+    /// - `use_simple_onchain_store` - When true, includes mock commitment store accounts
+    ///   in transactions. The store program ID is hardcoded (MOCK_COMMITMENT_STORE_ID).
+    ///
     /// Note: SolanaChain does NOT verify proofs locally - that happens on-chain.
     /// Submitting an invalid proof will fail when the transaction is processed.
     pub struct SolanaChain {
@@ -136,6 +186,10 @@ mod real_backend {
         indexer_mode: IndexerMode,
         /// Whether program has been initialized (cached)
         initialized: std::sync::atomic::AtomicBool,
+        /// Optional external verifier program for CPI-based verification
+        verifier_program_id: Option<Pubkey>,
+        /// Whether to use mock commitment store (hardcoded ID)
+        use_simple_onchain_store: bool,
     }
 
     impl SolanaChain {
@@ -146,8 +200,51 @@ mod real_backend {
             payer: Keypair,
             indexer_mode: IndexerMode,
         ) -> Result<Self, ChainError> {
+            Self::new_with_verifier(rpc_url, program_id, payer, indexer_mode, None)
+        }
+
+        /// Create a new SolanaChain with CPI verification via external verifier.
+        ///
+        /// When `verifier_program_id` is Some, proof buffers are created with the
+        /// verifier as owner, and Shield/Transfer/Unshield will CPI to it.
+        pub fn new_with_verifier(
+            rpc_url: &str,
+            program_id: &str,
+            payer: Keypair,
+            indexer_mode: IndexerMode,
+            verifier_program_id: Option<&str>,
+        ) -> Result<Self, ChainError> {
+            Self::new_full(
+                rpc_url,
+                program_id,
+                payer,
+                indexer_mode,
+                verifier_program_id,
+                false,
+            )
+        }
+
+        /// Create a new SolanaChain with all options.
+        ///
+        /// - `verifier_program_id` - External verifier for CPI-based proof verification
+        /// - `use_simple_onchain_store` - Whether to include mock commitment store accounts
+        pub fn new_full(
+            rpc_url: &str,
+            program_id: &str,
+            payer: Keypair,
+            indexer_mode: IndexerMode,
+            verifier_program_id: Option<&str>,
+            use_simple_onchain_store: bool,
+        ) -> Result<Self, ChainError> {
             let program_id = Pubkey::from_str(program_id)
                 .map_err(|e| ChainError::Other(format!("Invalid program ID: {}", e)))?;
+
+            let verifier_program_id = verifier_program_id
+                .map(|id| {
+                    Pubkey::from_str(id)
+                        .map_err(|e| ChainError::Other(format!("Invalid verifier ID: {}", e)))
+                })
+                .transpose()?;
 
             let rpc_client = RpcClient::new(rpc_url.to_string());
 
@@ -156,6 +253,12 @@ mod real_backend {
             println!("   Program: {}", program_id);
             println!("   Payer: {}", payer.pubkey());
             println!("   Indexer mode: {:?}", indexer_mode);
+            if let Some(vid) = &verifier_program_id {
+                println!("   Verifier: {} (CPI mode)", vid);
+            }
+            if use_simple_onchain_store {
+                println!("   Commitment store: {} (mock)", MOCK_COMMITMENT_STORE_ID);
+            }
 
             Ok(Self {
                 rpc_client,
@@ -163,6 +266,8 @@ mod real_backend {
                 payer,
                 indexer_mode,
                 initialized: std::sync::atomic::AtomicBool::new(false),
+                verifier_program_id,
+                use_simple_onchain_store,
             })
         }
 
@@ -176,9 +281,25 @@ mod real_backend {
                 ChainError::Other("MASP_PROGRAM_ID env var required for Solana backend".to_string())
             })?;
 
+            // Optional: use CPI to external verifier program
+            let verifier_id = std::env::var("MASP_VERIFIER_ID").ok();
+
+            // Optional: enable simple on-chain store (MASP_SIMPLE_STORE=1)
+            // This should match the MASP program's simple-onchain-store feature
+            let use_mock_store = std::env::var("MASP_SIMPLE_STORE")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false);
+
             let payer = load_payer_keypair()?;
 
-            Self::new_with_config(rpc_url, &program_id, payer, indexer_mode)
+            Self::new_full(
+                rpc_url,
+                &program_id,
+                payer,
+                indexer_mode,
+                verifier_id.as_deref(),
+                use_mock_store,
+            )
         }
 
         /// Create for Surfpool (localhost).
@@ -264,7 +385,18 @@ mod real_backend {
             Ok(())
         }
 
-        /// Create and populate a proof buffer (optimized: single TX)
+        /// Maximum chunk size for proof upload (Solana TX limit ~1232 bytes, leave room for overhead)
+        const MAX_CHUNK_SIZE: usize = 900;
+
+        // Verifier instruction discriminators (when using CPI to external verifier)
+        const VERIFIER_IX_INIT_BUFFER: u8 = 0;
+        const VERIFIER_IX_UPLOAD_CHUNK: u8 = 1;
+
+        /// Create and populate a proof buffer.
+        /// For small proofs (mock), combines init + upload in one TX.
+        /// For large proofs (UltraPlonk), uses chunked uploads.
+        ///
+        /// When `verifier_program_id` is set, buffer is owned by verifier program.
         async fn create_proof_buffer(
             &self,
             circuit_type: u8,
@@ -274,10 +406,169 @@ mod real_backend {
             let buffer = Keypair::new();
             let pi_count = public_inputs.len() as u8;
 
-            // Instruction 1: Initialize buffer
-            let init_data = vec![IX_INIT_PROOF_BUFFER, circuit_type, pi_count];
+            // Build full proof data (public inputs + proof bytes)
+            let mut proof_data = Vec::new();
+            for pi in public_inputs {
+                proof_data.extend_from_slice(pi);
+            }
+            proof_data.extend_from_slice(proof);
+
+            // Verifier buffer format: 5-byte header + public inputs + proof
+            // Header: [status(1), circuit_type(1), proof_len(2), pi_count(1)]
+            const VERIFIER_HEADER_SIZE: usize = 5;
+
+            // Determine which program owns the buffer (MASP or external verifier)
+            let using_external_verifier = self.verifier_program_id.is_some();
+            let (buffer_owner, init_discriminator, upload_discriminator) =
+                if let Some(verifier_id) = &self.verifier_program_id {
+                    (
+                        *verifier_id,
+                        Self::VERIFIER_IX_INIT_BUFFER,
+                        Self::VERIFIER_IX_UPLOAD_CHUNK,
+                    )
+                } else {
+                    (self.program_id, IX_INIT_PROOF_BUFFER, IX_UPLOAD_CHUNK)
+                };
+
+            // For external verifier: we need to create account first with System program
+            // For MASP: the init_proof_buffer instruction creates the account
+            let config = RpcSendTransactionConfig {
+                skip_preflight: false,
+                preflight_commitment: Some(CommitmentConfig::confirmed().commitment),
+                ..Default::default()
+            };
+
+            if using_external_verifier {
+                // External verifier flow: create account first, then init, then upload
+                let buffer_size = VERIFIER_HEADER_SIZE + proof_data.len();
+                let lamports = self
+                    .rpc_client
+                    .get_minimum_balance_for_rent_exemption(buffer_size)
+                    .await
+                    .map_err(|e| ChainError::Other(format!("Failed to get rent: {}", e)))?;
+
+                // Step 1: Create account with verifier as owner
+                let create_ix = create_account_instruction(
+                    &self.payer.pubkey(),
+                    &buffer.pubkey(),
+                    lamports,
+                    buffer_size as u64,
+                    &buffer_owner,
+                );
+
+                let blockhash =
+                    self.rpc_client.get_latest_blockhash().await.map_err(|e| {
+                        ChainError::Other(format!("Failed to get blockhash: {}", e))
+                    })?;
+
+                let create_tx = Transaction::new_signed_with_payer(
+                    &[create_ix],
+                    Some(&self.payer.pubkey()),
+                    &[&self.payer, &buffer],
+                    blockhash,
+                );
+
+                let sig = self
+                    .rpc_client
+                    .send_transaction_with_config(&create_tx, config)
+                    .await
+                    .map_err(|e| ChainError::Other(format!("Failed to create buffer: {}", e)))?;
+
+                self.rpc_client
+                    .confirm_transaction_with_commitment(&sig, CommitmentConfig::confirmed())
+                    .await
+                    .map_err(|e| ChainError::Other(format!("Failed to confirm create: {}", e)))?;
+
+                // Step 2: Initialize buffer header
+                let init_data = vec![init_discriminator, circuit_type, pi_count];
+                let init_ix = Instruction {
+                    program_id: buffer_owner,
+                    accounts: vec![
+                        AccountMeta::new(self.payer.pubkey(), true),
+                        AccountMeta::new(buffer.pubkey(), false),
+                    ],
+                    data: init_data,
+                };
+
+                let blockhash =
+                    self.rpc_client.get_latest_blockhash().await.map_err(|e| {
+                        ChainError::Other(format!("Failed to get blockhash: {}", e))
+                    })?;
+
+                let init_tx = Transaction::new_signed_with_payer(
+                    &[init_ix],
+                    Some(&self.payer.pubkey()),
+                    &[&self.payer],
+                    blockhash,
+                );
+
+                let sig = self
+                    .rpc_client
+                    .send_transaction_with_config(&init_tx, config)
+                    .await
+                    .map_err(|e| ChainError::Other(format!("Failed to init buffer: {}", e)))?;
+
+                self.rpc_client
+                    .confirm_transaction_with_commitment(&sig, CommitmentConfig::confirmed())
+                    .await
+                    .map_err(|e| ChainError::Other(format!("Failed to confirm init: {}", e)))?;
+
+                // Step 3: Upload in chunks
+                let mut offset: u16 = 0;
+                for chunk in proof_data.chunks(Self::MAX_CHUNK_SIZE) {
+                    let mut upload_data = vec![upload_discriminator];
+                    upload_data.extend_from_slice(&offset.to_le_bytes());
+                    upload_data.extend_from_slice(chunk);
+
+                    let upload_ix = Instruction {
+                        program_id: buffer_owner,
+                        accounts: vec![AccountMeta::new(buffer.pubkey(), false)],
+                        data: upload_data,
+                    };
+
+                    let blockhash = self.rpc_client.get_latest_blockhash().await.map_err(|e| {
+                        ChainError::Other(format!("Failed to get blockhash: {}", e))
+                    })?;
+
+                    let upload_tx = Transaction::new_signed_with_payer(
+                        &[upload_ix],
+                        Some(&self.payer.pubkey()),
+                        &[&self.payer],
+                        blockhash,
+                    );
+
+                    let sig = self
+                        .rpc_client
+                        .send_transaction_with_config(&upload_tx, config)
+                        .await
+                        .map_err(|e| {
+                            ChainError::Other(format!(
+                                "Failed to upload chunk at {}: {}",
+                                offset, e
+                            ))
+                        })?;
+
+                    self.rpc_client
+                        .confirm_transaction_with_commitment(&sig, CommitmentConfig::confirmed())
+                        .await
+                        .map_err(|e| {
+                            ChainError::Other(format!(
+                                "Failed to confirm chunk at {}: {}",
+                                offset, e
+                            ))
+                        })?;
+
+                    offset += chunk.len() as u16;
+                }
+
+                return Ok(buffer.pubkey());
+            }
+
+            // MASP program flow: init creates the account
+            let use_chunked = proof_data.len() > Self::MAX_CHUNK_SIZE;
+            let init_data = vec![init_discriminator, circuit_type, pi_count];
             let init_ix = Instruction {
-                program_id: self.program_id,
+                program_id: buffer_owner,
                 accounts: vec![
                     AccountMeta::new(self.payer.pubkey(), true),
                     AccountMeta::new(buffer.pubkey(), true),
@@ -286,57 +577,132 @@ mod real_backend {
                 data: init_data,
             };
 
-            // Instruction 2: Upload proof data (in same TX!)
-            let mut proof_data = Vec::new();
-            for pi in public_inputs {
-                proof_data.extend_from_slice(pi);
+            if use_chunked {
+                // Large proof: separate init TX, then chunked uploads
+                let blockhash =
+                    self.rpc_client.get_latest_blockhash().await.map_err(|e| {
+                        ChainError::Other(format!("Failed to get blockhash: {}", e))
+                    })?;
+
+                let init_tx = Transaction::new_signed_with_payer(
+                    &[init_ix],
+                    Some(&self.payer.pubkey()),
+                    &[&self.payer, &buffer],
+                    blockhash,
+                );
+
+                let sig = self
+                    .rpc_client
+                    .send_transaction_with_config(&init_tx, config)
+                    .await
+                    .map_err(|e| {
+                        ChainError::Other(format!("Failed to init proof buffer: {}", e))
+                    })?;
+
+                self.rpc_client
+                    .confirm_transaction_with_commitment(&sig, CommitmentConfig::confirmed())
+                    .await
+                    .map_err(|e| ChainError::Other(format!("Failed to confirm init: {}", e)))?;
+
+                // Upload in chunks
+                let mut offset: u16 = 0;
+                for chunk in proof_data.chunks(Self::MAX_CHUNK_SIZE) {
+                    let mut upload_data = vec![upload_discriminator];
+                    upload_data.extend_from_slice(&offset.to_le_bytes());
+                    upload_data.extend_from_slice(chunk);
+
+                    let upload_ix = Instruction {
+                        program_id: buffer_owner,
+                        accounts: vec![AccountMeta::new(buffer.pubkey(), false)],
+                        data: upload_data,
+                    };
+
+                    let blockhash = self.rpc_client.get_latest_blockhash().await.map_err(|e| {
+                        ChainError::Other(format!("Failed to get blockhash: {}", e))
+                    })?;
+
+                    let upload_tx = Transaction::new_signed_with_payer(
+                        &[upload_ix],
+                        Some(&self.payer.pubkey()),
+                        &[&self.payer],
+                        blockhash,
+                    );
+
+                    let sig = self
+                        .rpc_client
+                        .send_transaction_with_config(&upload_tx, config.clone())
+                        .await
+                        .map_err(|e| {
+                            ChainError::Other(format!(
+                                "Failed to upload chunk at {}: {}",
+                                offset, e
+                            ))
+                        })?;
+
+                    self.rpc_client
+                        .confirm_transaction_with_commitment(&sig, CommitmentConfig::confirmed())
+                        .await
+                        .map_err(|e| {
+                            ChainError::Other(format!(
+                                "Failed to confirm chunk at {}: {}",
+                                offset, e
+                            ))
+                        })?;
+
+                    offset += chunk.len() as u16;
+                }
+            } else {
+                // Small proof: combine init + upload in one TX (faster)
+                let mut upload_data = vec![upload_discriminator];
+                upload_data.extend_from_slice(&0u16.to_le_bytes());
+                upload_data.extend_from_slice(&proof_data);
+
+                let upload_ix = Instruction {
+                    program_id: buffer_owner,
+                    accounts: vec![AccountMeta::new(buffer.pubkey(), false)],
+                    data: upload_data,
+                };
+
+                let blockhash =
+                    self.rpc_client.get_latest_blockhash().await.map_err(|e| {
+                        ChainError::Other(format!("Failed to get blockhash: {}", e))
+                    })?;
+
+                let tx = Transaction::new_signed_with_payer(
+                    &[init_ix, upload_ix],
+                    Some(&self.payer.pubkey()),
+                    &[&self.payer, &buffer],
+                    blockhash,
+                );
+
+                let config = RpcSendTransactionConfig {
+                    skip_preflight: false,
+                    preflight_commitment: Some(CommitmentConfig::confirmed().commitment),
+                    ..Default::default()
+                };
+
+                let sig = self
+                    .rpc_client
+                    .send_transaction_with_config(&tx, config)
+                    .await
+                    .map_err(|e| {
+                        ChainError::Other(format!("Failed to send proof buffer TX: {}", e))
+                    })?;
+
+                self.rpc_client
+                    .confirm_transaction_with_commitment(&sig, CommitmentConfig::confirmed())
+                    .await
+                    .map_err(|e| {
+                        ChainError::Other(format!("Failed to confirm proof buffer: {}", e))
+                    })?;
             }
-            proof_data.extend_from_slice(proof);
-
-            let mut upload_data = vec![IX_UPLOAD_CHUNK];
-            upload_data.extend_from_slice(&0u16.to_le_bytes()); // offset = 0
-            upload_data.extend_from_slice(&proof_data);
-
-            let upload_ix = Instruction {
-                program_id: self.program_id,
-                accounts: vec![AccountMeta::new(buffer.pubkey(), false)],
-                data: upload_data,
-            };
-
-            // Send both instructions in one TX (saves a confirmation round-trip!)
-            let blockhash = self
-                .rpc_client
-                .get_latest_blockhash()
-                .await
-                .map_err(|e| ChainError::Other(format!("Failed to get blockhash: {}", e)))?;
-
-            let tx = Transaction::new_signed_with_payer(
-                &[init_ix, upload_ix],
-                Some(&self.payer.pubkey()),
-                &[&self.payer, &buffer],
-                blockhash,
-            );
-
-            // Use confirmed commitment for faster confirmation
-            let config = RpcSendTransactionConfig {
-                skip_preflight: false,
-                preflight_commitment: Some(CommitmentConfig::confirmed().commitment),
-                ..Default::default()
-            };
-
-            let sig = self
-                .rpc_client
-                .send_transaction_with_config(&tx, config)
-                .await
-                .map_err(|e| ChainError::Other(format!("Failed to send proof buffer TX: {}", e)))?;
-
-            self.rpc_client
-                .confirm_transaction_with_commitment(&sig, CommitmentConfig::confirmed())
-                .await
-                .map_err(|e| ChainError::Other(format!("Failed to confirm proof buffer: {}", e)))?;
 
             Ok(buffer.pubkey())
         }
+
+        /// Compute units needed for UltraPlonk proof verification
+        /// Shield circuit uses ~1.4M CUs, need headroom for other instructions
+        const VERIFICATION_COMPUTE_UNITS: u32 = 2_000_000;
 
         /// Send transaction with fast confirmation (confirmed, not finalized)
         async fn send_transaction(
@@ -349,8 +715,16 @@ mod real_backend {
                 .await
                 .map_err(|e| ChainError::Other(format!("Failed to get blockhash: {}", e)))?;
 
+            // Add compute budget instruction for UltraPlonk verification
+            // This must be the first instruction in the transaction
+            let compute_budget_ix =
+                ComputeBudgetInstruction::set_compute_unit_limit(Self::VERIFICATION_COMPUTE_UNITS);
+
+            let mut all_instructions = vec![compute_budget_ix];
+            all_instructions.extend_from_slice(instructions);
+
             let tx = Transaction::new_signed_with_payer(
-                instructions,
+                &all_instructions,
                 Some(&self.payer.pubkey()),
                 &[&self.payer],
                 blockhash,
@@ -570,13 +944,29 @@ mod real_backend {
             data.extend_from_slice(&request.amount.to_le_bytes());
             data.extend_from_slice(&ct_hash_bytes);
 
+            // Build accounts list per MASP program expectations:
+            // [payer, tree_state, proof_buffer, (commitment_store_program, commitment_store_state)?, verifier_program?]
+            let mut accounts = vec![
+                AccountMeta::new(self.payer.pubkey(), true),
+                AccountMeta::new(tree_state_pda, false),
+                AccountMeta::new_readonly(proof_buffer, false),
+            ];
+
+            // Add mock commitment store accounts if enabled
+            if self.use_simple_onchain_store {
+                let (store_state, _) = derive_commitment_store_state_pda();
+                accounts.push(AccountMeta::new_readonly(MOCK_COMMITMENT_STORE_ID, false));
+                accounts.push(AccountMeta::new(store_state, false));
+            }
+
+            // When CPI mode is enabled, add verifier program for the MASP program to CPI to
+            if let Some(verifier_id) = &self.verifier_program_id {
+                accounts.push(AccountMeta::new_readonly(*verifier_id, false));
+            }
+
             let ix = Instruction {
                 program_id: self.program_id,
-                accounts: vec![
-                    AccountMeta::new(self.payer.pubkey(), true),
-                    AccountMeta::new(tree_state_pda, false),
-                    AccountMeta::new_readonly(proof_buffer, false),
-                ],
+                accounts,
                 data,
             };
 
@@ -676,8 +1066,8 @@ mod real_backend {
             }
             data.extend_from_slice(&tx_binding_bytes);
 
-            // Build accounts list
-            // Order: authority, tree_state, proof_buffer, system_program, nullifier_pdas...
+            // Build accounts list per MASP program expectations:
+            // [authority, tree_state, proof_buffer, system_program, (commitment_store)?, verifier?, nullifier_pdas...]
             let mut accounts = vec![
                 AccountMeta::new(self.payer.pubkey(), true),
                 AccountMeta::new(tree_state_pda, false),
@@ -685,10 +1075,28 @@ mod real_backend {
                 AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
             ];
 
+            // Add mock commitment store accounts if enabled
+            if self.use_simple_onchain_store {
+                let (store_state, _) = derive_commitment_store_state_pda();
+                accounts.push(AccountMeta::new_readonly(MOCK_COMMITMENT_STORE_ID, false));
+                accounts.push(AccountMeta::new(store_state, false));
+            }
+
+            // When CPI mode is enabled, add verifier program
+            if let Some(verifier_id) = &self.verifier_program_id {
+                accounts.push(AccountMeta::new_readonly(*verifier_id, false));
+            }
+
             // Add nullifier PDAs for enabled inputs (skip zero nullifiers)
+            // PDA is derived under mock store when simple_onchain_store is enabled,
+            // otherwise under MASP program
             for nf_bytes in nullifiers_bytes.iter().take(request.input_count as usize) {
                 if nf_bytes != &[0u8; 32] {
-                    let (nullifier_pda, _) = derive_nullifier_pda(&self.program_id, nf_bytes);
+                    let (nullifier_pda, _) = if self.use_simple_onchain_store {
+                        derive_nullifier_pda_store(nf_bytes)
+                    } else {
+                        derive_nullifier_pda_masp(&self.program_id, nf_bytes)
+                    };
                     accounts.push(AccountMeta::new(nullifier_pda, false));
                 }
             }
@@ -788,20 +1196,36 @@ mod real_backend {
             }
             data.extend_from_slice(&asset_id_bytes);
 
-            // Derive nullifier PDA
+            // Derive nullifier PDA (under store or MASP depending on mode)
             let nullifier_bytes_arr: [u8; 32] = nullifier_bytes;
-            let (nullifier_pda, _) = derive_nullifier_pda(&self.program_id, &nullifier_bytes_arr);
+            let (nullifier_pda, _) = if self.use_simple_onchain_store {
+                derive_nullifier_pda_store(&nullifier_bytes_arr)
+            } else {
+                derive_nullifier_pda_masp(&self.program_id, &nullifier_bytes_arr)
+            };
+
+            let mut accounts = vec![
+                AccountMeta::new(self.payer.pubkey(), true),
+                AccountMeta::new(tree_state_pda, false),
+                AccountMeta::new_readonly(proof_buffer, false),
+                AccountMeta::new(nullifier_pda, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                // TODO: Add token accounts when SPL transfer is implemented
+            ];
+
+            // Add mock store program for nullifier CPI (must come before verifier)
+            if self.use_simple_onchain_store {
+                accounts.push(AccountMeta::new_readonly(MOCK_COMMITMENT_STORE_ID, false));
+            }
+
+            // When CPI mode is enabled, add verifier program for the MASP program to CPI to
+            if let Some(verifier_id) = &self.verifier_program_id {
+                accounts.push(AccountMeta::new_readonly(*verifier_id, false));
+            }
 
             let ix = Instruction {
                 program_id: self.program_id,
-                accounts: vec![
-                    AccountMeta::new(self.payer.pubkey(), true),
-                    AccountMeta::new(tree_state_pda, false),
-                    AccountMeta::new_readonly(proof_buffer, false),
-                    AccountMeta::new(nullifier_pda, false),
-                    AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-                    // TODO: Add token accounts when SPL transfer is implemented
-                ],
+                accounts,
                 data,
             };
 

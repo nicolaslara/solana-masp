@@ -30,16 +30,16 @@ use solana_program::{
     sysvar::Sysvar,
 };
 
+use crate::verify::{ProofSystem, CURRENT_PROOF_SYSTEM};
+
 /// System program ID (11111111111111111111111111111111)
-const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-]);
+const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0; 32]);
 
 /// Create a CreateAccount instruction for the System program
 ///
 /// In solana-program v3.x, system_instruction is in a separate crate.
 /// We inline the instruction construction to avoid the dependency.
-fn create_account_instruction(
+pub fn create_account_instruction(
     from_pubkey: &Pubkey,
     to_pubkey: &Pubkey,
     lamports: u64,
@@ -66,9 +66,7 @@ fn create_account_instruction(
 }
 
 use crate::error::MaspError;
-use crate::state::{
-    BufferStatus, CircuitType, NullifierAccount, ProofBufferHeader, TreeState, PROOF_SIZE,
-};
+use crate::state::{BufferStatus, CircuitType, ProofBufferHeader, TreeState, PROOF_SIZE};
 use crate::verify;
 
 // =============================================================================
@@ -218,11 +216,13 @@ pub fn process_init_proof_buffer(
 
     // Initialize header
     let mut buffer_data = buffer.try_borrow_mut_data()?;
+    // Canonical header layout (matches verifier + inputs parsing):
+    // [status(1), circuit_type(1), data_len(2), pi_count(1)]
     buffer_data[0] = BufferStatus::Incomplete as u8;
-    buffer_data[1] = 0; // data_len low byte
-    buffer_data[2] = 0; // data_len high byte
-    buffer_data[3] = pi_count;
-    buffer_data[4] = circuit_type;
+    buffer_data[1] = circuit_type;
+    buffer_data[2] = 0; // data_len low byte
+    buffer_data[3] = 0; // data_len high byte
+    buffer_data[4] = pi_count;
 
     msg!(
         "MASP: Initialized proof buffer for circuit {} with {} public inputs",
@@ -276,8 +276,9 @@ pub fn process_upload_chunk(accounts: &[AccountInfo], data: &[u8]) -> ProgramRes
 
     // Update data length
     let new_len = offset + chunk.len();
-    buffer_data[1] = (new_len & 0xff) as u8;
-    buffer_data[2] = ((new_len >> 8) & 0xff) as u8;
+    // Header bytes [2..4] are data_len (u16 LE) in the canonical layout.
+    buffer_data[2] = (new_len & 0xff) as u8;
+    buffer_data[3] = ((new_len >> 8) & 0xff) as u8;
 
     msg!("MASP: Uploaded {} bytes at offset {}", chunk.len(), offset);
     Ok(())
@@ -306,24 +307,31 @@ pub struct ShieldData {
 /// 0. [signer] Depositor
 /// 1. [writable] Tree state PDA
 /// 2. [readable] Proof buffer (with verified proof)
-/// 3. [writable] Depositor token account
-/// 4. [writable] Pool token account
-/// 5. [] Token program
+/// 3. [] Commitment store program (when simple-onchain-store feature)
+/// 4. [writable] Commitment store state PDA (when simple-onchain-store feature)
+/// 5. [] Verifier program (for UltraPlonk CPI)
 pub fn process_shield(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    use crate::inputs::ShieldInputs;
+
+    #[cfg(feature = "cu-log")]
+    solana_program::log::sol_log_compute_units();
+
     let accounts_iter = &mut accounts.iter();
     let depositor = next_account_info(accounts_iter)?;
     let tree_state_account = next_account_info(accounts_iter)?;
     let proof_buffer = next_account_info(accounts_iter)?;
-    // TODO: Token accounts for SPL transfer
-    // let depositor_token = next_account_info(accounts_iter)?;
-    // let pool_token = next_account_info(accounts_iter)?;
-    // let token_program = next_account_info(accounts_iter)?;
+
+    // Store accounts (when simple-onchain-store feature enabled)
+    #[cfg(feature = "simple-onchain-store")]
+    let store_program = next_account_info(accounts_iter)?;
+    #[cfg(feature = "simple-onchain-store")]
+    let store_state = next_account_info(accounts_iter)?;
 
     if !depositor.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // Parse instruction data
+    // Parse instruction data (needed for inline mode, optional for buffer mode)
     let shield_data = ShieldData::try_from_slice(data)?;
 
     // Verify tree state PDA
@@ -340,41 +348,80 @@ pub fn process_shield(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         return Err(ProgramError::InvalidAccountData);
     }
 
-    // Read and verify proof from buffer
-    let buffer_data = proof_buffer.try_borrow_data()?;
-    let pi_count = buffer_data[3] as usize;
-    let circuit_type = buffer_data[4];
-
-    if circuit_type != CircuitType::Shield as u8 {
-        msg!("Wrong circuit type in buffer");
-        return Err(MaspError::InvalidProofData.into());
+    // Validate circuit type in buffer
+    {
+        let buffer_data = proof_buffer.try_borrow_data()?;
+        let circuit_type = buffer_data[1];
+        if circuit_type != CircuitType::Shield as u8 {
+            msg!(
+                "Wrong circuit type in buffer: got {}, expected {}",
+                circuit_type,
+                CircuitType::Shield as u8
+            );
+            return Err(MaspError::InvalidProofData.into());
+        }
     }
 
-    let pi_bytes = pi_count * 32;
-    let proof_start = ProofBufferHeader::SIZE + pi_bytes;
-    let proof_end = proof_start + PROOF_SIZE;
+    // Extract public inputs from buffer or instruction data based on proof system
+    // This is the single source of truth for state updates
+    let inputs = ShieldInputs::extract(proof_buffer, &shield_data)?;
 
-    if proof_end > buffer_data.len() {
-        return Err(MaspError::BufferIncomplete.into());
+    #[cfg(feature = "cu-log")]
+    {
+        msg!("CU: before verify_shield");
+        solana_program::log::sol_log_compute_units();
     }
 
-    let proof_bytes = &buffer_data[proof_start..proof_end];
+    // Verify proof based on proof system
+    match CURRENT_PROOF_SYSTEM {
+        ProofSystem::UltraPlonk => {
+            // Buffer mode: PIs are in the buffer, same bytes we extracted above
+            let verifier_program = next_account_info(accounts_iter)?;
+            verify::verify_proof(verify::ProofSource::Buffer {
+                verifier_program,
+                payer: depositor,
+                proof_buffer,
+            })?;
+        }
+        _ => {
+            // Inline mode: use instruction data for PIs
+            let public_inputs = inputs.to_public_inputs();
+            let buffer_data = proof_buffer.try_borrow_data()?;
+            const HEADER_SIZE: usize = 5;
+            let pi_count = buffer_data[4] as usize;
+            let proof_start = HEADER_SIZE + pi_count * 32;
+            let proof_end = proof_start + PROOF_SIZE;
+            if proof_end > buffer_data.len() {
+                return Err(MaspError::BufferIncomplete.into());
+            }
+            let proof_bytes = &buffer_data[proof_start..proof_end];
+            verify::verify_proof(verify::ProofSource::Bytes {
+                circuit_type: CircuitType::Shield,
+                public_inputs: &public_inputs,
+                proof_bytes,
+            })?;
+        }
+    }
 
-    // Verify shield proof
-    verify::verify_shield(
-        &shield_data.commitment,
-        &shield_data.asset_id,
-        shield_data.amount,
-        &shield_data.ct_hash,
-        proof_bytes,
-    )?;
+    #[cfg(feature = "cu-log")]
+    {
+        msg!("CU: after verify_shield");
+        solana_program::log::sol_log_compute_units();
+    }
 
     // TODO: Execute SPL token transfer from depositor to pool
     // spl_token::instruction::transfer(...)
 
-    // Update tree state - append commitment
-    // TODO: Actually update Merkle tree (requires computing new root)
-    // For now, just increment leaf count
+    // Insert commitment into the Merkle tree
+    {
+        use crate::stores::commitment_store;
+        #[cfg(feature = "simple-onchain-store")]
+        commitment_store::insert(store_program, store_state, depositor, inputs.commitment)?;
+        #[cfg(not(feature = "simple-onchain-store"))]
+        commitment_store::insert(depositor, inputs.commitment)?;
+    }
+
+    // Update MASP's tree state - increment leaf count
     tree_state
         .increment_leaf_count()
         .map_err(|_| MaspError::Overflow)?;
@@ -382,10 +429,7 @@ pub fn process_shield(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
     // Serialize updated state
     tree_state.serialize(&mut *tree_state_account.try_borrow_mut_data()?)?;
 
-    msg!(
-        "MASP: Shield successful - commitment {:?}...",
-        &shield_data.commitment[..4]
-    );
+    msg!("MASP: Shield - commitment {:?}", inputs.commitment);
     Ok(())
 }
 
@@ -418,23 +462,35 @@ pub struct TransferData {
 /// 0. [signer] Relayer/user
 /// 1. [writable] Tree state PDA
 /// 2. [readable] Proof buffer
-/// 3..N. [writable] Nullifier PDAs (to be created)
+/// 3. [] System program
+/// 4. [] Commitment store program (when simple-onchain-store feature)
+/// 5. [writable] Commitment store state PDA (when simple-onchain-store feature)
+/// N. [] Verifier program (for UltraPlonk CPI)
+/// N+1..M. [writable] Nullifier PDAs (to be created)
 pub fn process_transfer(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
+    use crate::inputs::TransferInputs;
+
     let accounts_iter = &mut accounts.iter();
     let authority = next_account_info(accounts_iter)?;
     let tree_state_account = next_account_info(accounts_iter)?;
     let proof_buffer = next_account_info(accounts_iter)?;
     let system_program = next_account_info(accounts_iter)?;
 
+    // Store accounts (when simple-onchain-store feature enabled)
+    #[cfg(feature = "simple-onchain-store")]
+    let store_program = next_account_info(accounts_iter)?;
+    #[cfg(feature = "simple-onchain-store")]
+    let store_state = next_account_info(accounts_iter)?;
+
     if !authority.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // Parse instruction data
+    // Parse instruction data (needed for inline mode, optional for buffer mode)
     let transfer_data = TransferData::try_from_slice(data)?;
 
     // Verify tree state PDA
@@ -451,46 +507,60 @@ pub fn process_transfer(
         return Err(ProgramError::InvalidAccountData);
     }
 
-    // Validate anchor
-    if !tree_state.is_valid_anchor(&transfer_data.anchor) {
+    // Validate circuit type in buffer
+    {
+        let buffer_data = proof_buffer.try_borrow_data()?;
+        let circuit_type = buffer_data[1];
+        if circuit_type != CircuitType::Transfer as u8 {
+            msg!(
+                "Wrong circuit type in buffer: got {}, expected {}",
+                circuit_type,
+                CircuitType::Transfer as u8
+            );
+            return Err(MaspError::InvalidProofData.into());
+        }
+    }
+
+    // Extract public inputs from buffer or instruction data based on proof system
+    let inputs = TransferInputs::extract(proof_buffer, &transfer_data)?;
+
+    // Validate anchor (using extracted inputs)
+    if !tree_state.is_valid_anchor(&inputs.anchor) {
         return Err(MaspError::InvalidAnchor.into());
     }
 
-    // Read and verify proof from buffer
-    let buffer_data = proof_buffer.try_borrow_data()?;
-    let pi_count = buffer_data[3] as usize;
-    let circuit_type = buffer_data[4];
-
-    if circuit_type != CircuitType::Transfer as u8 {
-        msg!("Wrong circuit type in buffer");
-        return Err(MaspError::InvalidProofData.into());
+    // Verify proof based on proof system
+    match CURRENT_PROOF_SYSTEM {
+        ProofSystem::UltraPlonk => {
+            let verifier_program = next_account_info(accounts_iter)?;
+            verify::verify_proof(verify::ProofSource::Buffer {
+                verifier_program,
+                payer: authority,
+                proof_buffer,
+            })?;
+        }
+        _ => {
+            let public_inputs = inputs.to_public_inputs();
+            let buffer_data = proof_buffer.try_borrow_data()?;
+            const HEADER_SIZE: usize = 5;
+            let pi_count = buffer_data[4] as usize;
+            let proof_start = HEADER_SIZE + pi_count * 32;
+            let proof_end = proof_start + PROOF_SIZE;
+            if proof_end > buffer_data.len() {
+                return Err(MaspError::BufferIncomplete.into());
+            }
+            let proof_bytes = &buffer_data[proof_start..proof_end];
+            verify::verify_proof(verify::ProofSource::Bytes {
+                circuit_type: CircuitType::Transfer,
+                public_inputs: &public_inputs,
+                proof_bytes,
+            })?;
+        }
     }
 
-    let pi_bytes = pi_count * 32;
-    let proof_start = ProofBufferHeader::SIZE + pi_bytes;
-    let proof_end = proof_start + PROOF_SIZE;
-
-    if proof_end > buffer_data.len() {
-        return Err(MaspError::BufferIncomplete.into());
-    }
-
-    let proof_bytes = &buffer_data[proof_start..proof_end];
-
-    // Verify transfer proof
-    verify::verify_transfer(
-        &transfer_data.anchor,
-        &transfer_data.nullifiers,
-        &transfer_data.output_commitments,
-        transfer_data.input_count,
-        transfer_data.output_count,
-        &transfer_data.ct_hashes,
-        &transfer_data.tx_binding,
-        proof_bytes,
-    )?;
-
-    // Check and create nullifier PDAs for non-zero nullifiers
-    for i in 0..transfer_data.input_count as usize {
-        let nullifier = &transfer_data.nullifiers[i];
+    // Mark nullifiers as spent (double-spend prevention)
+    for i in 0..inputs.input_count as usize {
+        let nullifier = &inputs.nullifiers[i];
 
         // Skip zero nullifiers (disabled inputs)
         if nullifier == &[0u8; 32] {
@@ -500,55 +570,42 @@ pub fn process_transfer(
         // Get nullifier account from remaining accounts
         let nullifier_account = next_account_info(accounts_iter)?;
 
-        // Derive expected PDA
-        let seeds: &[&[u8]] = &[b"nullifier", nullifier];
-        let (expected_pda, bump) = Pubkey::find_program_address(seeds, program_id);
-
-        if nullifier_account.key != &expected_pda {
-            msg!("Invalid nullifier PDA for input {}", i);
-            return Err(ProgramError::InvalidAccountData);
-        }
-
-        // Check if already spent (account exists)
-        if !nullifier_account.data_is_empty() {
-            msg!("Nullifier {} already spent", i);
-            return Err(MaspError::NullifierAlreadySpent.into());
-        }
-
-        // Create nullifier account
-        let rent = Rent::get()?;
-        let lamports = rent.minimum_balance(NullifierAccount::SIZE);
-        let seeds_with_bump: &[&[u8]] = &[b"nullifier", nullifier, &[bump]];
-
-        invoke_signed(
-            &create_account_instruction(
-                authority.key,
-                nullifier_account.key,
-                lamports,
-                NullifierAccount::SIZE as u64,
-                program_id,
-            ),
-            &[
-                authority.clone(),
-                nullifier_account.clone(),
-                system_program.clone(),
-            ],
-            &[seeds_with_bump],
+        // Use nullifier store abstraction
+        use crate::stores::nullifier_store;
+        #[cfg(feature = "simple-onchain-store")]
+        nullifier_store::insert(
+            store_program,
+            authority,
+            nullifier_account,
+            system_program,
+            *nullifier,
         )?;
-
-        // Initialize nullifier account
-        let nf_account = NullifierAccount::new(*nullifier, 0); // TODO: get slot
-        nf_account.serialize(&mut *nullifier_account.try_borrow_mut_data()?)?;
+        #[cfg(not(feature = "simple-onchain-store"))]
+        nullifier_store::insert(
+            authority,
+            nullifier_account,
+            system_program,
+            *nullifier,
+            program_id,
+        )?;
     }
 
-    // Append output commitments to tree
-    for i in 0..transfer_data.output_count as usize {
-        let commitment = &transfer_data.output_commitments[i];
+    // Insert output commitments into the Merkle tree
+    for i in 0..inputs.output_count as usize {
+        let commitment = &inputs.output_commitments[i];
         if commitment != &[0u8; 32] {
-            // TODO: Actually update Merkle tree
+            use crate::stores::commitment_store;
+            #[cfg(feature = "simple-onchain-store")]
+            commitment_store::insert(store_program, store_state, authority, *commitment)?;
+            #[cfg(not(feature = "simple-onchain-store"))]
+            commitment_store::insert(authority, *commitment)?;
+
+            // Update MASP's tree state
             tree_state
                 .increment_leaf_count()
                 .map_err(|_| MaspError::Overflow)?;
+
+            msg!("MASP: Transfer output {} - commitment {:?}", i, commitment);
         }
     }
 
@@ -556,9 +613,9 @@ pub fn process_transfer(
     tree_state.serialize(&mut *tree_state_account.try_borrow_mut_data()?)?;
 
     msg!(
-        "MASP: Transfer successful - {} inputs, {} outputs",
-        transfer_data.input_count,
-        transfer_data.output_count
+        "MASP: Transfer - {} inputs, {} outputs",
+        inputs.input_count,
+        inputs.output_count
     );
     Ok(())
 }
@@ -591,31 +648,32 @@ pub struct UnshieldData {
 /// 1. [writable] Tree state PDA
 /// 2. [readable] Proof buffer
 /// 3. [writable] Nullifier PDA (to be created)
-/// 4. [writable] Pool token account
-/// 5. [writable] Recipient token account
-/// 6. [] Token program
-/// 7. [] System program
+/// 4. [] System program
+/// 5. [] Store program (when simple-onchain-store feature)
+/// 6. [] Verifier program (for UltraPlonk CPI)
 pub fn process_unshield(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
+    use crate::inputs::UnshieldInputs;
+
     let accounts_iter = &mut accounts.iter();
     let authority = next_account_info(accounts_iter)?;
     let tree_state_account = next_account_info(accounts_iter)?;
     let proof_buffer = next_account_info(accounts_iter)?;
     let nullifier_account = next_account_info(accounts_iter)?;
     let system_program = next_account_info(accounts_iter)?;
-    // TODO: Token accounts for SPL transfer
-    // let pool_token = next_account_info(accounts_iter)?;
-    // let recipient_token = next_account_info(accounts_iter)?;
-    // let token_program = next_account_info(accounts_iter)?;
+
+    // Store program (when simple-onchain-store feature enabled)
+    #[cfg(feature = "simple-onchain-store")]
+    let store_program = next_account_info(accounts_iter)?;
 
     if !authority.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // Parse instruction data
+    // Parse instruction data (needed for inline mode, optional for buffer mode)
     let unshield_data = UnshieldData::try_from_slice(data)?;
 
     // Verify tree state PDA
@@ -632,89 +690,83 @@ pub fn process_unshield(
         return Err(ProgramError::InvalidAccountData);
     }
 
-    // Validate anchor
-    if !tree_state.is_valid_anchor(&unshield_data.anchor) {
+    // Validate circuit type in buffer
+    {
+        let buffer_data = proof_buffer.try_borrow_data()?;
+        let circuit_type = buffer_data[1];
+        if circuit_type != CircuitType::Unshield as u8 {
+            msg!(
+                "Wrong circuit type in buffer: got {}, expected {}",
+                circuit_type,
+                CircuitType::Unshield as u8
+            );
+            return Err(MaspError::InvalidProofData.into());
+        }
+    }
+
+    // Extract public inputs from buffer or instruction data based on proof system
+    let inputs = UnshieldInputs::extract(proof_buffer, &unshield_data)?;
+
+    // Validate anchor (using extracted inputs)
+    if !tree_state.is_valid_anchor(&inputs.anchor) {
         return Err(MaspError::InvalidAnchor.into());
     }
 
-    // Read and verify proof from buffer
-    let buffer_data = proof_buffer.try_borrow_data()?;
-    let pi_count = buffer_data[3] as usize;
-    let circuit_type = buffer_data[4];
-
-    if circuit_type != CircuitType::Unshield as u8 {
-        msg!("Wrong circuit type in buffer");
-        return Err(MaspError::InvalidProofData.into());
+    // Verify proof based on proof system
+    match CURRENT_PROOF_SYSTEM {
+        ProofSystem::UltraPlonk => {
+            let verifier_program = next_account_info(accounts_iter)?;
+            verify::verify_proof(verify::ProofSource::Buffer {
+                verifier_program,
+                payer: authority,
+                proof_buffer,
+            })?;
+        }
+        _ => {
+            let public_inputs = inputs.to_public_inputs();
+            let buffer_data = proof_buffer.try_borrow_data()?;
+            const HEADER_SIZE: usize = 5;
+            let pi_count = buffer_data[4] as usize;
+            let proof_start = HEADER_SIZE + pi_count * 32;
+            let proof_end = proof_start + PROOF_SIZE;
+            if proof_end > buffer_data.len() {
+                return Err(MaspError::BufferIncomplete.into());
+            }
+            let proof_bytes = &buffer_data[proof_start..proof_end];
+            verify::verify_proof(verify::ProofSource::Bytes {
+                circuit_type: CircuitType::Unshield,
+                public_inputs: &public_inputs,
+                proof_bytes,
+            })?;
+        }
     }
 
-    let pi_bytes = pi_count * 32;
-    let proof_start = ProofBufferHeader::SIZE + pi_bytes;
-    let proof_end = proof_start + PROOF_SIZE;
-
-    if proof_end > buffer_data.len() {
-        return Err(MaspError::BufferIncomplete.into());
-    }
-
-    let proof_bytes = &buffer_data[proof_start..proof_end];
-
-    // Verify unshield proof
-    verify::verify_unshield(
-        &unshield_data.anchor,
-        &unshield_data.nullifier,
-        &unshield_data.tx_binding,
-        unshield_data.amount,
-        &unshield_data.recipient_limbs,
-        &unshield_data.asset_id,
-        proof_bytes,
-    )?;
-
-    // Derive and verify nullifier PDA
-    let nullifier = &unshield_data.nullifier;
-    let seeds: &[&[u8]] = &[b"nullifier", nullifier];
-    let (expected_pda, bump) = Pubkey::find_program_address(seeds, program_id);
-
-    if nullifier_account.key != &expected_pda {
-        msg!("Invalid nullifier PDA");
-        return Err(ProgramError::InvalidAccountData);
-    }
-
-    // Check if already spent
-    if !nullifier_account.data_is_empty() {
-        return Err(MaspError::NullifierAlreadySpent.into());
-    }
-
-    // Create nullifier account
-    let rent = Rent::get()?;
-    let lamports = rent.minimum_balance(NullifierAccount::SIZE);
-    let seeds_with_bump: &[&[u8]] = &[b"nullifier", nullifier, &[bump]];
-
-    invoke_signed(
-        &create_account_instruction(
-            authority.key,
-            nullifier_account.key,
-            lamports,
-            NullifierAccount::SIZE as u64,
+    // Mark nullifier as spent
+    let nullifier = &inputs.nullifier;
+    {
+        use crate::stores::nullifier_store;
+        #[cfg(feature = "simple-onchain-store")]
+        nullifier_store::insert(
+            store_program,
+            authority,
+            nullifier_account,
+            system_program,
+            *nullifier,
+        )?;
+        #[cfg(not(feature = "simple-onchain-store"))]
+        nullifier_store::insert(
+            authority,
+            nullifier_account,
+            system_program,
+            *nullifier,
             program_id,
-        ),
-        &[
-            authority.clone(),
-            nullifier_account.clone(),
-            system_program.clone(),
-        ],
-        &[seeds_with_bump],
-    )?;
-
-    // Initialize nullifier account
-    let nf_account = NullifierAccount::new(*nullifier, 0);
-    nf_account.serialize(&mut *nullifier_account.try_borrow_mut_data()?)?;
+        )?;
+    }
 
     // TODO: Execute SPL token transfer from pool to recipient
-    // spl_token::instruction::transfer(...)
+    // Amount and recipient available in inputs.amount and inputs.recipient()
 
-    msg!(
-        "MASP: Unshield successful - {} tokens",
-        unshield_data.amount
-    );
+    msg!("MASP: Unshield successful - {} tokens", inputs.amount);
     Ok(())
 }
 

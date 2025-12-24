@@ -30,3 +30,6 @@ Thumbs.db
 *.log
 
 solana-masp.code-workspace
+
+# Keypair mnemonics (sensitive!)
+*.mnemonic

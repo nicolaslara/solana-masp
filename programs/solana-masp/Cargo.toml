@@ -46,5 +46,13 @@ local-testing = []
 # ⚠️ MUST be combined with local-testing - never use in production!
 mock-proofs = ["local-testing"]
 
+# Use simple on-chain store for nullifiers and commitments (testing)
+# CPI to an external program with hardcoded ID.
+# In production, this would be replaced with Light Protocol integration.
+simple-onchain-store = ["local-testing"]
+
+# Enable CU logging to debug compute unit usage
+cu-log = ["ultraplonk-core/cu_log"]
+
 ## NOTE:
 ## Profile settings must live at the workspace root `Cargo.toml`.

@@ -2041,6 +2041,7 @@ dependencies = [
  "sha3",
  "solana-client",
  "solana-commitment-config",
+ "solana-compute-budget-interface",
  "solana-keypair",
  "solana-sdk",
  "taceo-poseidon2",
@@ -3445,6 +3446,16 @@ checksum = "2e41a3917076a8b5375809078ae3a6fb76a53e364b596ef8c4265e7f410876f3"
 dependencies = [
  "serde",
  "serde_derive",
+]
+
+[[package]]
+name = "solana-compute-budget-interface"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8292c436b269ad23cecc8b24f7da3ab07ca111661e25e00ce0e1d22771951ab9"
+dependencies = [
+ "solana-instruction",
+ "solana-sdk-ids",
 ]
 
 [[package]]

@@ -64,8 +64,10 @@ use solana_program::{
 };
 
 pub mod error;
+pub mod inputs;
 pub mod instructions;
 pub mod state;
+pub mod stores;
 pub mod verify;
 
 use instructions::*;

@@ -1,0 +1,31 @@
+[package]
+name = "masp-verifier"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "UltraPlonk verifier for MASP circuits (Shield, Transfer, Unshield)"
+
+# Keep this package out of parent workspace (uses different paths)
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+# Solana program SDK
+solana-program = "3.0"
+# Pin base64ct to avoid edition2024 requirement (1.8+ needs Rust 1.85)
+base64ct = "=1.6.0"
+
+# UltraPlonk verification logic
+ultraplonk-core = { path = "../../../solana-ultraplonk-verifier/crates/ultraplonk-core", default-features = false }
+
+[features]
+default = []
+no-entrypoint = []
+cu_log = ["ultraplonk-core/cu_log"]
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

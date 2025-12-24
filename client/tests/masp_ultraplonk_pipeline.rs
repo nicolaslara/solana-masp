@@ -197,6 +197,11 @@ async fn ultraplonk_pipeline_masp_shield() -> Result<(), ProofSystemError> {
         .map_err(|_| ProofSystemError::NotImplemented("failed to parse bb vk".to_string()))?;
     let vk_onchain_bytes = vk.to_onchain_bytes_without_g2();
 
+    // Save vk_onchain.bin for program embedding
+    let vk_onchain = target.join("vk_onchain.bin");
+    std::fs::write(&vk_onchain, &vk_onchain_bytes)
+        .map_err(|e| ProofSystemError::NotImplemented(e.to_string()))?;
+
     // 4) Verify proof
     let proof_with_pi = read(&proof_bin);
     let num_inputs = vk.num_inputs as usize;
@@ -281,6 +286,11 @@ async fn ultraplonk_pipeline_masp_unshield() -> Result<(), ProofSystemError> {
         .map_err(|_| ProofSystemError::NotImplemented("failed to parse bb vk".to_string()))?;
     // Use without_g2 version - from_onchain_bytes expects 1632 bytes (without G2_X)
     let vk_onchain_bytes = vk.to_onchain_bytes_without_g2();
+
+    // Save vk_onchain.bin for program embedding
+    let vk_onchain = target.join("vk_onchain.bin");
+    std::fs::write(&vk_onchain, &vk_onchain_bytes)
+        .map_err(|e| ProofSystemError::NotImplemented(e.to_string()))?;
 
     // 4) Verify proof
     let proof_with_pi = read(&proof_bin);

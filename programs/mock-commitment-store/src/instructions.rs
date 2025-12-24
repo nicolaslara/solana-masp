@@ -32,9 +32,7 @@ pub const IX_INSERT_NULLIFIER: u8 = 2;
 // System Program Helper
 // =============================================================================
 
-const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-]);
+const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0; 32]);
 
 fn create_account_instruction(
     from_pubkey: &Pubkey,

@@ -33,9 +33,7 @@ use solana_sdk::{
 use std::str::FromStr;
 
 /// System Program ID
-const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-]);
+const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0; 32]);
 
 const RPC_URL: &str = "http://127.0.0.1:8899";
 

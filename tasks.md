@@ -407,7 +407,7 @@ The program delegates to a **Commitment Store** via CPI. See `knowledge.md` for 
 
 ### 1.1.1 Mock State Stores ✅ SCAFFOLDED
 
-Separate program (`programs/mock-commitment-store/`) for local testing.
+Separate program (`programs/simple-onchain-store/`) for local testing.
 Implements BOTH stores in one program for testing simplicity:
 
 **NoteCommitmentStore** (membership proofs):
@@ -769,6 +769,7 @@ Until this is implemented, users can:
 - Multi-input transactions (spend N notes at once)
 - Cross-chain shielded transfers
 - Atomic swaps within shielded pool
+- **Public input size optimization**: Currently all PIs are 32 bytes (full field elements). Could use smaller representations for amounts (u64 = 8 bytes), counts (u8 = 1 byte), etc. Trade-off: complicates on-chain verification (variable PI sizes) but reduces buffer size and CU costs.
 
 ---
 
