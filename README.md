@@ -179,12 +179,14 @@ MASP_PRINT_CONFIG=1 \
 
 <<<<<<< HEAD
 **Notes:**
+
 - Uses `--test-threads=1` to avoid parallel request issues with Surfpool
 - Auto-skips rebuild if .so is up-to-date
 - Deploys fresh program each test run (~7s total including deploy)
 
-**Manual deployment** (if needed):
+**Manual deployment** (if needed)
 =======
+
 Auto-deploy behavior:
 
 - If `MASP_PROGRAM_ID` is set → uses that program ID (no build/deploy)
@@ -201,6 +203,7 @@ Control via environment:
 | `MASP_PROGRAM_FEATURES` | Override build features |
 
 #### 2b. With Surfpool - Manual Deploy
+>>>>>>>
 >>>>>>> 737df988aecd70d80a76c3395c2653c7150cb6f8
 
 ```bash
@@ -268,6 +271,7 @@ MASP_PRINT_CONFIG=1 \
 ```
 
 **Notes:**
+
 - Uses `--test-threads=1` to avoid parallel RPC issues
 - All 8 user flow tests pass in ~2-3 seconds
 - `onchain-mock` feature enables the Keccak256-based mock prover compatible with on-chain mock verifier
