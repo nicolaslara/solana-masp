@@ -67,6 +67,7 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 **Non-goal (explicit exception):** implement a production external indexer now. We will mock indexers, but keep the abstraction boundaries identical to production.
 
 ### Guiding constraints (do not regress)
+
 - **No input ciphertexts** ever published/stored (outputs-only DA model).
 - **No commitment leaf references** required for spends (spends reference `anchor` + reveal `nullifier`s only).
 - **Public input ordering** is frozen per circuit (UltraPlonk today; Groth16 later must use the same logical layout).
@@ -90,6 +91,7 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
     - (optional) program-side parsing helpers in the future
 
 **Acceptance / safety checks**
+
 - [ ] `cargo test -p masp-client --test user_flows` still passes on MockChain.
 - [ ] `cargo test -p masp-client --test user_flows --features solana-backend,onchain-mock -- --nocapture` still passes on Surfpool (mock proofs).
 
@@ -109,6 +111,7 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
   - Then submit MASP Tx B binding to returned `ct_hash(es)`
 
 **Acceptance / safety checks**
+
 - [ ] Surfpool E2E flow succeeds end-to-end with Tx A + Tx B (no LocalSync ciphertext mutation).
 - [ ] Negative test: mismatched ct_hash vs posted bytes → wallet rejects output (client-side check).
 
@@ -129,6 +132,7 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
   - `IndexerBackend::Mock` backed by the RPC-ledger indexer (not `Arc<MockStore>` mutation)
 
 **Acceptance / safety checks**
+
 - [ ] `cargo test -p masp-client --test user_flows --features solana-backend,onchain-mock -- --nocapture` passes on Surfpool.
 - [ ] Same suite passes on Devnet (where feasible), with the indexer mock reading from RPC.
 
@@ -146,6 +150,7 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 - [ ] Implement `batch_check_nullifiers()` via batched account fetch.
 
 **Acceptance / safety checks**
+
 - [ ] Existing Surfpool tests still pass with `IndexerMode::External`.
 - [ ] Add a regression test: stale anchor rejected by program.
 
@@ -162,6 +167,7 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 - [ ] Ensure `masp-protocol` exposes “public inputs arrays” independent of proof system.
 
 **Acceptance / safety checks**
+
 - [ ] `program_deploy.rs` can build/deploy with `ProofSystemBackend::Groth16` selected (even if verification remains scaffolded at first).
 
 ---
@@ -170,7 +176,6 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 
 - [ ] Implement SPL token transfers on-chain for `shield` and `unshield`.
 - [ ] Keep the Tx A/Tx B flow unchanged (ciphertexts remain ledger-history only).
-
 
 ---
 
