@@ -54,6 +54,126 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 
 ---
 
+## ✅ Iterative Plan (2025-12-24): Make Surfpool behave like Devnet+Light (except external indexers are mocked)
+
+**Goal:** Surfpool and Devnet should exercise the **same protocol shape**:
+
+- **Tx A (ciphertext posting)** publishes output ciphertext bytes to ledger history (DA)
+- **Tx B (MASP state transition)** includes only proof + `ct_hash(es)` + commitments/nullifiers
+- **Chain and Indexer are separate actors**:
+  - The chain submits transactions and enforces on-chain rules
+  - The “indexer” learns by **observing ledger artifacts**, but we are allowed to mock it locally
+
+**Non-goal (explicit exception):** implement a production external indexer now. We will mock indexers, but keep the abstraction boundaries identical to production.
+
+### Guiding constraints (do not regress)
+- **No input ciphertexts** ever published/stored (outputs-only DA model).
+- **No commitment leaf references** required for spends (spends reference `anchor` + reveal `nullifier`s only).
+- **Public input ordering** is frozen per circuit (UltraPlonk today; Groth16 later must use the same logical layout).
+
+---
+
+## Milestone 1.6: Protocol Shape Freeze + Codec Layer (P0)
+
+**Why first:** everything else becomes safer once encoding/parsing is centralized.
+
+- [ ] **Freeze instruction byte layouts** (Tx A posting; Tx B shield/transfer/unshield)
+  - Deliverable: a single “source of truth” module for encoding/decoding instruction data + public input arrays.
+- [ ] **Introduce a protocol codec module/crate** (recommended name: `masp-protocol`)
+  - Owns:
+    - instruction data structs + `encode/decode`
+    - `ct_hash` canonicalization (exact bytes hashed; must match `client/src/traits.rs`)
+    - public input encoding helpers (→ `[[u8; 32]; N]`)
+  - Consumers:
+    - `client/src/backends/solana.rs` (build txs)
+    - any RPC-ledger “mock indexer” (parse txs)
+    - (optional) program-side parsing helpers in the future
+
+**Acceptance / safety checks**
+- [ ] `cargo test -p masp-client --test user_flows` still passes on MockChain.
+- [ ] `cargo test -p masp-client --test user_flows --features solana-backend,onchain-mock -- --nocapture` still passes on Surfpool (mock proofs).
+
+---
+
+## Milestone 1.7: Implement Tx A Ciphertext Posting on SolanaChain (P0.5)
+
+**Goal:** Surfpool and Devnet both use the same Option 1A two-tx model the mocks already enforce.
+
+- [ ] Implement `SolanaChain::post_ciphertexts(CiphertextPostingRequest)`:
+  - Submit a “ciphertext posting transaction” that contains **only** ciphertext bytes for enabled outputs.
+  - Return `CiphertextPostingResult { tx_sig, ct_hashes }`.
+  - **Note:** This should not store ciphertexts in program state; ciphertext bytes live in ledger history.
+
+- [ ] Update `SolanaChain::shield()` and `SolanaChain::transfer()` call sites in the client flows to:
+  - Post ciphertexts via `Chain::post_ciphertexts()` (Tx A)
+  - Then submit MASP Tx B binding to returned `ct_hash(es)`
+
+**Acceptance / safety checks**
+- [ ] Surfpool E2E flow succeeds end-to-end with Tx A + Tx B (no LocalSync ciphertext mutation).
+- [ ] Negative test: mismatched ct_hash vs posted bytes → wallet rejects output (client-side check).
+
+---
+
+## Milestone 1.8: Stop “Chain updates Indexer” in Surfpool/Devnet tests (P1)
+
+**Why:** Production indexers observe the ledger; LocalSync is a test convenience that hides real integration bugs.
+
+- [ ] Add a **mock “RPC ledger indexer”** (minimal implementation) that:
+  - fetches transactions by signature
+  - parses Tx A ciphertext postings
+  - exposes `Indexer::{get_ciphertext_by_hash,get_ciphertext_for_output,scan_outputs_since}`
+  - (optional for now): does not need to be efficient; correctness first
+
+- [ ] Switch `TestEnv` for Surfpool/Devnet to:
+  - `SolanaChain(IndexerMode::External)`
+  - `IndexerBackend::Mock` backed by the RPC-ledger indexer (not `Arc<MockStore>` mutation)
+
+**Acceptance / safety checks**
+- [ ] `cargo test -p masp-client --test user_flows --features solana-backend,onchain-mock -- --nocapture` passes on Surfpool.
+- [ ] Same suite passes on Devnet (where feasible), with the indexer mock reading from RPC.
+
+---
+
+## Milestone 1.9: External-mode Chain Reads (P1)
+
+**Goal:** `SolanaChain` must behave “production-shaped” even without a shared store.
+
+- [ ] Implement `get_current_anchor()` by reading the on-chain `TreeState`.
+- [ ] Implement `is_valid_anchor()` by reading on-chain anchor history.
+- [ ] Implement `is_nullifier_spent()` by checking PDA existence:
+  - Under MASP program ID for direct mode
+  - Under mock-store program ID only when the nullifier set is delegated there
+- [ ] Implement `batch_check_nullifiers()` via batched account fetch.
+
+**Acceptance / safety checks**
+- [ ] Existing Surfpool tests still pass with `IndexerMode::External`.
+- [ ] Add a regression test: stale anchor rejected by program.
+
+---
+
+## Milestone 2.x: Proof System Swappability (UltraPlonk ↔ Groth16) (P2)
+
+**Goal:** swapping proof systems should not rewrite the Solana backend or protocol parsing.
+
+- [ ] Introduce a `ProofSystemAdapter` boundary (client-side):
+  - sizes, proof-buffer strategy, “public inputs encoding”
+  - UltraPlonk: buffer + CPI verifier
+  - Groth16: inline bytes verification or dedicated verifier program (TBD)
+- [ ] Ensure `masp-protocol` exposes “public inputs arrays” independent of proof system.
+
+**Acceptance / safety checks**
+- [ ] `program_deploy.rs` can build/deploy with `ProofSystemBackend::Groth16` selected (even if verification remains scaffolded at first).
+
+---
+
+## Milestone 3: SPL Boundary (Shield/Unshield transfers) (P0 for production soundness; can be staged)
+
+- [ ] Implement SPL token transfers on-chain for `shield` and `unshield`.
+- [ ] Keep the Tx A/Tx B flow unchanged (ciphertexts remain ledger-history only).
+
+
+---
+
 ## Phase 0: Scaffolding ✅
 
 - [x] Project structure created
