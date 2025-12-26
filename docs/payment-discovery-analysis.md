@@ -668,23 +668,27 @@ LIGHT PROTOCOL NULLIFIER CHECK:
 | **Spend: prove note exists** | ✅ Yes | On-chain verification |
 | **Spend: prove nullifier new** | ✅ Yes | Light Protocol insertion |
 
-### Batch Proofs: What `getValidityProof(hashes[])` Returns
+### Batch Proofs: What `getValidityProof(hashes[])` Returns (and current limits)
 
 ```
-Input:  [hash1, hash2, hash3, ..., hashM]  (M accounts to prove)
+Input:  [hash1, hash2, hash3, ..., hashM]  (accounts to prove)
 
 Output options:
   Option A: M separate proofs     → M × verification cost 😱
   Option B: 1 batched proof       → 1 × verification cost ✅
   
-Light Protocol uses Option B (batched proof)!
+Light Protocol supports batching, but the exact **batch shapes differ by proof type**.
+
+**Important current constraint (2025-12):** for **non-membership / uniqueness** proofs (nullifier insert-once), batching is limited to **2 items per proof** (max).
 ```
 
-**Batched Validity Proof:**
+**Practical implication for MASP nullifiers:**
 
-- Single proof covers multiple accounts
-- Verifies all M accounts exist in same tree
-- On-chain verification: ~100K CU (regardless of M, up to limit)
+- For N input nullifiers, you need approximately:
+  - \(\lceil N / 2 \rceil\) non-membership proofs (under the “max 2 per proof” limit).
+- This affects both:
+  - **transaction size** (multiple proof payloads), and
+  - **compute budget** (multiple Light verifications / CPIs).
 
 ### Performance Numbers (Estimates)
 
@@ -702,11 +706,10 @@ PROOF GENERATION (off-chain, by Photon indexer):
 ON-CHAIN VERIFICATION:
   
   Single proof verification: ~100K CU
-  Batched proof verification: ~100-200K CU
-    (Batching amortizes verification overhead)
+  Batched proof verification: ~100-200K CU (per proof, current estimates)
   
   Solana TX limit: ~1.4M CU
-  → Can verify ~10-14 batched proofs per TX
+  → Upper bound depends on per-proof CU and proof system used for MASP
 ```
 
 ### For MASP Sync: No Proofs Needed
@@ -737,7 +740,7 @@ SPEND TRANSACTION:
   - Nullifier doesn't exist yet (Light Protocol handles)
   
   Typical spend: 1-2 input notes
-  → 1-2 validity proofs
+  → non-membership batching fits naturally (1 proof for 1–2 nullifiers)
   → ~100-200K CU for Light verification
   → Leaves room for UltraPlonk proof (~500K CU)
 ```
@@ -749,7 +752,7 @@ SPEND TRANSACTION:
 | **Indexer latency** | Proof generation takes time | Cache proofs, prefetch |
 | **Indexer downtime** | Can't get proofs if indexer is down | Multiple indexer endpoints |
 | **Proof size** | Large proofs increase TX size | Light Protocol uses constant-size proofs |
-| **Batching limits** | Too many accounts may exceed limits | Batch in chunks of 10-20 |
+| **Batching limits** | Non-membership/uniqueness proofs currently batch max 2 | For many inputs: multiple proofs, or split operation (non-atomic), or use a different proof system (e.g., Groth16) + proof buffering |
 | **Stale proofs** | Tree changes invalidate proofs | Use recent anchor, retry if fails |
 | **CU costs** | Multiple proofs exhaust budget | Batch proofs, limit inputs per TX |
 

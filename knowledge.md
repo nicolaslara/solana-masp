@@ -703,10 +703,11 @@ assert_eq_if(enabled, recipient, result);
 2. **TX size limit** - 1232 bytes on Solana
 3. **Forester dependency** - Light queues need draining (liveness risk)
 4. **Don't use Light nullifier queue** - Designed for compressed account lifecycle, not MASP spentness
-5. **Ciphertext size pressure** - current encryption format is hundreds of bytes per output; multi-output transfers cannot fit “inline everything” under the 1232-byte limit (especially once proofs are included).
-   - `C_enc` (recipient): **244 bytes/output**
-   - `C_out` (sender recovery): **236 bytes/output**
-   - **Optimization opportunity:** `C_out` currently duplicates `pk_d.x` even though the note plaintext already includes `recipient = pk_d.x` → can save **32 bytes/output** without changing protocol semantics.
+5. **Ciphertext size pressure** - ciphertext bytes are material under Solana's 1232-byte tx envelope, so we rely on the Option-1A two-tx model (Tx A posts ciphertext bytes; Tx B binds via `ct_hash`).
+   - `C_enc` (recipient): **244 bytes** (see `client/src/encryption.rs`: `ENCRYPTED_NOTE_SIZE`)
+   - `C_out` (sender recovery): **204 bytes** (see `client/src/encryption.rs`: `C_OUT_SIZE`, V2 format)
+   - **Note:** older/legacy `C_out` format was 236 bytes (it duplicated `pk_d.x`); current code keeps backward-compatible *decoding* but produces the smaller V2 by default.
+   - **Bigger win pending:** our current `ct_hash` / posting blob is `ephemeral_key || EncryptedNote::to_bytes()`, and `EncryptedNote::to_bytes()` already includes `ephemeral_key`, so we currently duplicate 64 bytes in Tx A posting + hashing. Canonicalizing the posted bytes to avoid the duplicate `ephemeral_key` is an easy space win.
 
 ### From E2E Testing
 
@@ -717,6 +718,14 @@ assert_eq_if(enabled, recipient, result);
 3. **Nullifier check on sync** - Restored clients must check `is_nullifier_spent()` before adding notes
 4. **Multi-asset isolation** - Different tokens have separate balances (asset_id is key)
 5. **Single tx_sig per transfer** - All output commitments (output + change) belong to same transaction
+
+### Production size limits found (2025-12-25)
+
+- **Solana tx envelope**: 1232 bytes (hard constraint for a single transaction packet).
+- **Transfer scaling bottleneck is accounts, not instruction data**:
+  - Current `Transfer` instruction data is ~361 bytes (fixed MAX_INPUTS=3/MAX_OUTPUTS=3).
+  - Increasing to **15 inputs** requires passing **15 writable nullifier PDA accounts** to `process_transfer`, which inflates the tx account list and typically cannot fit in a single *legacy* tx without using **v0 + Address Lookup Tables (ALTs)** or redesigning the nullifier storage path.
+- **Public input count ceiling**: `programs/solana-masp/src/verify.rs` sets `MAX_PUBLIC_INPUTS = 16` for both UltraPlonk and Groth16 backends; a 15-input transfer would exceed this unless we raise it (and update verifier-side expectations).
 
 ---
 

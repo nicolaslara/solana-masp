@@ -156,19 +156,59 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 
 ---
 
-## Milestone 2.x: Proof System Swappability (UltraPlonk ↔ Groth16) (P2)
+## Milestone 2.x: Devnet + Light readiness (P1 → P0)
 
-**Goal:** swapping proof systems should not rewrite the Solana backend or protocol parsing.
+**Goal:** before we design multi‑tx verification/application splits, we need to exercise the **production target environment**:
+- Devnet RPC + (eventual) Light Protocol backends
+- external indexer behavior (can remain mocked), but **chain/indexer separation** must hold
 
-- [ ] Introduce a `ProofSystemAdapter` boundary (client-side):
-  - sizes, proof-buffer strategy, “public inputs encoding”
-  - UltraPlonk: buffer + CPI verifier
-  - Groth16: inline bytes verification or dedicated verifier program (TBD)
-- [ ] Ensure `masp-protocol` exposes “public inputs arrays” independent of proof system.
+**Deliverables**
+- [ ] Run `user_flows` on **Devnet** with:
+  - `SolanaChain(IndexerMode::External)` (no LocalSync shortcuts)
+  - mocked external indexer that **observes ledger artifacts** (Tx A ciphertext postings + Tx B state transitions)
+- [ ] Add a CI-friendly “smoke” config for Devnet runs (optional; can be manual at first).
 
 **Acceptance / safety checks**
+- [ ] Same user-flow semantics as Surfpool (shield/transfer/unshield/recover) with the same Tx A/Tx B shape.
 
-- [ ] `program_deploy.rs` can build/deploy with `ProofSystemBackend::Groth16` selected (even if verification remains scaffolded at first).
+---
+
+## Milestone 2.y: Consolidation circuit exploration + measurement (P1)
+
+**Goal:** after we are running production-shaped flows on Devnet, explore what a **consolidation** circuit looks like (e.g., 15→1) and measure the real constraints:
+- compute units (verification + apply-time work)
+- transaction byte sizes
+- practical max inputs we can support before we need protocol changes
+
+**Work items**
+- [ ] Add a **consolidation user flow** (public API only) to `client/tests/user_flows.rs` (builds on existing Milestone 3.1 intent).
+- [ ] Add a minimal “consolidate” action in the client + chain semantics (can be mock-first, but Devnet should be the target environment for performance measurement).
+- [ ] Measure:
+  - UltraPlonk verification CU for consolidation circuit(s)
+  - apply-time CU overhead for N nullifier insertions (PDAs now; Light later)
+  - instruction/tx size impact of larger N
+- [ ] Document results in `docs/size-and-timing.md` (and/or a new consolidation section in `docs/ultraplonk-multi-tx-model.md` if we later revisit multi-tx).
+
+**Acceptance / safety checks**
+- [ ] Existing `user_flows` continue to pass (no regressions).
+- [ ] Consolidation flow passes on Surfpool and on Devnet (where feasible), with measured CU/size recorded.
+
+---
+
+## Milestone 2.z: Optimization + proving-system decision (UltraPlonk vs Groth16) (P2)
+
+**Goal:** do an optimization phase (reduce bytes/CU where possible), then decide whether to experiment with Groth16 first.
+
+**Work items**
+- [ ] Optimize transaction sizes (ciphertext posting format, remove avoidable duplication, compress points if applicable).
+- [ ] Optimize CU hot spots discovered by the consolidation measurements.
+- [ ] Decision gate:
+  - If UltraPlonk fits comfortably (CU + size) for target input counts → stay UltraPlonk-first.
+  - If UltraPlonk is too tight → evaluate Groth16 path first (proof bytes + CU).
+
+**Acceptance / safety checks**
+- [ ] Before/after measurements captured.
+- [ ] No protocol-shape regressions (Tx A/Tx B stays consistent).
 
 ---
 

@@ -293,10 +293,12 @@ If Light is used (e.g., for the nullifier set), it exposes more than one “proo
 - **Per-item proof material** (Merkle path / root context) can be fetched in batch, e.g. via
   [`getMultipleCompressedAccountProofs`](https://www.helius.dev/docs/api-reference/zk-compression/getmultiplecompressedaccountproofs).
 
-- A single **Validity Proof** (Groth16) can cover multiple inputs/outputs in one proof (Light API calls this `getValidityProof`):
+- A **Validity Proof** (Groth16) can cover multiple checks in one proof (Light API calls this `getValidityProof`):
   [`getValidityProof`](https://www.helius.dev/docs/api-reference/zk-compression/getvalidityproof).
 
-On-chain, the intended Light flow is: verify a **single validity proof** that covers the batch, rather than verifying many Merkle paths individually.
+On-chain, the intended Light flow is: verify batched validity proofs rather than verifying many per-item Merkle paths individually.
+
+**Important current constraint (2025-12):** for **non-membership / uniqueness** checks (nullifier insert-once), batching is currently limited to **2 items per proof** (max). Protocol-level designs that assume “one proof for many nullifiers” must be revisited under this constraint.
 
 This section does **not** apply to the commitment tree membership model described above (which uses Merkle paths inside the MASP circuit + anchor validity on-chain), only to nullifiers.
 
@@ -536,13 +538,15 @@ For off-chain tooling, you can fetch multiple account proof materials in one cal
 
 - [`getMultipleCompressedAccountProofs`](https://www.helius.dev/docs/api-reference/zk-compression/getmultiplecompressedaccountproofs)
 
-### Batched on-chain validity (single Groth16)
+### Batched on-chain validity (Groth16)
 
 For on-chain verification, the intended batching primitive is the validity proof:
 
 - [`getValidityProof`](https://www.helius.dev/docs/api-reference/zk-compression/getvalidityproof)
 
-This is the mechanism by which one proof can cover multiple checks within Light’s supported batch shapes (e.g., address-tree insert-once / non-membership style checks for the nullifier set).
+This is the mechanism by which one proof can cover multiple checks within Light’s supported batch shapes.
+
+**Current constraint:** non-membership/uniqueness batching is limited to **2 items per proof** (max).
 
 ---
 
