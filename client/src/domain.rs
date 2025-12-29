@@ -1,76 +1,21 @@
 //! Domain separation tags for Poseidon hashing
 //!
-//! Each hash operation uses a unique domain tag to prevent cross-protocol attacks.
-//! The tag is the first input to the hash function.
+//! Re-exports from `masp_protocol` with convenience methods for field conversion.
 
 use crate::types::Fr;
 
-/// Domain separation tags for different hash operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u64)]
-pub enum DomainTag {
-    /// Note commitment: binds all note fields together
-    /// `cm = H(DOM, asset_id, amount, recipient, nullifier_nonce, note_randomness)`
-    NoteCommitment = 1,
+// Re-export the canonical DomainTag from the shared crate
+pub use masp_protocol::DomainTag;
 
-    /// Nullifier derivation: unique identifier revealed on spend
-    /// `nf = H(DOM, nullifier_key, nullifier_nonce)`
-    Nullifier = 2,
-
-    /// Asset identifier: hides the actual token address
-    /// `asset_id = H(DOM, token_address)`
-    AssetId = 3,
-
-    /// Ciphertext binding (optional)
-    /// `c_hash = H(DOM, ciphertext_chunks...)`
-    Ciphertext = 4,
-
-    /// Transaction binding hash
-    ///
-    /// Binds the proof to the transaction intent / ordering, preventing malleability.
-    TransactionBinding = 5,
-
-    /// Nullifier nonce derivation for outputs
-    /// `nullifier_nonce = H(DOM, tx_binding, output_index)`
-    NullifierNonce = 6,
-
-    /// Merkle tree internal nodes
-    /// `parent = H(DOM, left, right)`
-    MerkleNode = 7,
-
-    /// Incoming viewing key derivation
-    /// `ivk = H(DOM, ak_x, nk_x)`
-    IncomingViewingKey = 8,
-
-    /// Authorization secret key derivation
-    /// `ask = H(DOM, spending_key)`
-    AuthorizationSecret = 9,
-
-    /// Nullifier secret key derivation
-    /// `nsk = H(DOM, spending_key)`
-    NullifierSecret = 10,
-
-    /// Outgoing viewing key derivation
-    /// `ovk = H(DOM, ak_x, nk_x)`
-    /// Used to decrypt C_out (notes sent BY this key)
-    OutgoingViewingKey = 11,
-
-    /// Outgoing ciphertext key derivation
-    /// `ock = H(DOM, ovk, epk_x, commitment)`
-    /// Symmetric key for C_out encryption
-    OutgoingCiphertextKey = 12,
-}
-
-impl DomainTag {
+/// Extension trait to convert DomainTag to field element
+pub trait DomainTagExt {
     /// Convert to field element for use in hash
-    pub fn to_field(self) -> Fr {
-        Fr::from(self as u64)
-    }
+    fn to_field(self) -> Fr;
 }
 
-impl From<DomainTag> for Fr {
-    fn from(tag: DomainTag) -> Fr {
-        tag.to_field()
+impl DomainTagExt for DomainTag {
+    fn to_field(self) -> Fr {
+        Fr::from(self.as_u64())
     }
 }
 

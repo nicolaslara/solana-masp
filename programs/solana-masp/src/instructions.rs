@@ -32,6 +32,9 @@ use solana_program::{
 
 use crate::verify::{ProofSystem, CURRENT_PROOF_SYSTEM};
 
+// Re-export instruction data types from shared protocol crate
+pub use masp_protocol::{ShieldData, TransferData, UnshieldData};
+
 /// System program ID (11111111111111111111111111111111)
 const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0; 32]);
 
@@ -288,19 +291,6 @@ pub fn process_upload_chunk(accounts: &[AccountInfo], data: &[u8]) -> ProgramRes
 // Shield
 // =============================================================================
 
-/// Shield instruction data
-#[derive(BorshSerialize, BorshDeserialize, Debug)]
-pub struct ShieldData {
-    /// New note commitment
-    pub commitment: [u8; 32],
-    /// Asset ID (H(token_address))
-    pub asset_id: [u8; 32],
-    /// Amount being shielded
-    pub amount: u64,
-    /// Ciphertext hash
-    pub ct_hash: [u8; 32],
-}
-
 /// Shield - Deposit tokens into shielded pool
 ///
 /// Accounts:
@@ -436,25 +426,6 @@ pub fn process_shield(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
 // =============================================================================
 // Transfer
 // =============================================================================
-
-/// Transfer instruction data
-#[derive(BorshSerialize, BorshDeserialize, Debug)]
-pub struct TransferData {
-    /// Merkle root for membership proofs
-    pub anchor: [u8; 32],
-    /// Nullifiers for spent notes (padded with zeros for unused)
-    pub nullifiers: [[u8; 32]; 3],
-    /// Output commitments (padded with zeros for unused)
-    pub output_commitments: [[u8; 32]; 3],
-    /// Number of inputs (1-3)
-    pub input_count: u32,
-    /// Number of outputs (1-3)
-    pub output_count: u32,
-    /// Ciphertext hashes
-    pub ct_hashes: [[u8; 32]; 3],
-    /// Transaction binding hash
-    pub tx_binding: [u8; 32],
-}
 
 /// Transfer - Move value between shielded notes
 ///
@@ -623,23 +594,6 @@ pub fn process_transfer(
 // =============================================================================
 // Unshield
 // =============================================================================
-
-/// Unshield instruction data
-#[derive(BorshSerialize, BorshDeserialize, Debug)]
-pub struct UnshieldData {
-    /// Merkle root for membership proof
-    pub anchor: [u8; 32],
-    /// Nullifier for spent note
-    pub nullifier: [u8; 32],
-    /// Transaction binding hash
-    pub tx_binding: [u8; 32],
-    /// Amount being withdrawn
-    pub amount: u64,
-    /// Recipient address as 4 u64 limbs (little-endian encoding of pubkey)
-    pub recipient_limbs: [u64; 4],
-    /// Asset ID
-    pub asset_id: [u8; 32],
-}
 
 /// Unshield - Withdraw tokens from shielded pool
 ///

@@ -10,7 +10,7 @@
 //! | `nullifier_nonce`  | Unique per note, used in nullifier derivation |
 //! | `note_randomness`  | Hides note contents in commitment          |
 
-use crate::domain::DomainTag;
+use crate::domain::{DomainTag, DomainTagExt};
 use crate::hash::{field_from_bytes, field_to_bytes, poseidon2_hash_noir};
 use crate::types::{Commitment, Fr, TokenAddress};
 use ark_ff::UniformRand;

@@ -78,20 +78,26 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 
 **Why first:** everything else becomes safer once encoding/parsing is centralized.
 
+- [x] **Created `masp-protocol` crate** (2025-01-29)
+  - Shared `no_std` crate at `masp-protocol/` with:
+    - `DomainTag` enum (frozen domain separation constants)
+    - `ShieldData`, `TransferData`, `UnshieldData` (instruction data structs)
+    - `ShieldPublicInputs`, `TransferPublicInputs`, `UnshieldPublicInputs` (PI layouts + constants)
+    - `MAX_INPUTS = 3`, `MAX_OUTPUTS = 3`
+  - Both `programs/solana-masp` and `client` now depend on this shared crate
+  - Extension trait `DomainTagExt` in client for `to_field()` conversion to arkworks `Fr`
+
 - [ ] **Freeze instruction byte layouts** (Tx A posting; Tx B shield/transfer/unshield)
-  - Deliverable: a single “source of truth” module for encoding/decoding instruction data + public input arrays.
-- [ ] **Introduce a protocol codec module/crate** (recommended name: `masp-protocol`)
-  - Owns:
-    - instruction data structs + `encode/decode`
-    - `ct_hash` canonicalization (exact bytes hashed; must match `client/src/traits.rs`)
-    - public input encoding helpers (→ `[[u8; 32]; N]`)
-  - Consumers:
-    - `client/src/backends/solana.rs` (build txs)
-    - any RPC-ledger “mock indexer” (parse txs)
-    - (optional) program-side parsing helpers in the future
+  - Remaining: `ct_hash` canonicalization helper, Tx A posting instruction format
+- [ ] **Add encoding/decoding helpers**
+  - Remaining: `encode_public_inputs(ShieldInputs) -> [[u8; 32]; 4]` etc.
+  - Remaining: parsing helpers for Tx A ciphertext posting
 
 **Acceptance / safety checks**
 
+- [x] `cargo test -p masp-protocol` passes (8 tests)
+- [x] `cargo test -p masp-client --lib` passes (66 tests)
+- [x] `cargo test -p solana-masp --features mock-proofs,simple-onchain-store` passes (5 tests)
 - [ ] `cargo test -p masp-client --test user_flows` still passes on MockChain.
 - [ ] `cargo test -p masp-client --test user_flows --features solana-backend,onchain-mock -- --nocapture` still passes on Surfpool (mock proofs).
 

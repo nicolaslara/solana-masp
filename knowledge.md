@@ -11,9 +11,21 @@ This file captures learnings, design decisions, and discoveries as we develop th
 **Phase:** Milestone 1 - Solana Integration ✅ COMPLETE
 **Last Updated:** 2025-12-23
 
+### Recent: `masp-protocol` shared crate (2025-12-29)
+
+- Created `masp-protocol/` as a shared `no_std` crate for protocol-level types
+- Both `programs/solana-masp` and `client` now depend on it
+- Contains:
+  - `DomainTag` enum (frozen domain separation constants, values 1-12)
+  - `ShieldData`, `TransferData`, `UnshieldData` (Borsh-serializable instruction data)
+  - `ShieldPublicInputs`, `TransferPublicInputs`, `UnshieldPublicInputs` (PI counts and field indices)
+  - `MAX_INPUTS = 3`, `MAX_OUTPUTS = 3` constants
+- Client uses `DomainTagExt` extension trait for `to_field()` conversion to arkworks `Fr`
+- This ensures program and client can never drift on instruction layouts
+
 ### Recent Finding (2025-12-24): ProofBuffer header format mismatch (fixed)
 
-- The MASP program’s `InitProofBuffer` header layout previously did not match what `inputs.rs` and the verifier-CPI path assume (byte 1 treated as `circuit_type`).
+- The MASP program's `InitProofBuffer` header layout previously did not match what `inputs.rs` and the verifier-CPI path assume (byte 1 treated as `circuit_type`).
 - This could break embedded/non-CPI verification paths by mis-parsing the buffer.
 - Fixed by standardizing the header layout to:
   - `[status, circuit_type, data_len(u16 LE), pi_count]`

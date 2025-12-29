@@ -14,7 +14,7 @@
 //! Note: The nullifier SET is stored on-chain, not in the client.
 //! The client only computes nullifiers for its own notes.
 
-use crate::domain::DomainTag;
+use crate::domain::{DomainTag, DomainTagExt};
 use crate::hash::poseidon2_hash_noir;
 use crate::types::{Fr, Nullifier};
 

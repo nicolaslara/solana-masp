@@ -28,7 +28,7 @@
 //! - The circuit binds to these values directly (verification "gets them for free").
 //! - For disabled outputs, `ct_hashes[j] == 0`.
 
-use crate::domain::DomainTag;
+use crate::domain::{DomainTag, DomainTagExt};
 use crate::hash::poseidon2_hash_noir;
 use crate::types::{Fr, Nullifier};
 

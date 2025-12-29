@@ -32,7 +32,7 @@
 
 use crate::types::{Anchor, Commitment, Fr};
 
-use crate::domain::DomainTag;
+use crate::domain::{DomainTag, DomainTagExt};
 use crate::hash::{field_to_bytes, poseidon2_hash_noir};
 
 // ============================================================================
@@ -268,7 +268,7 @@ fn mock_check_spend_authorization(
     note_recipient: Fr,
     note_diversifier_index: u64,
 ) -> Result<(), ProofSystemError> {
-    use crate::domain::DomainTag;
+    use crate::domain::{DomainTag, DomainTagExt};
     use crate::hash::poseidon2_hash_noir;
     use ark_ec::{CurveGroup, PrimeGroup};
     use ark_ff::{BigInteger, PrimeField};

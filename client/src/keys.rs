@@ -39,7 +39,7 @@
 //! - `g_d` = diversifier base point
 //! - `pk_d`= diversified payment address
 
-use crate::domain::DomainTag;
+use crate::domain::{DomainTag, DomainTagExt};
 use crate::hash::poseidon2_hash_noir;
 use crate::types::Fr;
 use ark_ec::{CurveGroup, PrimeGroup};
@@ -417,7 +417,7 @@ mod tests {
         let tx_binding_xfer = tx_binding_transfer(anchor, &nullifiers, 1, 1);
 
         // Compute output nonce using circuit's formula: H(DOM_NULLIFIER_NONCE, tx_binding, output_index)
-        use crate::domain::DomainTag;
+        use crate::domain::{DomainTag, DomainTagExt};
         let output_nonce = poseidon2_hash_noir(
             &[
                 DomainTag::NullifierNonce.to_field(),

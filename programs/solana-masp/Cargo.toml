@@ -17,6 +17,9 @@ base64ct = "=1.6.0"
 # Serialization
 borsh = "1.5"
 
+# Shared protocol types (no_std for BPF)
+masp-protocol = { path = "../../masp-protocol", default-features = false }
+
 # Error handling
 thiserror = "2"
 

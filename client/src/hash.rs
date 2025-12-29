@@ -2,7 +2,7 @@
 //!
 //! We use the light-poseidon crate which implements Poseidon for BN254.
 
-use crate::domain::DomainTag;
+use crate::domain::{DomainTag, DomainTagExt};
 use crate::types::Fr;
 use ark_ff::{BigInteger, PrimeField, Zero};
 use light_poseidon::{Poseidon, PoseidonBytesHasher};

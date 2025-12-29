@@ -2033,6 +2033,7 @@ dependencies = [
  "chacha20poly1305",
  "hex",
  "light-poseidon",
+ "masp-protocol",
  "num-bigint 0.4.6",
  "rand 0.8.5",
  "rand_core 0.6.4",
@@ -2048,6 +2049,13 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "ultraplonk-core",
+]
+
+[[package]]
+name = "masp-protocol"
+version = "0.1.0"
+dependencies = [
+ "borsh",
 ]
 
 [[package]]
@@ -3810,6 +3818,7 @@ version = "0.1.0"
 dependencies = [
  "base64ct",
  "borsh",
+ "masp-protocol",
  "solana-program",
  "thiserror 2.0.17",
  "ultraplonk-core",

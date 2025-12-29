@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["client", "programs/solana-masp", "programs/mock-commitment-store"]
+members = [
+    "client",
+    "masp-protocol",
+    "programs/solana-masp",
+    "programs/mock-commitment-store",
+]
 
 [workspace.package]
 version = "0.1.0"

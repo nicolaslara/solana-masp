@@ -34,7 +34,7 @@
 //! - `ChaChaPolyEncryption` - Production (ChaCha20-Poly1305)
 //! - `MockEncryption` - Testing (simple XOR, fast but insecure)
 
-use crate::domain::DomainTag;
+use crate::domain::{DomainTag, DomainTagExt};
 use crate::hash::{field_from_bytes, field_to_bytes, poseidon_hash};
 use crate::keys::{DiversifiedAddress, FullViewingKey};
 use crate::note::{Note, NotePlaintext};
