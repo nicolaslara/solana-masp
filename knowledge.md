@@ -11,6 +11,70 @@ This file captures learnings, design decisions, and discoveries as we develop th
 **Phase:** Milestone 1 - Solana Integration ✅ COMPLETE
 **Last Updated:** 2025-12-23
 
+### Recent: Light Protocol Integration Analysis (2025-01-05)
+
+**Key insight:** Our commitment hash (Poseidon2) does NOT need to change.
+
+Light Protocol stores commitments as **data inside compressed accounts**. The Light leaf hash is:
+```
+leaf = Poseidon(data_hash, state_hash, owner_hashed, lamports)
+where data_hash = Poseidon(discriminator, OUR_COMMITMENT, pool, created_at)
+                                          ↑ Still Poseidon2!
+```
+
+**Integration phases planned:**
+
+1. **Phase 1 (current):** Mock stores with Poseidon2, PDA nullifiers
+2. **Phase 1.5:** Light for nullifiers only (no circuit changes)
+3. **Phase 2:** Light for both commitments + nullifiers (circuit changes for Merkle)
+
+**CU/Size Budget Analysis (3→3 vs 15→1):**
+
+| Scenario | MASP Verify | Light Proofs | Total CU | Fits Single Tx? |
+|----------|-------------|--------------|----------|-----------------|
+| **3→3 UltraPlonk** | ~1.2M CU (Tx V) | 2 proofs @ 100K = 200K (Tx S) | Split ✅ | Yes (multi-tx) |
+| **15→1 UltraPlonk** | ~1.2M CU (Tx V) | 8 proofs @ 100K = 800K (Tx S) | Split ✅ | Yes (multi-tx) |
+| **3→3 Groth16** | ~81K CU | 200K CU | ~300K | **Yes (single tx!)** |
+| **15→1 Groth16** | ~81K CU | 800K CU | ~900K | Yes (single tx) |
+
+**Byte budget (15→1 consolidation):**
+- 15 nullifiers × 32B = 480B public inputs
+- 8 Light proof payloads × 128B = 1024B
+- Total > 1232B envelope limit → **Needs buffering**
+
+**Note on ALTs (Address Lookup Tables):**
+ALTs help reduce transaction size by replacing 32-byte account pubkeys with 1-byte indices. However, ALTs do **not** help with:
+- Instruction data (nullifiers, proof payloads, public inputs)
+- Light validity proof bytes (these are instruction data, not account references)
+
+ALTs **do** help with:
+- Account list size (especially for Light CPIs which reference many accounts)
+- For a 15-input transfer, the account list itself could be large
+
+**Conclusion:** For 15→1 consolidation, the limiting factor is likely **instruction data size** (nullifiers + proof payloads), not account references. This means:
+- ALTs help with account list but not with payload bytes
+- Large consolidations likely need **proof buffering** (upload proofs in separate txs, then reference buffer account)
+- Or split into multiple smaller consolidations (e.g., 5→1 three times)
+
+**Optimization opportunity (not yet implemented):**
+
+Our current public input encoding uses 32 bytes per field element, even for small values:
+- `amount` (u64 = 8 bytes) → currently padded to 32 bytes
+- `input_count` (u32 = 4 bytes) → currently padded to 32 bytes
+- `output_count` (u32 = 4 bytes) → currently padded to 32 bytes
+
+Potential savings with packed encoding:
+- Transfer PIs today: 13 × 32B = 416B
+- With packing: ~200-250B (saves ~150-200B per transfer)
+
+This would also reduce:
+- Proof buffer upload TXs (fewer chunks needed)
+- CU cost (less data to hash/process)
+
+Trade-off: Packed encoding complicates on-chain parsing (variable-size fields). Defer until measurements show it's needed.
+
+**Conclusion:** 15→1 consolidation is feasible with multi-TX model, but Light's 2-per-batch limit makes it CU-heavy. Groth16 provides more headroom.
+
 ### Recent: `masp-protocol` shared crate (2025-12-29)
 
 - Created `masp-protocol/` as a shared `no_std` crate for protocol-level types
@@ -156,6 +220,67 @@ MASP_PROOF_SYSTEM=ultraplonk
 ---
 
 ## Architecture Decisions ✅
+
+### Light Protocol Integration (Planned)
+
+**Decision:** Phased integration with swappable abstractions.
+
+**Phase 1.5: Light for Nullifiers Only (no circuit changes)**
+
+```rust
+/// Nullifier existence proof - abstracts over uniqueness mechanism
+pub enum NullifierProof {
+    /// Mock/dev: PDA existence check (no proof needed)
+    PdaExistence,
+    /// Light: Validity proof for non-existence
+    LightValidityProof {
+        proof_a: [u8; 32],
+        proof_b: [u8; 64],
+        proof_c: [u8; 32],
+        root_index: u16,
+    },
+}
+
+/// Trait abstraction
+#[async_trait]
+pub trait NullifierSet: Send + Sync {
+    async fn is_spent(&self, nullifier: &[u8; 32]) -> Result<bool>;
+    async fn get_non_existence_proof(&self, nullifiers: &[[u8; 32]]) -> Result<Vec<NullifierProof>>;
+}
+```
+
+**Phase 2: Light for Both (circuit changes required)**
+
+```rust
+/// Membership witness - abstracts over Merkle path source
+pub enum MembershipWitness {
+    /// Internal tree (Poseidon2, depth 32)
+    InternalMerklePath {
+        siblings: [[u8; 32]; 32],
+        path_indices: [bool; 32],
+    },
+    /// Light Protocol (Poseidon, depth 26)
+    LightCompressedAccount {
+        commitment: [u8; 32],           // Our Poseidon2 commitment (unchanged!)
+        merkle_proof: [[u8; 32]; 26],   // Light Merkle path
+        leaf_index: u64,
+        light_metadata: LightAccountMetadata,  // For computing Light leaf hash
+    },
+}
+
+pub trait NoteCommitmentStore: Send + Sync {
+    fn tree_depth(&self) -> usize;                        // 32 or 26
+    fn hash_function(&self) -> HashFunction;              // Poseidon2 or PoseidonLight
+    async fn get_witness(&self, cm: [u8; 32]) -> Result<MembershipWitness>;
+}
+```
+
+**Circuit changes for Phase 2:**
+- Change `MERKLE_DEPTH = 32 → 26`
+- Add Poseidon (circomlib) for Light leaf hash computation
+- Keep Poseidon2 for our note commitment (it's stored as data, not the leaf itself)
+
+**Reference implementation:** `../noir-main/` demonstrates full Light integration with Groth16.
 
 ### Indexer Latency Modeling (Reference Implementation)
 
@@ -311,7 +436,7 @@ nf = Poseidon(DOM_NULLIFIER, nk, nullifier_nonce)
 
 Where:
 
-- `nk` = nullifier key (derived from spending key via Baby JubJub)
+- `nk` = nullifier key (derived from spending key via Grumpkin)
 - `nullifier_nonce` = unique per note (committed in note)
 
 **Why needed:** Nullifier must be unique per note and derivable only by owner.
@@ -464,7 +589,7 @@ Decryption (recipient has ivk):
 
 | Aspect | Zcash | Our Implementation |
 |--------|-------|-------------------|
-| Key Exchange | X25519 | Baby JubJub ECDH |
+| Key Exchange | X25519 | Grumpkin ECDH |
 | AEAD | ChaCha20-Poly1305 | ChaCha20-Poly1305 ✅ |
 | KDF | Blake2b | Poseidon (ZK-native) |
 | AAD | commitment | ephemeral key |
@@ -706,7 +831,7 @@ assert_eq_if(enabled, recipient, result);
 1. **Poseidon > BLAKE2s** - 70-100x more efficient (~200 vs ~21,000 constraints)
 2. **Domain separation** - Constant field element prepended to inputs
 3. **BN254 security** - ~100-bit security (acceptable)
-4. **Baby JubJub** - Embedded curve for BN254
+4. **Grumpkin** - Embedded curve for BN254 (Noir's `std::embedded_curve_ops`)
 5. **Circuit size** - Sapling spend is ~46K constraints
 
 ### From Spec Analysis
@@ -853,7 +978,7 @@ As real implementations are added, tests will automatically use them.
 3. Multi-asset in one Action:
    - current: intentionally not supported (single-asset per Action)
    - Milestone 5: implement a hard-sound construction (value commitments preferred)
-4. ~~Key derivation~~ → Sapling-style on Baby JubJub (decided)
+4. ~~Key derivation~~ → Sapling-style on Grumpkin (decided)
 5. ~~Exact ciphertext format~~ → ECIES with ChaCha20-Poly1305 (decided)
 6. Relayer fee structure details
 7. Light Protocol integration patterns (Milestone 3)

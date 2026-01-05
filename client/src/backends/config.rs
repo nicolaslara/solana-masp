@@ -42,7 +42,7 @@ impl ChainBackend {
     /// Parse from environment variable or string
     pub fn from_env_or_default() -> Self {
         match env::var("MASP_CHAIN").as_deref() {
-            Ok("mock") | Err(_) => ChainBackend::Mock,
+            Ok("mock") | Ok("") | Err(_) => ChainBackend::Mock, // Empty string = Mock
             Ok("surfpool") => ChainBackend::Surfpool,
             Ok("devnet") => ChainBackend::Devnet,
             Ok("testnet") => ChainBackend::Testnet,

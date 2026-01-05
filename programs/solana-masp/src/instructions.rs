@@ -82,6 +82,8 @@ pub const IX_UPLOAD_CHUNK: u8 = 2;
 pub const IX_SHIELD: u8 = 3;
 pub const IX_TRANSFER: u8 = 4;
 pub const IX_UNSHIELD: u8 = 5;
+/// Ciphertext posting (Tx A in two-tx model) - data carrier only, no state changes
+pub const IX_POST_CIPHERTEXTS: u8 = 7;
 
 /// Update root instruction discriminator.
 ///
@@ -837,5 +839,50 @@ pub fn process_update_root(
         &update_data.new_root[..4],
         tree_state.leaf_count
     );
+    Ok(())
+}
+
+// ============================================================================
+// Ciphertext Posting (Tx A in Two-TX Model)
+// ============================================================================
+
+/// Process ciphertext posting instruction (Tx A).
+///
+/// This is a **data carrier** instruction - it does NOT modify program state.
+/// The ciphertext bytes are stored in the ledger for data availability (DA).
+/// Recipients discover these transactions via the tx_sig shared out-of-band.
+///
+/// ## Security Model
+///
+/// This instruction intentionally has no authorization requirements:
+/// - Anyone can post arbitrary ciphertext bytes
+/// - The bytes are not validated or parsed
+/// - Security comes from cryptographic binding in Tx B:
+///   - Tx B's public inputs include `ct_hash` (hash of ciphertext bytes)
+///   - The ZK proof binds the note to this `ct_hash`
+///   - Recipients verify `ct_hash` matches the ciphertext they received
+///
+/// ## Format
+///
+/// Instruction data after discriminator:
+/// - 1 byte: count (number of ciphertexts, 1-3)
+/// - Variable: packed ciphertexts (each prefixed with u16 LE length)
+///
+/// No accounts required beyond the payer (for transaction fees).
+pub fn process_post_ciphertexts(_data: &[u8]) -> ProgramResult {
+    // This is purely a data carrier - no state changes, no validation.
+    // The ciphertext bytes are now in the ledger history.
+    //
+    // In production, we could add:
+    // - CU logging for analytics
+    // - Basic format validation (optional)
+    // - Rate limiting via account requirements
+    //
+    // For now, we just accept any bytes.
+    #[cfg(feature = "cu-log")]
+    {
+        msg!("MASP: PostCiphertexts - data carrier (no state change)");
+    }
+
     Ok(())
 }

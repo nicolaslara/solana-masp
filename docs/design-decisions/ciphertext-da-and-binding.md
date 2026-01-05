@@ -277,7 +277,7 @@ Noir provides **black box functions** for several crypto primitives, meaning the
 
 Relevant for 1B:
 
-* **Embedded curve ops** over the configured field (for BN254: BabyJubJub / Grumpkin), including fixed-base scalar mul and MSM. ([Noir][5])
+* **Embedded curve ops** over the configured field (for BN254: Grumpkin), including fixed-base scalar mul and MSM. ([Noir][5])
 * **AES128**, **SHA256**, **Blake2s**, **Blake3**, and bitwise **XOR** (plus RANGE). ([Noir][4])
 
 This is the key update versus earlier assumptions: **we are not forced to hand-roll curve gadgets or bit-level AES** if we target a backend that implements these blackboxes efficiently.
@@ -292,7 +292,7 @@ One concrete design:
 
 **KEM (in-circuit)**
 
-* Curve: embedded curve (BabyJubJub/Grumpkin as supported). ([Noir][5])
+* Curve: Grumpkin (Noir's embedded curve for BN254). ([Noir][5])
 * Prove `epk = fixed_base_scalar_mul(esk)`.
 * Prove `ss = scalar_mul(pk_enc, esk)` via `multi_scalar_mul` (N=1) or equivalent.
 

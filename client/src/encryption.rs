@@ -668,7 +668,7 @@ pub fn try_decrypt_outgoing(
 /// Production encryption using ECIES with ChaCha20-Poly1305
 ///
 /// This is the recommended encryption for production use:
-/// - ECDH key exchange on Baby JubJub curve
+/// - ECDH key exchange on Grumpkin curve (Noir's embedded curve for BN254)
 /// - ChaCha20-Poly1305 authenticated encryption
 /// - Poseidon-based KDF for key derivation
 pub struct ChaChaPolyEncryption;

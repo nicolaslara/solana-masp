@@ -74,7 +74,7 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 
 ---
 
-## Milestone 1.6: Protocol Shape Freeze + Codec Layer (P0)
+## Milestone 1.6: Protocol Shape Freeze + Codec Layer (P0) ✅ COMPLETE
 
 **Why first:** everything else becomes safer once encoding/parsing is centralized.
 
@@ -87,19 +87,20 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
   - Both `programs/solana-masp` and `client` now depend on this shared crate
   - Extension trait `DomainTagExt` in client for `to_field()` conversion to arkworks `Fr`
 
-- [ ] **Freeze instruction byte layouts** (Tx A posting; Tx B shield/transfer/unshield)
-  - Remaining: `ct_hash` canonicalization helper, Tx A posting instruction format
-- [ ] **Add encoding/decoding helpers**
-  - Remaining: `encode_public_inputs(ShieldInputs) -> [[u8; 32]; 4]` etc.
-  - Remaining: parsing helpers for Tx A ciphertext posting
+- [x] **Tx B instruction byte layouts frozen** (shield/transfer/unshield via `masp-protocol`)
+- [x] **`ct_hash` computation** exists in `client/src/hash.rs` (program reads from proof buffer, doesn't compute)
+- [ ] ~~Tx A posting instruction format~~ → moved to Milestone 1.7
+- [ ] ~~Encoding/decoding helpers~~ → deferred (nice-to-have, not blocking)
 
 **Acceptance / safety checks**
 
 - [x] `cargo test -p masp-protocol` passes (8 tests)
 - [x] `cargo test -p masp-client --lib` passes (66 tests)
 - [x] `cargo test -p solana-masp --features mock-proofs,simple-onchain-store` passes (5 tests)
-- [ ] `cargo test -p masp-client --test user_flows` still passes on MockChain.
-- [ ] `cargo test -p masp-client --test user_flows --features solana-backend,onchain-mock -- --nocapture` still passes on Surfpool (mock proofs).
+- [x] `cargo test -p masp-client --test user_flows -- --test-threads=1` passes on MockChain (10 tests)
+- [x] `cargo test -p masp-client --test user_flows --features solana-backend,onchain-mock -- --test-threads=1` passes on Surfpool (10 tests)
+
+**Note:** Tests must run with `--test-threads=1` to avoid anchor history overflow when tests share MockStore state.
 
 ---
 
@@ -107,8 +108,16 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 
 **Goal:** Surfpool and Devnet both use the same Option 1A two-tx model the mocks already enforce.
 
+**Status:** Partially stubbed (2025-01-05)
+- [x] `PostCiphertextsData` struct added to `masp-protocol` (wire format defined)
+- [x] `IX_POST_CIPHERTEXTS = 7` instruction added to program (no-op handler, accepts any bytes)
+- [ ] Implement `SolanaChain::post_ciphertexts()` client-side (currently returns `Err("not yet implemented")`)
+- [ ] Update `SolanaChain::shield()` and `SolanaChain::transfer()` to use Tx A + Tx B model
+
+**Remaining work:**
+
 - [ ] Implement `SolanaChain::post_ciphertexts(CiphertextPostingRequest)`:
-  - Submit a “ciphertext posting transaction” that contains **only** ciphertext bytes for enabled outputs.
+  - Submit a "ciphertext posting transaction" that contains **only** ciphertext bytes for enabled outputs.
   - Return `CiphertextPostingResult { tx_sig, ct_hashes }`.
   - **Note:** This should not store ciphertexts in program state; ciphertext bytes live in ledger history.
 
@@ -190,10 +199,26 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 - transaction byte sizes
 - practical max inputs we can support before we need protocol changes
 
+**Projected CU budget (15→1 consolidation with Light):**
+
+| Component | UltraPlonk | Groth16 |
+|-----------|------------|---------|
+| MASP proof verify | ~1.2M CU (Tx V) | ~81K CU |
+| Light proofs (8×) | ~800K CU (Tx S) | ~800K CU |
+| State changes | ~100K CU | ~100K CU |
+| **Total** | **Split across 2 txs ✅** | **~1M CU single tx ✅** |
+
+**Byte budget (15→1):**
+- 15 nullifiers × 32B = 480B public inputs
+- 8 Light proof payloads × 128B = 1024B
+- **Total > 1232B → Needs proof buffering (ALTs don't help with instruction data)**
+
+**Note:** ALTs reduce account pubkey bytes (32B → 1B), but nullifiers and Light proof payloads are instruction data, not accounts. Large consolidations likely need proof buffering or multiple smaller consolidations.
+
 **Work items**
 
 - [ ] Add a **consolidation user flow** (public API only) to `client/tests/user_flows.rs` (builds on existing Milestone 3.1 intent).
-- [ ] Add a minimal “consolidate” action in the client + chain semantics (can be mock-first, but Devnet should be the target environment for performance measurement).
+- [ ] Add a minimal "consolidate" action in the client + chain semantics (can be mock-first, but Devnet should be the target environment for performance measurement).
 - [ ] Measure:
   - UltraPlonk verification CU for consolidation circuit(s)
   - apply-time CU overhead for N nullifier insertions (PDAs now; Light later)
@@ -211,9 +236,24 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 
 **Goal:** do an optimization phase (reduce bytes/CU where possible), then decide whether to experiment with Groth16 first.
 
+**Known optimization opportunities:**
+
+1. **Public input packing:** Currently 32B per field even for small values
+   - `amount` (u64) → 8B instead of 32B
+   - `input_count`/`output_count` (u32) → 4B instead of 32B
+   - Estimated savings: ~150-200B per transfer (reduces buffer uploads)
+   - Trade-off: Complicates on-chain parsing
+
+2. **Ciphertext format:** `ephemeral_key` currently duplicated in ct_hash blob
+   - Removing saves ~64B per output
+
+3. **Point compression:** Grumpkin points are 64B uncompressed (x, y)
+   - Compression would save 32B per point (store y-parity + x)
+
 **Work items**
 
 - [ ] Optimize transaction sizes (ciphertext posting format, remove avoidable duplication, compress points if applicable).
+- [ ] Evaluate packed public input encoding (measure parsing CU cost vs space savings).
 - [ ] Optimize CU hot spots discovered by the consolidation measurements.
 - [ ] Decision gate:
   - If UltraPlonk fits comfortably (CU + size) for target input counts → stay UltraPlonk-first.
@@ -275,8 +315,8 @@ Building a Multi-Asset Shielded Pool (MASP) on Solana.
 ### 0.4 Key Derivation ✅
 
 - [x] SpendingKey → ViewingKey
-- [x] authorization_secret → authorization_key (Baby JubJub)
-- [x] nullifier_secret → nullifier_key (Baby JubJub)
+- [x] authorization_secret → authorization_key (Grumpkin)
+- [x] nullifier_secret → nullifier_key (Grumpkin)
 - [x] Incoming viewing key derivation
 - [x] Diversified address generation
 
@@ -413,14 +453,14 @@ Light Protocol integration deferred. Current model:
 ### 0.13.3 Key/Address Decisions ✅
 
 - [x] Single root of trust (seed) — documented in `knowledge.md`
-- [x] Baby JubJub for encryption (same curve as Noir embedded ops)
+- [x] Grumpkin for encryption (same curve as Noir embedded ops)
 
 ### 0.13.4 Production-Likeness Review ✅ MOSTLY COMPLETE
 
 #### Encryption / Note Handling ✅
 
 - [x] `NoteEncryption` trait with ChaCha20-Poly1305 AEAD
-- [x] Baby JubJub ECDH (matches Noir embedded curve)
+- [x] Grumpkin ECDH (matches Noir embedded curve)
 - [x] Client verifies `H(note_plaintext) == commitment` before accepting notes
 
 #### Calldata Layout (Deferred to Milestone 1)
@@ -435,7 +475,7 @@ Circuits are stable. Optimize when building real on-chain transactions.
 - [ ] Write tight byte budget for instruction data
 - [ ] Implement Option 1A: Tx A posts ciphertext, Tx B has only `ct_hashes` + proof
 - [ ] Remove `ephemeral_key` duplication
-- [ ] Compress Baby JubJub points (64B → 32B)
+- [ ] Compress Grumpkin points (64B → 32B)
 
 #### Ciphertext DA + Binding (Option 1A) ✅ COMPLETE
 
@@ -694,22 +734,69 @@ Proof system is swappable via features. See `knowledge.md` for architecture.
 
 **Goal:** make spending feasible under Solana limits when balances are fragmented across many small notes.
 
+**Context (from Light integration analysis):**
+
+The limiting factor for large consolidations (15→1) is:
+- **UltraPlonk:** Fits in multi-TX model (Tx V: ~1.2M CU, Tx S: ~800K CU)
+- **Groth16:** Fits in single TX (~1M CU total)
+- **Bytes:** 15 nullifiers + 8 Light proofs > 1232B → needs ALTs
+
+**Privacy tradeoff:** Consolidation reveals that N inputs belong to the same owner (via same spending key). Mitigations:
+- Consolidate during low-activity periods
+- Use multiple smaller consolidations instead of one large one
+- Accept as inherent cost of UTXO model under Solana constraints
+
 **Deliverables (reference implementation):**
 
 - [ ] Add a **consolidation user flow** to `client/tests/user_flows.rs` (public API only)
-- [ ] Implement a mock/reference “consolidate” action (N→1 or N→2) in the client + mock chain semantics
+- [ ] Implement a mock/reference "consolidate" action (N→1 or N→2) in the client + mock chain semantics
 - [ ] Add a **Stage-0 Noir circuit scaffold** for consolidation (like transfer/unshield/shield)
 - [ ] Document privacy tradeoffs + wallet heuristics in `docs/protocol-soundness.md` or a dedicated doc
 
 ---
 
-## Milestone 4: Light Protocol for Nullifiers
+## Milestone 4: Light Protocol Integration (Phased)
 
-**Goal:** Eliminate unbounded PDA growth.
+**Goal:** Replace mock stores with Light Protocol for production scalability.
 
-- [ ] Implement nullifier uniqueness via Light (create-once)
-- [ ] Deterministic failure on duplicate nullifier
-- [ ] No more PDAs for spentness
+**Reference implementation:** `../noir-main/` (full Light integration with Groth16)
+
+### Phase 4.1: Light for Nullifiers Only (P1)
+
+**Why first:** No circuit changes required; immediate benefit (no PDA rent growth).
+
+- [ ] Add `light-sdk` and `light-client` dependencies
+- [ ] Implement `LightNullifierSet` using Photon RPC for validity proofs
+- [ ] Update `NullifierProof` enum to support `LightValidityProof` variant
+- [ ] Update Tx S (apply) to include Light validity proofs
+- [ ] Test on Devnet with Photon indexer
+
+**CU/Size budget (validated):**
+
+| Scenario | Light Proofs | CU Cost | Fits Tx S? |
+|----------|--------------|---------|------------|
+| 3→3 | 2 proofs (ceiling(3/2)) | ~200K CU | ✅ Yes |
+| 15→1 | 8 proofs (ceiling(15/2)) | ~800K CU | ✅ Yes (dedicated Tx S) |
+
+### Phase 4.2: Light for Commitments (P2)
+
+**Why second:** Requires circuit changes (Poseidon for Merkle, depth 32→26).
+
+- [ ] Add Poseidon (circomlib) to Noir circuits for Light leaf hash
+- [ ] Change `MERKLE_DEPTH = 32 → 26`
+- [ ] Implement `LightNoteStore` using Photon for Merkle proofs
+- [ ] Update `MembershipWitness` enum to support `LightCompressedAccount` variant
+- [ ] Update circuits to compute Light leaf structure from commitment + metadata
+- [ ] Test full shield→transfer→unshield on Devnet with Light
+
+**Key insight:** Our commitment hash (Poseidon2) does NOT change. Light stores it as data inside a compressed account.
+
+**Byte budget concern (15→1):**
+- 15 nullifiers × 32B = 480B
+- 8 Light proofs × 128B = 1024B
+- Total > 1232B → Needs **proof buffering** (ALTs don't help; this is instruction data, not accounts)
+
+**Optimization opportunity:** Our PIs use 32B per field even for small values (u64 amounts, u32 counts). Packed encoding could save ~150-200B per transfer. Defer until measurements show it's needed.
 
 ---
 
@@ -768,7 +855,7 @@ See `docs/payment-discovery-analysis.md` for full design.
 
 - [ ] Long-term tag keypair derivation from seed
   - `lt_sk = H(DOM_LONG_TERM_KEY, spending_key)`
-  - `lt_pk = lt_sk * G` (Baby JubJub)
+  - `lt_pk = lt_sk * G` (Grumpkin)
 - [ ] Include `lt_pk` in shielded address format
   - `address = (pk_d, g_d, lt_pk)`
 - [ ] Shared secret derivation

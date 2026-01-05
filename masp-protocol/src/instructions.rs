@@ -62,6 +62,54 @@ pub struct UnshieldData {
     pub asset_id: [u8; 32],
 }
 
+/// Ciphertext posting data (Tx A in two-tx model)
+///
+/// This instruction is a data carrier - it doesn't modify program state.
+/// The ciphertext bytes are stored in ledger history for data availability.
+/// Recipients discover these via the tx_sig shared out-of-band.
+///
+/// ## Format
+///
+/// The instruction data after the discriminator is:
+/// - 1 byte: count (number of ciphertexts, 1-3)
+/// - Variable: packed ciphertexts, each as:
+///   - 2 bytes: length (u16 LE)
+///   - N bytes: ciphertext data
+///
+/// The program does NOT parse the ciphertexts - it just accepts them.
+/// The client computes `ct_hash` from the posted bytes.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostCiphertextsData {
+    /// Number of ciphertexts (1-3)
+    pub count: u8,
+    /// Raw ciphertext bytes (packed format: [len: u16 LE, data...] per ciphertext)
+    pub packed_ciphertexts: Vec<u8>,
+}
+
+#[cfg(feature = "std")]
+impl PostCiphertextsData {
+    /// Encode the instruction data for on-chain submission
+    pub fn encode(&self) -> Vec<u8> {
+        let mut data = Vec::with_capacity(1 + self.packed_ciphertexts.len());
+        data.push(self.count);
+        data.extend_from_slice(&self.packed_ciphertexts);
+        data
+    }
+
+    /// Pack ciphertexts into the wire format
+    pub fn pack_ciphertexts(ciphertexts: &[&[u8]]) -> Vec<u8> {
+        let total_len: usize = ciphertexts.iter().map(|ct| 2 + ct.len()).sum();
+        let mut packed = Vec::with_capacity(total_len);
+        for ct in ciphertexts {
+            let len = ct.len() as u16;
+            packed.extend_from_slice(&len.to_le_bytes());
+            packed.extend_from_slice(ct);
+        }
+        packed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

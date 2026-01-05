@@ -119,6 +119,10 @@ pub fn process_instruction(
             msg!("MASP[local-testing]: UpdateRoot");
             process_update_root(program_id, accounts, data)
         }
+        IX_POST_CIPHERTEXTS => {
+            // Note: No msg! here to save CUs - this is a high-frequency data carrier
+            process_post_ciphertexts(data)
+        }
         _ => {
             msg!("Error: Unknown instruction: {}", discriminator);
             Err(ProgramError::InvalidInstructionData)
