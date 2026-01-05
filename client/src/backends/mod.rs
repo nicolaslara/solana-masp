@@ -53,6 +53,10 @@ pub mod solana;
 // CLI-based prover using nargo + bb (no dep conflicts, uses installed tools)
 pub mod cli_ultraplonk;
 
+// Light Protocol client (Photon RPC for validity proofs)
+#[cfg(feature = "light-protocol")]
+pub mod light_protocol;
+
 // Verifier backend (ultraplonk-core) - feature-gated due to solana-program deps
 #[cfg(feature = "ultraplonk-verifier")]
 pub mod ultraplonk_verifier;
@@ -64,6 +68,9 @@ pub use light::LightIndexer;
 
 #[cfg(feature = "solana-backend")]
 pub use solana::{IndexerMode, SolanaChain};
+
+#[cfg(feature = "light-protocol")]
+pub use light_protocol::{PhotonClient, CompressedProof, ValidityProofResult, BatchedValidityProof};
 
 #[cfg(feature = "ultraplonk-verifier")]
 pub use ultraplonk_verifier::NoirRsUltraPlonkVerifier;

@@ -31,6 +31,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 hex = "0.4"
 num-bigint = "0.4"
+bs58 = "0.5"
 
 # Error handling
 thiserror = "2.0.17"
@@ -45,9 +46,11 @@ async-trait = "0.1"
 # Encryption (AEAD)
 chacha20poly1305 = "0.10"
 
-# Keccak256 for on-chain mock proofs (matches Solana's keccak syscall)
-# Only needed when onchain-mock feature is enabled
+# Keccak256 for on-chain mock proofs and Light Protocol address derivation
 sha3 = { version = "0.10", optional = true }
+
+# HTTP client for Photon RPC (Light Protocol indexer)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 
 [dependencies.ultraplonk-core]
 path = "../../solana-ultraplonk-verifier/crates/ultraplonk-core"
@@ -84,6 +87,9 @@ onchain-mock = ["dep:sha3"]
 
 # Real Solana chain backend (submits actual transactions)
 solana-backend = ["dep:solana-sdk", "dep:solana-client", "dep:solana-commitment-config", "dep:solana-compute-budget-interface"]
+
+# Light Protocol integration (Photon RPC for validity proofs)
+light-protocol = ["dep:sha3", "dep:reqwest"]
 
 [dev-dependencies]
 ark-grumpkin = "0.5.0"

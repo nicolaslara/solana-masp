@@ -28,6 +28,13 @@ thiserror = "2"
 # Enable "std" for native builds (testing). BPF builds will use syscalls.
 ultraplonk-core = { path = "../../../solana-ultraplonk-verifier/crates/ultraplonk-core" }
 
+# Light Protocol SDK for compressed accounts (nullifier storage)
+# Note: We use WITHOUT the "anchor" feature - pure Solana program integration
+# DISABLED for now due to borsh version mismatch (light-sdk uses 0.10, we use 1.6)
+# Uncomment when ready for full Light integration:
+# light-sdk = { version = "0.17", default-features = false, features = ["poseidon"], optional = true }
+# light-hasher = { version = "5.0", default-features = false, features = ["poseidon"], optional = true }
+
 [features]
 default = ["ultraplonk"]
 no-entrypoint = []
@@ -53,6 +60,11 @@ mock-proofs = ["local-testing"]
 # CPI to an external program with hardcoded ID.
 # In production, this would be replaced with Light Protocol integration.
 simple-onchain-store = ["local-testing"]
+
+# Light Protocol integration for compressed nullifier storage
+# Replaces PDA-based nullifiers with Light Protocol's derived addresses
+# Note: Currently a stub - full implementation pending borsh version alignment
+light-protocol = []
 
 # Enable CU logging to debug compute unit usage
 cu-log = ["ultraplonk-core/cu_log"]

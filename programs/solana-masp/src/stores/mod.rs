@@ -15,11 +15,15 @@
 //! MASP handles nullifiers directly with PDAs.
 //! Commitments are just logged for indexer to process.
 //!
-//! ### Light Protocol (future, `light-protocol` feature)
+//! ### Light Protocol (`light-protocol` feature)
 //! Production implementation using Light Protocol's compressed accounts.
+//! Uses validity proofs to prevent double-spending without PDAs.
 
 pub mod commitment_store;
 pub mod nullifier_store;
 
 #[cfg(feature = "simple-onchain-store")]
 pub mod mock;
+
+#[cfg(feature = "light-protocol")]
+pub mod light_nullifier;

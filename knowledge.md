@@ -28,6 +28,34 @@ where data_hash = Poseidon(discriminator, OUR_COMMITMENT, pool, created_at)
 2. **Phase 1.5:** Light for nullifiers only (no circuit changes)
 3. **Phase 2:** Light for both commitments + nullifiers (circuit changes for Merkle)
 
+### Light SDK Implementation Findings (2025-01-05)
+
+**Good news:** `light-sdk` works WITHOUT Anchor!
+- The `anchor` feature is optional in light-sdk v0.17
+- When disabled, it uses borsh instead of AnchorSerialize/AnchorDeserialize
+- CPI uses `solana_cpi::invoke_signed` under the hood
+
+**Challenge:** borsh version mismatch
+- light-sdk uses borsh 0.10
+- solana-masp uses borsh 1.6
+- This causes trait bound errors when implementing Light account types
+
+**Options for resolution:**
+1. **Downgrade borsh to 0.10** - May affect masp-protocol compatibility
+2. **Use invoke_signed directly** - Manual serialization of Light instruction data
+3. **Create a bridge crate** - Wrapper that translates between borsh versions
+4. **Wait for light-sdk update** - They may upgrade to borsh 1.x
+
+**Current status:**
+- ✅ Client-side Photon RPC client implemented (`client/src/backends/light_protocol/`)
+- ✅ Nullifier address derivation matches noir-main pattern
+- ✅ Program Light nullifier module stubbed (`programs/solana-masp/src/stores/light_nullifier.rs`)
+- ⏳ Full on-chain CPI pending borsh resolution
+
+**Code locations:**
+- Client: `client/src/backends/light_protocol/` (feature: `light-protocol`)
+- Program: `programs/solana-masp/src/stores/light_nullifier.rs` (feature: `light-protocol`)
+
 **CU/Size Budget Analysis (3→3 vs 15→1):**
 
 | Scenario | MASP Verify | Light Proofs | Total CU | Fits Single Tx? |

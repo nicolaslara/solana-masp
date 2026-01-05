@@ -765,11 +765,24 @@ The limiting factor for large consolidations (15→1) is:
 
 **Why first:** No circuit changes required; immediate benefit (no PDA rent growth).
 
-- [ ] Add `light-sdk` and `light-client` dependencies
-- [ ] Implement `LightNullifierSet` using Photon RPC for validity proofs
+**Completed (2025-01-05):**
+- [x] Add Photon RPC client to masp-client (`client/src/backends/light_protocol/`)
+- [x] Implement nullifier address derivation (matches noir-main pattern)
+- [x] Add `light-protocol` feature to client and program
+
+**In progress:**
+- [ ] Add `light-sdk` dependencies to program (blocked on borsh 0.10→1.6 mismatch)
+- [ ] Implement full `LightNullifierSet` using Light CPI
 - [ ] Update `NullifierProof` enum to support `LightValidityProof` variant
 - [ ] Update Tx S (apply) to include Light validity proofs
 - [ ] Test on Devnet with Photon indexer
+
+**borsh version issue:**
+`light-sdk` uses borsh 0.10, we use 1.6. Options:
+1. Downgrade to borsh 0.10 (may affect masp-protocol)
+2. Use invoke_signed directly (manual serialization)
+3. Create bridge crate
+4. Wait for light-sdk update to borsh 1.x
 
 **CU/Size budget (validated):**
 
