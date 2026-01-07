@@ -10,7 +10,9 @@
 
 #![cfg(feature = "light-protocol")]
 
-use masp_client::backends::light_protocol::{PhotonClient, derive_nullifier_address_seed, derive_address};
+use masp_client::backends::light_protocol::{
+    derive_address, derive_nullifier_address_seed, PhotonClient,
+};
 
 /// Test that we can derive addresses correctly
 #[test]
@@ -26,7 +28,7 @@ fn test_derive_addresses() {
     // Derive address
     let address = derive_address(&seed, &address_tree).expect("should derive address");
     assert_eq!(address[0], 0, "MSB should be cleared");
-    
+
     println!("Nullifier: 0x{}", hex::encode(nullifier));
     println!("Seed: 0x{}", hex::encode(seed));
     println!("Derived address: 0x{}", hex::encode(address));
@@ -48,24 +50,24 @@ async fn test_photon_devnet_connectivity() {
 
     // Generate a random nullifier that shouldn't exist
     let _nullifier: [u8; 32] = rand::random();
-    
+
     // We need real Light Protocol tree addresses from Devnet
     // These are the standard Light Protocol trees on Devnet
     // State Merkle Tree: 5bdFnXU47QjzGpzHfXnxcEi5WXyxzEAB2ZtFMDJupSwM
     // Address Queue: 11111111111111111111111111111111
     // Note: We'd need to look up the actual address tree from Light Protocol docs
-    
+
     // For now, just test that the client can be created
     println!("PhotonClient created for Devnet");
-    
+
     // Try a simple RPC health check by making a call with known-bad data
     // (this validates connectivity even if the response is an error)
     let fake_address = [0x01u8; 32];
     let fake_tree = [0x02u8; 32];
-    
+
     // This will likely fail because the tree doesn't exist, but it tests connectivity
     let result = client.get_validity_proof(&fake_address, &fake_tree).await;
-    
+
     match result {
         Ok(proof) => {
             println!("Got validity proof: {:?}", proof);
@@ -96,24 +98,26 @@ async fn test_photon_batched_proofs() {
     let client = PhotonClient::new(&url);
 
     // Generate multiple random nullifiers
-    let nullifiers: [[u8; 32]; 3] = [
-        rand::random(),
-        rand::random(),
-        rand::random(),
-    ];
-    
+    let nullifiers: [[u8; 32]; 3] = [rand::random(), rand::random(), rand::random()];
+
     let pool_pubkey = [0x01u8; 32];
     let address_tree = [0x02u8; 32];
 
     // This will fail because fake trees, but tests the batching logic
-    let result = client.get_validity_proofs_batched(&nullifiers, &pool_pubkey, &address_tree).await;
+    let result = client
+        .get_validity_proofs_batched(&nullifiers, &pool_pubkey, &address_tree)
+        .await;
 
     match result {
         Ok(proofs) => {
             println!("Got {} batched proofs", proofs.len());
             for (i, p) in proofs.iter().enumerate() {
-                println!("  Batch {}: {} nullifiers, {} root indices", 
-                    i, p.count, p.root_indices.len());
+                println!(
+                    "  Batch {}: {} nullifiers, {} root indices",
+                    i,
+                    p.count,
+                    p.root_indices.len()
+                );
             }
         }
         Err(e) => {

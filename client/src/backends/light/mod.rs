@@ -18,6 +18,4 @@ mod pda;
 mod photon;
 
 pub use pda::{derive_address, derive_nullifier_address_seed};
-pub use photon::{
-    BatchedValidityProof, CompressedProof, PhotonClient, PhotonError, ValidityProofResult,
-};
+pub use photon::{CompressedProof, PhotonClient, ValidityProofResult};

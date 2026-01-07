@@ -70,7 +70,9 @@ pub use light::LightIndexer;
 pub use solana::{IndexerMode, SolanaChain};
 
 #[cfg(feature = "light-protocol")]
-pub use light_protocol::{PhotonClient, CompressedProof, ValidityProofResult, BatchedValidityProof};
+pub use light_protocol::{
+    BatchedValidityProof, CompressedProof, PhotonClient, ValidityProofResult,
+};
 
 #[cfg(feature = "ultraplonk-verifier")]
 pub use ultraplonk_verifier::NoirRsUltraPlonkVerifier;
