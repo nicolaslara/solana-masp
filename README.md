@@ -1,78 +1,138 @@
 # Solana MASP (Multi-Asset Shielded Pool)
 
-A spike exploring building a MASP system on Solana, inspired by Zcash's Orchard/Sapling protocols and Namada's MASP.
+> **Reference implementation / exploratory project.** This is a research spike exploring the feasibility of building a MASP on Solana. It is not audited, not production-ready, and APIs/circuits may change without notice.
 
-## Status (Current)
+A Multi-Asset Shielded Pool on Solana, inspired by Zcash's Orchard/Sapling protocols and Namada's MASP.
 
-- **Milestone 0 complete**: off-chain model + client flows + mocks + encryption + sync tests.
-- **Circuits are production-shaped** with most security statements implemented. See [`docs/implementation-status.md`](docs/implementation-status.md) for a detailed tracking table.
-- **Proofs use MockSpendProver** by default (real checks in Rust). UltraPlonk mode is available via `MASP_PROOF_SYSTEM=ultraplonk`.
+## Status
 
-## Overview
+- All 3 circuits (shield, transfer, unshield) implemented with real UltraPlonk proofs
+- Full client library with trait-based backend architecture
+- All 8 user flow integration tests pass (mock and Surfpool backends)
+- CPI-based on-chain verification working (~1.2M CU per verification)
+- Light Protocol integration in progress (nullifier compression via ZK)
+- See [`docs/implementation-status.md`](docs/implementation-status.md) for detailed security statement tracking (S1-U3)
 
-This project implements shielded transfers on Solana using:
+## Protocol Summary
 
-- **Noir** circuits compiled with **UltraPlonk**
-- **Solana BN254 syscalls** for efficient on-chain verification
-- **Orchard-inspired** note and nullifier schemes
+The protocol implements private value transfers on Solana using an Orchard-inspired commitment/nullifier model. For the full normative spec, see [`docs/protocol-soundness.md`](docs/protocol-soundness.md).
+
+### State Model
+
+- **Commitment tree**: an append-only Merkle tree (depth 32) of note commitments. The program maintains a rolling set of recent **anchors** (roots) for spend context.
+- **Nullifier set**: a set with insert-once semantics. Spending a note reveals its nullifier; duplicates are rejected. Production target uses Light Protocol address trees for compressed on-chain storage.
+
+### Note Structure
+
+Each shielded note is a commitment to:
+
+```
+cm = H(DOM_NOTE_COMMIT, asset_id, amount, recipient, diversifier_index, nullifier_nonce, note_randomness)
+```
+
+Notes are discovered by recipients via trial decryption of on-chain ciphertexts (ChaCha20-Poly1305 AEAD).
+
+### Operations
+
+| Operation | Description | Key checks |
+|-----------|-------------|------------|
+| **Shield** | Deposit transparent tokens into the pool | Token transfer verified, commitment integrity, asset binding |
+| **Transfer** | Move value between shielded notes (N-to-M, max 3x3) | Merkle membership, spend authorization (SpendingKey-only), nullifier correctness, value conservation, tx binding |
+| **Unshield** | Withdraw from pool to a public address | Same as transfer + public amount/asset/recipient binding |
+
+### Security Properties
+
+- **No inflation**: value cannot be created inside the pool
+- **No double-spend**: each note spent at most once (nullifier uniqueness)
+- **No unauthorized spend**: only the SpendingKey holder can spend (FullViewingKey cannot)
+- **Correct boundaries**: shield deposits and unshield withdrawals match actual token transfers
+
+### Spend Authorization
+
+Ownership is proven entirely in ZK (no external signatures). The spend proof demonstrates knowledge of a `spending_key` that derives the note's recipient address and nullifier secret key (`nsk`). This is what makes "view-only wallets can see but cannot spend" possible.
+
+### Ciphertext Data Availability
+
+Output ciphertexts are posted in a separate transaction (Tx A) and bound to the state transition (Tx B) via hash commitment (`ct_hash`). Ciphertexts are published for outputs only; input ciphertexts are never published (privacy property). See [`docs/design-decisions/ciphertext-da-and-binding.md`](docs/design-decisions/ciphertext-da-and-binding.md).
 
 ## Architecture
 
 ```text
-┌─────────────────────────────────────────────────────────────────┐
-│                         Client                                   │
-│  ┌───────────┐  ┌───────────┐  ┌───────────────────────────┐   │
-│  │ Spending  │  │ Viewing   │  │ Transaction Builder       │   │
-│  │ Key       │  │ Key       │  │ - Build proofs            │   │
-│  └───────────┘  └───────────┘  │ - Encrypt notes           │   │
-│                                 │ - Generate witnesses      │   │
-│                                 └───────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Solana Programs                             │
-│  ┌─────────────────────────────┐  ┌─────────────────────────┐  │
-│  │       MASP Program          │  │  UltraPlonk Verifier    │  │
-│  │  ┌───────────────────────┐  │  │  ┌─────────────────┐    │  │
-│  │  │ Shield                │  │──│  │ Verify          │    │  │
-│  │  │ - Add commitment      │  │  │  │ - BN254 syscalls│    │  │
-│  │  │ - Verify proof (CPI)  │  │  │  │ - ~500K-1M CUs  │    │  │
-│  │  └───────────────────────┘  │  │  └─────────────────┘    │  │
-│  │  ┌───────────────────────┐  │  │                         │  │
-│  │  │ Transfer              │  │  │                         │  │
-│  │  │ - Check nullifiers    │  │  │                         │  │
-│  │  │ - Add commitments     │  │  │                         │  │
-│  │  │ - Record nullifiers   │  │  │                         │  │
-│  │  └───────────────────────┘  │  │                         │  │
-│  │  ┌───────────────────────┐  │  │                         │  │
-│  │  │ Unshield              │  │  │                         │  │
-│  │  │ - Check nullifier     │  │  │                         │  │
-│  │  │ - Transfer tokens     │  │  │                         │  │
-│  │  └───────────────────────┘  │  │                         │  │
-│  └─────────────────────────────┘  └─────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
++------------------------------------------------------------------+
+|                          Client                                   |
+|  +-----------+  +-----------+  +---------------------------+     |
+|  | Spending  |  | Viewing   |  | Transaction Builder       |     |
+|  | Key       |  | Key       |  | - Build proofs            |     |
+|  +-----------+  +-----------+  | - Encrypt notes           |     |
+|                                | - Generate witnesses      |     |
+|                                +---------------------------+     |
++------------------------------------------------------------------+
+                                   |
+                                   v
++------------------------------------------------------------------+
+|                      Solana Programs                              |
+|  +-----------------------------+  +-------------------------+    |
+|  |       MASP Program          |  |  UltraPlonk Verifier    |    |
+|  |  +-----------------------+  |  |  +-----------------+    |    |
+|  |  | Shield                |  |--|  | Verify          |    |    |
+|  |  | - Add commitment      |  |  |  | - BN254 syscalls|    |    |
+|  |  | - Verify proof (CPI)  |  |  |  | - ~1.2M CUs    |    |    |
+|  |  +-----------------------+  |  |  +-----------------+    |    |
+|  |  +-----------------------+  |  |                         |    |
+|  |  | Transfer              |  |  |                         |    |
+|  |  | - Check nullifiers    |  |  |                         |    |
+|  |  | - Add commitments     |  |  |                         |    |
+|  |  | - Record nullifiers   |  |  |                         |    |
+|  |  +-----------------------+  |  |                         |    |
+|  |  +-----------------------+  |  |                         |    |
+|  |  | Unshield              |  |  |                         |    |
+|  |  | - Check nullifier     |  |  |                         |    |
+|  |  | - Transfer tokens     |  |  |                         |    |
+|  |  +-----------------------+  |  |                         |    |
+|  +-----------------------------+  +-------------------------+    |
++------------------------------------------------------------------+
 ```
 
 ## Project Structure
 
 ```text
 solana-masp/
-├── circuits/masp/          # Noir circuits (multiple packages)
-│   ├── shield/             # masp_shield (Stage 0)
-│   ├── transfer/           # masp_transfer (Stage 0)
-│   └── unshield/           # masp_unshield (Stage 0)
-├── programs/solana-masp/   # Solana program
-│   ├── src/lib.rs
-│   └── Cargo.toml
-├── client/                 # Client library
-│   ├── src/lib.rs
-│   └── Cargo.toml
+├── circuits/masp/              # Noir circuits
+│   ├── common/                 # Shared library (constants, statements)
+│   ├── shield/                 # Deposit circuit
+│   ├── transfer/               # Shielded transfer (N→M, max 3×3)
+│   └── unshield/               # Withdrawal circuit
+├── programs/
+│   ├── solana-masp/            # Main MASP on-chain program
+│   ├── masp-verifier/          # UltraPlonk verifier program (CPI target)
+│   └── mock-commitment-store/  # Helper program for testing
+├── masp-protocol/              # Shared protocol types (no_std, used by both client and program)
+│   └── src/
+│       ├── domain.rs           # Domain separation tags
+│       ├── instructions.rs     # ShieldData, TransferData, UnshieldData
+│       └── public_inputs.rs    # Public input layouts, MAX_INPUTS/OUTPUTS=3
+├── client/                     # Client library
+│   ├── src/
+│   │   ├── client.rs           # MaspClient (note + key management)
+│   │   ├── keys.rs             # Key derivation (Spending, Viewing, Diversified)
+│   │   ├── proofs.rs           # Proof generation and verification
+│   │   ├── encryption.rs       # ChaCha20-Poly1305 note encryption
+│   │   └── backends/           # Pluggable backends (chain, indexer, proof system)
+│   └── tests/
+│       ├── user_flows.rs       # Main integration tests (8 flows)
+│       ├── test_env.rs         # Backend configuration and setup
+│       ├── e2e_tests.rs        # Extended E2E tests
+│       ├── photon_devnet.rs    # Light Protocol devnet tests
+│       └── surfpool_e2e.rs     # Direct Surfpool program tests
+├── docs/                       # Protocol specs and design docs
+│   ├── protocol-soundness.md   # Normative protocol spec (authoritative)
+│   ├── circuit-security-requirements.md
+│   ├── implementation-status.md # Security statement tracking (S1-U3)
+│   └── ...
 ├── scripts/
-│   ├── build.sh            # Build circuits + program (requires noir/bb)
-│   └── deploy.sh           # Deploy to Surfpool
-├── tasks.md                # Implementation tracking
-└── README.md
+│   ├── build.sh                # Build circuits + program
+│   └── deploy.sh               # Deploy to Surfpool
+└── tasks.md                    # Implementation tracking
 ```
 
 ## Quick Start
@@ -97,7 +157,7 @@ nargo --version   # v1.0.0-beta.3
 bb --version      # 0.82.2
 ```
 
-### Run Tests (Recommended)
+### Run Tests
 
 ```bash
 # Run the full Rust test suite (client + program unit tests)
@@ -111,7 +171,7 @@ cargo test
 ## User Flow Tests
 
 The `user_flows` tests are the primary integration tests. They exercise complete user journeys
-(shield → transfer → unshield → recover) and can run against different backend configurations.
+(shield, transfer, unshield, recover) and can run against different backend configurations.
 
 ### Quick Start
 
@@ -142,16 +202,16 @@ Tests are configured via environment variables. Each backend dimension can be co
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| **Chain: mock** | ✅ Working | In-memory, fast, default |
-| **Chain: surfpool** | ✅ Working | Auto-deploys program; requires Surfpool running |
-| **Chain: devnet/testnet/mainnet** | 🚧 Scaffold | Requires deployed program |
-| **Indexer: mock** | ✅ Working | In-memory, default |
-| **Indexer: light** | 🚧 Scaffold | Uses mock internally (Helius/Light integration pending) |
-| **Encryption: chacha** | ✅ Working | ChaCha20-Poly1305, production default |
-| **Encryption: mock** | ✅ Working | ⚠️ INSECURE - testing only |
-| **Proofs: mock** | ✅ Working | Real Rust checks, fake proof bytes |
-| **Proofs: ultraplonk** | 🚧 Scaffold | CLI-based (nargo + bb) |
-| **Proofs: groth16** | 🚧 Scaffold | Not yet implemented |
+| **Chain: mock** | Working | In-memory, fast, default |
+| **Chain: surfpool** | Working | Auto-deploys program; requires Surfpool running |
+| **Chain: devnet/testnet/mainnet** | Scaffold | Requires deployed program |
+| **Indexer: mock** | Working | In-memory, default |
+| **Indexer: light** | Scaffold | Photon RPC client + PDA derivation implemented; CPI integration pending |
+| **Encryption: chacha** | Working | ChaCha20-Poly1305, production default |
+| **Encryption: mock** | Working | INSECURE - testing only |
+| **Proofs: mock** | Working | Real Rust checks, fake proof bytes |
+| **Proofs: ultraplonk** | Working | CLI-based (nargo + bb) |
+| **Proofs: groth16** | Scaffold | Not yet implemented |
 
 ### Example Configurations
 
@@ -177,24 +237,12 @@ MASP_PRINT_CONFIG=1 \
   --test user_flows -- --nocapture --test-threads=1
 ```
 
-<<<<<<< HEAD
-**Notes:**
-
-- Uses `--test-threads=1` to avoid parallel request issues with Surfpool
-- Auto-skips rebuild if .so is up-to-date
-- Deploys fresh program each test run (~7s total including deploy)
-
-**Manual deployment** (if needed)
-=======
-
 Auto-deploy behavior:
 
-- If `MASP_PROGRAM_ID` is set → uses that program ID (no build/deploy)
-- If `.so` is missing or source changed → rebuilds with `cargo build-sbf`
+- If `MASP_PROGRAM_ID` is set, uses that program ID (no build/deploy)
+- If `.so` is missing or source changed, rebuilds with `cargo build-sbf`
 - Deploys via `solana program deploy` and sets `MASP_PROGRAM_ID`
 - Uses `--features local-testing,mock-proofs` by default
-
-Control via environment:
 
 | Variable | Description |
 |----------|-------------|
@@ -203,8 +251,6 @@ Control via environment:
 | `MASP_PROGRAM_FEATURES` | Override build features |
 
 #### 2b. With Surfpool - Manual Deploy
->>>>>>>
->>>>>>> 737df988aecd70d80a76c3395c2653c7150cb6f8
 
 ```bash
 # Build once
@@ -221,18 +267,7 @@ MASP_CHAIN=surfpool MASP_PROGRAM_ID=$PROGRAM_ID \
   --test user_flows -- --nocapture --test-threads=1
 ```
 
-#### 3. With Light Protocol Indexer (Scaffold)
-
-```bash
-cd client
-MASP_INDEXER=light \
-MASP_PRINT_CONFIG=1 \
-  cargo test --test user_flows -- --nocapture
-```
-
-Note: Currently uses mock store internally. Real Helius/Light integration is pending.
-
-#### 4. With Real UltraPlonk Proofs
+#### 3. With Real UltraPlonk Proofs
 
 ```bash
 # Requires: nargo v1.0.0-beta.3 + bb 0.82.2
@@ -244,111 +279,26 @@ MASP_PRINT_CONFIG=1 \
   cargo test --features ultraplonk-verifier --test user_flows -- --nocapture
 ```
 
-#### 5. Mock Encryption (Fast Tests)
+#### 4. Production-like Stack (Surfpool + Mock Proofs)
 
-```bash
-cd client
-MASP_ENCRYPTION=mock \
-  cargo test --test user_flows
-```
-
-⚠️ **Warning:** Mock encryption is INSECURE. Only use for testing.
-
-#### 6. Production-like Stack (Surfpool + Mock Proofs)
-
-**This is the most production-like configuration that works today:**
+The most production-like configuration that works today:
 
 ```bash
 # Terminal 1: Start Surfpool
 surfpool start
 
 # Terminal 2: Run with real Solana chain, real encryption, mock proofs
-# (auto-deploys program!)
 MASP_CHAIN=surfpool \
 MASP_PRINT_CONFIG=1 \
   cargo test -p masp-client --features solana-backend,onchain-mock \
   --test user_flows -- --nocapture --test-threads=1
 ```
 
-**Notes:**
+Notes:
 
 - Uses `--test-threads=1` to avoid parallel RPC issues
 - All 8 user flow tests pass in ~2-3 seconds
 - `onchain-mock` feature enables the Keccak256-based mock prover compatible with on-chain mock verifier
-
-Expected output:
-
-```
-╔══════════════════════════════════════╗
-║       MASP Backend Configuration     ║
-╠══════════════════════════════════════╣
-║ Chain:      surfpool (http://127.0.0.1:8899) ║
-║ Indexer:    mock ║
-║ Encryption: chacha20-poly1305 ║
-║ Proof:      mock ║
-║ Verify:     onchain ║
-╚══════════════════════════════════════╝
-```
-
-#### 7. Production-like Stack (Surfpool + Real UltraPlonk) ⚠️ WIP
-
-**This is the target - currently fails because on-chain VK integration is pending:**
-
-```bash
-# Terminal 1: Start Surfpool
-surfpool start
-
-# Terminal 2: Compile circuits first
-cd circuits/masp/shield && nargo compile && cd ../../..
-cd circuits/masp/transfer && nargo compile && cd ../../..
-cd circuits/masp/unshield && nargo compile && cd ../../..
-
-# Terminal 2: Run with real proofs (will fail on verification)
-MASP_CHAIN=surfpool \
-MASP_ENCRYPTION=chacha \
-MASP_PROOF_SYSTEM=ultraplonk \
-MASP_PROOF_VERIFY=onchain \
-MASP_PRINT_CONFIG=1 \
-  cargo test -p masp-client --features solana-backend,ultraplonk-verifier --test user_flows -- --nocapture
-```
-
-**Why it fails:** The on-chain program doesn't have the embedded VKs yet. See "Next Steps" below.
-
-#### 8. Full Production Stack (Future Target)
-
-```bash
-# Target configuration for mainnet/devnet
-MASP_CHAIN=devnet \
-MASP_INDEXER=light \
-MASP_ENCRYPTION=chacha \
-MASP_PROOF_SYSTEM=ultraplonk \
-MASP_PROOF_VERIFY=onchain \
-MASP_PROGRAM_ID=<deployed_program> \
-HELIUS_API_KEY=<key> \
-  cargo test -p masp-client --features solana-backend,ultraplonk-verifier --test user_flows -- --nocapture
-```
-
-### Indexer Modes
-
-When using `SolanaChain`, the indexer can operate in two modes:
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| **LocalSync** | Chain shares `MockStore` with indexer | Tests, local dev |
-| **External** | Indexer observes ledger independently | Production |
-
-In tests, LocalSync mode is used automatically - the chain and indexer share the same
-`Arc<MockStore>`, so updates are instant. In production, an external indexer (Helius/Light)
-would poll the ledger asynchronously.
-
-### Test Files
-
-```text
-client/tests/
-├── user_flows.rs       # Main integration tests (8 flows)
-├── test_env.rs         # Backend configuration and setup
-└── surfpool_e2e.rs     # Direct Surfpool program tests (requires running Surfpool)
-```
 
 ### What the Tests Cover
 
@@ -363,17 +313,6 @@ client/tests/
 | `flow_recovery_then_spend` | Spend after recovery |
 | `flow_multidevice_sync` | Multi-device sync via recovery |
 
-### Circuit Proof Pipeline Smoke Test (UltraPlonk)
-
-There is an **ignored** test that runs the real toolchain loop against our Stage-0 MASP transfer circuit:
-
-```bash
-cd client
-cargo test --features ultraplonk-tools --test masp_ultraplonk_pipeline -- --ignored --nocapture
-```
-
-This requires `nargo` + `bb` on your PATH.
-
 ### Real UltraPlonk Proving (CLI-based)
 
 This repo supports real UltraPlonk proving by shelling out to `nargo` + `bb` CLI tools:
@@ -382,96 +321,25 @@ This repo supports real UltraPlonk proving by shelling out to `nargo` + `bb` CLI
 - Creates timestamped directories for proof artifacts: `client/target/masp_proofs/<circuit>-<timestamp>/`
 - Auto-cleans directories on success (set `MASP_KEEP_PROOF_ARTIFACTS=1` to keep)
 
-**Environment variables for CLI tools:**
-
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MASP_BB_PATH` | `~/.bb/bb` if exists, else `bb` in PATH | Path to `bb` binary |
 | `MASP_NARGO_PATH` | `nargo` in PATH | Path to `nargo` binary |
 | `MASP_KEEP_PROOF_ARTIFACTS` | unset | Set to `1` to keep proof artifacts |
 
-#### 1) Compile the circuit artifact (Noir)
+### Build and Deploy
 
 ```bash
-cd circuits/masp/transfer
-nargo compile
-```
-
-This produces: `circuits/masp/transfer/target/masp_transfer.json`
-
-#### 2) Run the real-proof E2E test
-
-```bash
-cd client
-MASP_PROOF_SYSTEM=ultraplonk \
-  cargo test --features ultraplonk-verifier --test real_ultraplonk_transfer_e2e -- --ignored --nocapture
-```
-
-Notes:
-
-- The test is `#[ignore]` because it requires `nargo`/`bb` and the compiled circuit.
-- This targets the Stage-0 `transfer` circuit (single output commitment).
-- Proof artifacts are auto-cleaned on success. Set `MASP_KEEP_PROOF_ARTIFACTS=1` to keep them for debugging.
-
-#### Cleaning old proof artifacts
-
-```bash
-# Remove all proof artifact directories
-rm -rf client/target/masp_proofs/
-```
-
-### Build (Circuits + Program)
-
-```bash
-# Requires: nargo + bb
+# Build circuits + program
 ./scripts/build.sh
 
-# Program build (Solana)
-cd programs/solana-masp
-cargo build-sbf
-```
+# Or build program only
+cargo build-sbf -p solana-masp --features "local-testing,mock-proofs"
 
-### Deploy to Surfpool
-
-```bash
-# Start Surfpool
+# Deploy to Surfpool
 surfpool start
-
-# Build program with mock proofs for testing
-cd programs/solana-masp
-cargo build-sbf --features "local-testing,mock-proofs"
-
-# Deploy
 solana program deploy target/deploy/solana_masp.so --url http://127.0.0.1:8899
 ```
-
-## Operations
-
-### Shield
-
-Deposit transparent SOL/tokens into the shielded pool:
-
-1. Client generates a note with recipient address
-2. Client creates commitment and proof
-3. Program verifies proof and adds commitment to tree
-4. SOL/tokens transferred to pool
-
-### Transfer
-
-Move value between shielded notes:
-
-1. Client selects notes to spend
-2. Client creates new notes for recipients
-3. Client proves: ownership, Merkle membership, value balance
-4. Program verifies, records nullifiers, adds new commitments
-
-### Unshield
-
-Withdraw from shielded pool to transparent address:
-
-1. Client selects note to spend
-2. Client creates proof of ownership
-3. Program verifies, records nullifier, transfers to recipient
 
 ## References
 
@@ -480,66 +348,3 @@ Withdraw from shielded pool to transparent address:
 - [Namada MASP](https://github.com/anoma/masp)
 - [Tachyon](https://seanbowe.com/blog/tachyon-scaling-zcash-oblivious-synchronization/)
 - [ZIP-32: Key Derivation](https://zips.z.cash/zip-0032)
-
-## Next Steps: On-chain UltraPlonk Verification
-
-To get real UltraPlonk proofs verifying on Surfpool:
-
-### 1. Generate VKs from compiled circuits
-
-```bash
-cd circuits/masp/shield && nargo compile && bb OLD_API write_vk -b target/masp_shield.json -o vk.bin
-cd ../transfer && nargo compile && bb OLD_API write_vk -b target/masp_transfer.json -o vk.bin
-cd ../unshield && nargo compile && bb OLD_API write_vk -b target/masp_unshield.json -o vk.bin
-```
-
-### 2. Convert VKs to on-chain format
-
-The `ultraplonk-core` verifier expects 1632-byte VKs (without G2_X). Use the client's VK conversion:
-
-```bash
-# Use the pipeline test to see VK conversion
-cargo test -p masp-client --features ultraplonk-tools --test masp_ultraplonk_pipeline -- --ignored --nocapture
-```
-
-### 3. Embed VKs in the program
-
-Update `programs/solana-masp/src/verify.rs` to load real VKs:
-
-```rust
-// Replace stub VKs with real ones
-const SHIELD_VK: &[u8] = include_bytes!("../vks/ultraplonk_vk_shield.bin");
-const TRANSFER_VK: &[u8] = include_bytes!("../vks/ultraplonk_vk_transfer.bin");
-const UNSHIELD_VK: &[u8] = include_bytes!("../vks/ultraplonk_vk_unshield.bin");
-```
-
-### 4. Enable real verification
-
-Uncomment the verification logic in `verify.rs` and remove the mock feature flag.
-
-### 5. Build and test
-
-```bash
-cd programs/solana-masp
-cargo build-sbf --features local-testing,ultraplonk  # Note: no mock-proofs
-
-# Run tests
-MASP_CHAIN=surfpool \
-MASP_PROOF_SYSTEM=ultraplonk \
-MASP_PROOF_VERIFY=onchain \
-  cargo test -p masp-client --features solana-backend,ultraplonk-verifier --test user_flows -- --nocapture
-```
-
-### Current Blockers
-
-| Item | Status | Notes |
-|------|--------|-------|
-| VK generation | ✅ Works | `bb OLD_API write_vk` |
-| VK conversion | ✅ Works | `to_onchain_bytes_without_g2()` |
-| VK embedding | 🚧 Pending | Need `build.rs` to automate |
-| On-chain verify | 🚧 Stubbed | Uses mock when `mock-proofs` feature |
-| CU profiling | 🚧 Pending | Need real VKs first |
-
-## Status
-
-Currently in **scaffolding phase**. See [tasks.md](./tasks.md) for progress.
