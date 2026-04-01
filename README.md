@@ -55,67 +55,65 @@ Ownership is proven entirely in ZK (no external signatures). The spend proof dem
 
 Output ciphertexts are posted in a separate transaction (Tx A) and bound to the state transition (Tx B) via hash commitment (`ct_hash`). Ciphertexts are published for outputs only; input ciphertexts are never published (privacy property). See [`docs/design-decisions/ciphertext-da-and-binding.md`](docs/design-decisions/ciphertext-da-and-binding.md).
 
-## Circuit Security Checks
+## Protocol Checks
 
-Each circuit enforces a specific set of constraints inside ZK proofs to guarantee correctness and privacy. The on-chain program and client handle additional checks outside the circuits. For the full formal specification, see [`docs/circuit-security-requirements.md`](docs/circuit-security-requirements.md).
+The protocol's security relies on checks split across the ZK circuits, the on-chain program, and the client. Each check is labeled (S1–S5, T1–T9, U1–U3) matching the normative spec in [`docs/protocol-soundness.md`](docs/protocol-soundness.md). See also [`docs/circuit-security-requirements.md`](docs/circuit-security-requirements.md) for implementation-level detail and code pointers.
 
 ### Shield (Deposit)
 
-When a user deposits tokens into the shielded pool, the circuit proves:
+When a user deposits tokens into the shielded pool:
 
-- **Commitment integrity** — the published commitment is the correct hash of the note's fields (asset, amount, recipient, nonces, randomness). Without this, a prover could create a commitment that doesn't correspond to any real note, letting them later "spend" fabricated value.
-- **Amount range** — the deposit amount fits in 64 bits. This prevents arithmetic overflow tricks that could break balance checks later.
-- **Ciphertext hash binding** — the proof is tied to a specific encrypted note payload (non-zero `ct_hash`). This ensures the recipient can discover and decrypt the note.
+| Check | What it does | Why it matters | Who enforces |
+|-------|-------------|----------------|--------------|
+| **S1** Transparent boundary | The actual SPL token transfer of `(token, amount)` into the pool happens | Without this, commitments could be created without real value backing them | Chain |
+| **S2** Commitment integrity | The commitment is the correct hash of the note's fields (asset, amount, recipient, nonces, randomness) | Prevents creating commitments that don't correspond to valid notes — otherwise a prover could later "spend" fabricated value | Circuit |
+| **S3** Asset ID binding | The `asset_id` used in the commitment is derived from the actual token mint address | Prevents a depositor from claiming their USDC deposit is actually a BTC note | Chain (derives from real mint) |
+| **S4** Amount range | The deposit amount fits in 64 bits (`u64`) | Prevents arithmetic overflow tricks that could break balance conservation in later transfers | Circuit (Noir type system) |
+| **S5** Ciphertext hash binding | The proof is tied to a specific encrypted note payload via `ct_hash` | Ensures the recipient can discover and decrypt the note; without it, a prover could bind their proof to garbage ciphertext | Circuit + Client verification |
 
-The chain separately verifies the actual SPL token transfer, derives the `asset_id` from the real mint address, and appends the commitment to the tree.
+### Transfer (N→M Shielded)
 
-### Transfer (Shielded N→M)
+The transfer circuit handles up to 3 inputs and 3 outputs in a single proof. This is the most complex circuit:
 
-The transfer circuit is the most complex, handling up to 3 inputs and 3 outputs in a single proof:
-
-- **Merkle membership** — each spent note's commitment exists in the commitment tree at the claimed root (`anchor`). This prevents spending notes that were never deposited.
-- **Commitment re-derivation** — the prover knows the full plaintext of each input note (not just the commitment hash). This proves actual knowledge of the note's contents.
-- **Nullifier derivation** — each nullifier is correctly derived from the owner's nullifier secret key (`nsk`), not the public nullifier key. This is critical: it means someone with only a FullViewingKey can see transactions but cannot spend funds.
-- **Ownership authorization** — a full elliptic-curve spend proof demonstrates that the prover holds the `spending_key` that derives the note's recipient address. This is the core "only the owner can spend" guarantee.
-- **Output commitment integrity** — each new output note's commitment is correctly formed, so recipients will be able to find and spend them.
-- **Amount range** — all input and output amounts fit in 64 bits, preventing overflow exploits.
-- **Balance conservation** — the sum of input amounts equals the sum of output amounts, and all notes use the same asset type. No value is created or destroyed.
-- **Output nonce derivation** — each output note's nullifier nonce is deterministically derived from the transaction binding and output index. This guarantees uniqueness without requiring external randomness.
-- **Transaction binding** — a binding hash locks together the anchor, nullifiers, and input/output counts. This prevents relayers or intermediaries from reordering or splicing parts of different transactions.
-- **Ciphertext hash binding** — enabled outputs have non-zero ciphertext hashes; disabled slots have zero. This ties each proof to its encrypted payloads.
-- **Count correctness and slot gating** — the declared input/output counts match the actual number of enabled slots, and disabled slots are properly zeroed. This prevents hidden inputs or outputs.
-
-The chain enforces anchor freshness, nullifier uniqueness (preventing double-spends), and proof verification.
+| Check | What it does | Why it matters | Who enforces |
+|-------|-------------|----------------|--------------|
+| **T1** Membership | Each spent note's commitment exists in the Merkle tree at the claimed root | Prevents spending notes that were never deposited — you can't claim to own something that isn't in the pool | Circuit + Chain (anchor validity) |
+| **T2** Spend authorization | An EC-based spend proof demonstrates the prover holds the `spending_key` that derives the note's recipient address | The core "only the owner can spend" guarantee. A full viewing key can see transactions but cannot produce this proof | Circuit |
+| **T2b** Transaction binding | A binding hash locks together the anchor, nullifiers, and counts into a single `tx_binding` value | Prevents relayers or intermediaries from reordering, splicing, or mixing parts of different transactions | Circuit |
+| **T2c** Ciphertext hash binding | Enabled outputs have non-zero `ct_hash`; disabled slots are zero | Ties each proof to its encrypted payloads so recipients can verify they got the right ciphertext | Circuit + Client |
+| **T3** Input preimage knowledge | The prover knows the full plaintext of each input note (not just the commitment hash) | Proves actual knowledge of the note's contents — you can't spend a note if you only know its hash | Circuit |
+| **T4** Nullifier correctness | Each nullifier is derived from the owner's nullifier *secret* key (`nsk`), not the public key | Critical: this is what makes view-only wallets safe. If `nk.x` (public) were used instead, anyone with a FullViewingKey could spend | Circuit |
+| **T5** Output well-formedness | Each new output commitment is correctly computed from its note fields | Ensures recipients will be able to find, decrypt, and later spend the output notes | Circuit |
+| **T6** Output nonce derivation | Each output's nullifier nonce is deterministically derived from `tx_binding` and the output index | Guarantees nonce uniqueness without requiring external randomness — important when there are multiple inputs | Circuit |
+| **T7** Value conservation | Sum of input amounts equals sum of output amounts, all sharing the same asset type | No value is created or destroyed. This is the "no inflation" guarantee inside the shielded pool | Circuit |
+| **T7b** Count correctness + slot gating | Declared input/output counts match actual enabled slots; disabled slots are zeroed | Prevents hidden inputs or outputs that could sneak value in or out | Circuit |
+| **T8** Nullifier uniqueness | Each nullifier can only be inserted once | Prevents double-spending — even with a valid proof, you can't spend the same note twice | Chain (Light address tree) |
+| **T9** Shared anchor | All enabled inputs prove membership against the same Merkle root | Prevents mixing proofs from different states of the commitment tree | Circuit |
 
 ### Unshield (Withdraw)
 
-When withdrawing from the pool to a public address, the circuit proves everything needed to spend a note, plus public binding:
+Withdrawing from the pool to a public address requires the same spend checks as Transfer (T1–T4, T8–T9), plus:
 
-- **Merkle membership** — the spent note exists in the tree (same as transfer).
-- **Commitment re-derivation** — the prover knows the note's full plaintext.
-- **Nullifier derivation** — correctly derived from `nsk` (secret key, not public key).
-- **Ownership authorization** — full EC spend proof, same as transfer.
-- **Public withdrawal binding** — the note's amount and asset type match the public withdrawal parameters. This prevents withdrawing a different amount or token than what the note actually contains.
-- **Transaction binding** — locks the proof to the specific anchor, nullifier, withdrawal amount, recipient address, and asset. Notably, the recipient is encoded as 4×u64 limbs (not a single field element) to avoid collisions from field modular reduction of 32-byte public keys.
+| Check | What it does | Why it matters | Who enforces |
+|-------|-------------|----------------|--------------|
+| **U1** Public withdrawal binding | The note's amount and asset type match the public withdrawal parameters | Prevents withdrawing a different amount or token than what the note actually contains | Circuit |
+| **U2** Recipient binding via `tx_binding` | The recipient address is locked into the proof via `tx_binding`, encoded as 4×u64 limbs | Prevents recipient swaps after proof generation. The limb encoding avoids collisions from BN254 field modular reduction of 32-byte Solana pubkeys | Circuit + Chain (recomputes limbs) |
+| **U3** Transparent withdrawal | The chain executes the actual SPL token transfer to the recipient | Without this, the proof would be verified but no tokens would move | Chain |
 
-The chain recomputes the recipient limb encoding from the actual Solana address and rejects mismatches, then executes the SPL token transfer.
+### Cross-Cutting Protections
 
-### Cross-Circuit Protections
+- **Domain separation** — every hash uses a unique domain tag (10 tags total: note commitment, nullifier, asset ID, ciphertext, tx binding, nullifier nonce, Merkle node, IVK, auth secret, nullifier secret). Prevents cross-domain attacks where a hash from one context is reused in another.
+- **Field element validation** — all inputs must be valid BN254 field elements. Malformed values could bypass constraints.
+- **Merkle path depth** — fixed at 32 levels. Wrong depth could enable fake membership proofs.
+- **Context binding** — production deployments should add `protocol_version`, `chain_id`, and `program_id` to `tx_binding` to prevent cross-environment replay. (Not yet implemented in the reference implementation.)
 
-- **Domain separation** — every hash operation uses a unique domain tag (10 distinct tags for commitments, nullifiers, asset IDs, etc.). This prevents an attacker from taking a hash output from one context and reusing it in another.
-- **Field element validation** — all inputs must be valid field elements (< BN254 scalar field modulus). Malformed inputs could bypass constraints.
-- **Merkle path depth** — paths are fixed at 32 levels. A wrong depth could enable fake membership proofs.
+### Enforcement Summary
 
-### What the Chain Enforces (Not in ZK)
-
-Some critical checks happen outside the circuits:
-
-| Check | Why | Enforced by |
-|-------|-----|-------------|
-| **Nullifier uniqueness** | Prevents double-spending the same note | On-chain program (PDA or Light Protocol) |
-| **Anchor validity** | Ensures the Merkle root is recent and legitimate | On-chain program (ring buffer of recent roots) |
-| **Proof verification** | The ZK proof actually verifies against the correct verification key | On-chain UltraPlonk verifier |
-| **Ciphertext-commitment binding** | Decrypted note matches its commitment (griefing prevention) | Recipient client after decryption |
+| Layer | Responsibility |
+|-------|---------------|
+| **Circuit (ZK proof)** | Private statements: note knowledge, ownership, nullifier derivation, balance conservation, output integrity, transaction binding |
+| **Chain (Solana program)** | Public state transitions: anchor validity, nullifier uniqueness, proof verification, SPL token transfers, commitment tree appends |
+| **Client/Indexer** | Note discovery: ciphertext scanning, plaintext↔commitment verification, spentness filtering, ciphertext hash verification |
 
 ## Architecture
 
