@@ -55,6 +55,68 @@ Ownership is proven entirely in ZK (no external signatures). The spend proof dem
 
 Output ciphertexts are posted in a separate transaction (Tx A) and bound to the state transition (Tx B) via hash commitment (`ct_hash`). Ciphertexts are published for outputs only; input ciphertexts are never published (privacy property). See [`docs/design-decisions/ciphertext-da-and-binding.md`](docs/design-decisions/ciphertext-da-and-binding.md).
 
+## Circuit Security Checks
+
+Each circuit enforces a specific set of constraints inside ZK proofs to guarantee correctness and privacy. The on-chain program and client handle additional checks outside the circuits. For the full formal specification, see [`docs/circuit-security-requirements.md`](docs/circuit-security-requirements.md).
+
+### Shield (Deposit)
+
+When a user deposits tokens into the shielded pool, the circuit proves:
+
+- **Commitment integrity** — the published commitment is the correct hash of the note's fields (asset, amount, recipient, nonces, randomness). Without this, a prover could create a commitment that doesn't correspond to any real note, letting them later "spend" fabricated value.
+- **Amount range** — the deposit amount fits in 64 bits. This prevents arithmetic overflow tricks that could break balance checks later.
+- **Ciphertext hash binding** — the proof is tied to a specific encrypted note payload (non-zero `ct_hash`). This ensures the recipient can discover and decrypt the note.
+
+The chain separately verifies the actual SPL token transfer, derives the `asset_id` from the real mint address, and appends the commitment to the tree.
+
+### Transfer (Shielded N→M)
+
+The transfer circuit is the most complex, handling up to 3 inputs and 3 outputs in a single proof:
+
+- **Merkle membership** — each spent note's commitment exists in the commitment tree at the claimed root (`anchor`). This prevents spending notes that were never deposited.
+- **Commitment re-derivation** — the prover knows the full plaintext of each input note (not just the commitment hash). This proves actual knowledge of the note's contents.
+- **Nullifier derivation** — each nullifier is correctly derived from the owner's nullifier secret key (`nsk`), not the public nullifier key. This is critical: it means someone with only a FullViewingKey can see transactions but cannot spend funds.
+- **Ownership authorization** — a full elliptic-curve spend proof demonstrates that the prover holds the `spending_key` that derives the note's recipient address. This is the core "only the owner can spend" guarantee.
+- **Output commitment integrity** — each new output note's commitment is correctly formed, so recipients will be able to find and spend them.
+- **Amount range** — all input and output amounts fit in 64 bits, preventing overflow exploits.
+- **Balance conservation** — the sum of input amounts equals the sum of output amounts, and all notes use the same asset type. No value is created or destroyed.
+- **Output nonce derivation** — each output note's nullifier nonce is deterministically derived from the transaction binding and output index. This guarantees uniqueness without requiring external randomness.
+- **Transaction binding** — a binding hash locks together the anchor, nullifiers, and input/output counts. This prevents relayers or intermediaries from reordering or splicing parts of different transactions.
+- **Ciphertext hash binding** — enabled outputs have non-zero ciphertext hashes; disabled slots have zero. This ties each proof to its encrypted payloads.
+- **Count correctness and slot gating** — the declared input/output counts match the actual number of enabled slots, and disabled slots are properly zeroed. This prevents hidden inputs or outputs.
+
+The chain enforces anchor freshness, nullifier uniqueness (preventing double-spends), and proof verification.
+
+### Unshield (Withdraw)
+
+When withdrawing from the pool to a public address, the circuit proves everything needed to spend a note, plus public binding:
+
+- **Merkle membership** — the spent note exists in the tree (same as transfer).
+- **Commitment re-derivation** — the prover knows the note's full plaintext.
+- **Nullifier derivation** — correctly derived from `nsk` (secret key, not public key).
+- **Ownership authorization** — full EC spend proof, same as transfer.
+- **Public withdrawal binding** — the note's amount and asset type match the public withdrawal parameters. This prevents withdrawing a different amount or token than what the note actually contains.
+- **Transaction binding** — locks the proof to the specific anchor, nullifier, withdrawal amount, recipient address, and asset. Notably, the recipient is encoded as 4×u64 limbs (not a single field element) to avoid collisions from field modular reduction of 32-byte public keys.
+
+The chain recomputes the recipient limb encoding from the actual Solana address and rejects mismatches, then executes the SPL token transfer.
+
+### Cross-Circuit Protections
+
+- **Domain separation** — every hash operation uses a unique domain tag (10 distinct tags for commitments, nullifiers, asset IDs, etc.). This prevents an attacker from taking a hash output from one context and reusing it in another.
+- **Field element validation** — all inputs must be valid field elements (< BN254 scalar field modulus). Malformed inputs could bypass constraints.
+- **Merkle path depth** — paths are fixed at 32 levels. A wrong depth could enable fake membership proofs.
+
+### What the Chain Enforces (Not in ZK)
+
+Some critical checks happen outside the circuits:
+
+| Check | Why | Enforced by |
+|-------|-----|-------------|
+| **Nullifier uniqueness** | Prevents double-spending the same note | On-chain program (PDA or Light Protocol) |
+| **Anchor validity** | Ensures the Merkle root is recent and legitimate | On-chain program (ring buffer of recent roots) |
+| **Proof verification** | The ZK proof actually verifies against the correct verification key | On-chain UltraPlonk verifier |
+| **Ciphertext-commitment binding** | Decrypted note matches its commitment (griefing prevention) | Recipient client after decryption |
+
 ## Architecture
 
 ```text
